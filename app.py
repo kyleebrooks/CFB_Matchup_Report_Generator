@@ -12,7 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from flask_cors import CORS
 
 
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")  # set this to your site domain later
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
 try:
@@ -24,6 +24,9 @@ except ImportError:
 logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
+
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")  # set this to your site domain later
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
 # Load configuration from environment variables
 DB_HOST = os.getenv('DB_HOST', 'p3nlmysql149plsk.secureserver.net')
