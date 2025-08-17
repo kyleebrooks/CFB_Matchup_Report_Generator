@@ -9,6 +9,11 @@ import requests
 from flask import Flask, request, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from flask_cors import CORS
+
+
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")  # set this to your site domain later
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
 try:
     import markdown  # for converting report Markdown to HTML
