@@ -456,5 +456,5 @@ def get_report():
     return send_file(filepath, mimetype='application/pdf', as_attachment=True, download_name=filename)
 
 if __name__ == "__main__":
-    # Run the Flask development server (for production, use a WSGI server like Gunicorn)
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
