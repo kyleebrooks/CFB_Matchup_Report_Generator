@@ -11,7 +11,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask_cors import CORS
 
+# Create the Flask app first
+app = Flask(__name__)
 
+# CORS (set to your site domain in production, e.g., "https://yourdomain.com")
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
@@ -22,11 +25,6 @@ except ImportError:
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-
-app = Flask(__name__)
-
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")  # set this to your site domain later
-CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
 # Load configuration from environment variables
 DB_HOST = os.getenv('DB_HOST', 'p3nlmysql149plsk.secureserver.net')
