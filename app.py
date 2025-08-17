@@ -431,6 +431,7 @@ def generate_report():
         pdfkit_config = pdfkit.configuration(wkhtmltopdf=wkhtml_path)
     try:
         pdfkit.from_string(html_content, filepath, configuration=pdfkit_config)
+        cleanup_old_reports(home_short, away_short, filename)
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
