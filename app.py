@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timedelta
 import base64
 import logging
-
+import glob
 import pymysql
 import requests
 from flask import Flask, request, send_file, jsonify
@@ -38,6 +38,16 @@ API_KEY_ENV = os.getenv('SERVICE_API_KEY')         # API key for authenticating 
 # Ensure reports directory exists
 REPORTS_DIR = os.path.join(os.getcwd(), "reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
+
+def cleanup_old_reports(home_short, away_short, keep_filename):
+    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    for path in glob.glob(pattern):
+        if os.path.basename(path) != keep_filename:
+            try:
+                os.remove(path)
+            except Exception as e:
+                logging.warning(f"Could not delete old report {path}: {e}")
+
 
 # Helper: get a new database connection
 def get_db_connection():
