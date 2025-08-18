@@ -183,7 +183,7 @@ def scheduled_rotowire_job():
                 news_text = (entry.get('news_text') or '').strip()
                 source_name = (entry.get('source_name') or '').strip()
                 position = (entry.get('position') or '').strip()
-                analysis = (entry.get('analysis_text') or '').strip()
+                analysis_text = (entry.get('analysis_text') or '').strip()
 
                 cur.execute(
                     "SELECT 1 FROM rotowire WHERE player_name=%s AND headline=%s AND team_name=%s "
