@@ -296,13 +296,13 @@ def generate_report():
 
     # 6) Google CSE searches
     categories = {
-        "Team A injury updates":                 f'"{home_full}" football injury report',
-        "Team B injury updates":                 f'"{away_full}" football injury report',
-        "Team A roster Updates":                 f'"{home_full}" football roster news',
-        "Team B Roster Updates":                 f'"{away_full}" football roster news',
-        "Team A practice and Scrimmage updates": f'"{home_full}" football practice scrimmage report',
-        "Team B practice and scrimmage updates": f'"{away_full}" football practice scrimmage report',
-        "Matchup Analysis":                      f'"{home_full}" vs "{away_full}" football predictions analysis',
+        "Team A injury updates":                 f'Latest football injury news for the "{home_full}" team. Only the latest news associated with the team, no more than 14 days old.',
+        "Team B injury updates":                 f'Latest football injury news for the "{away_full}" team. Only the latest news associated with the team, no more than 14 days old.',
+        "Team A roster Updates":                 f'Latest football roster news for the "{home_full}" team. Only the latest news associated with the team, no more than 14 days old. Only current players.',
+        "Team B Roster Updates":                 f'Latest football roster news for the "{away_full}" team. Only the latest news associated with the team, no more than 14 days old. Only current players.',
+        "Team A practice and Scrimmage updates": f'Latest "{home_full}" football practice and scrimmage report. no more than 7 days old.',
+        "Team B practice and scrimmage updates": f'Latest "{away_full}" football practice and scrimmage report. no more than 7 days old.',
+        "Matchup Analysis":                      f'The upcoming "{home_full}" vs "{away_full}" matchup. The latest expert football predictions and analysis.',
     }
 
     search_results: dict[str, list[dict[str, str]]] = {}
