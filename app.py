@@ -188,14 +188,14 @@ def scheduled_rotowire_job():
                 cur.execute(
                     "SELECT 1 FROM rotowire WHERE player_name=%s AND headline=%s AND team_name=%s "
                     "AND date_text=%s AND news_text=%s AND source_name=%s AND position=%s AND analysis_text=%s LIMIT 1",
-                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis)
+                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
                 )
                 if cur.fetchone():
                     continue
                 cur.execute(
                     "INSERT INTO rotowire (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text) "
                     "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis)
+                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
                 )
                 inserted += cur.rowcount or 0
         logging.info(f"Rotowire scrape completed. Inserted {inserted} new records.")
