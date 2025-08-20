@@ -568,15 +568,31 @@ def get_report():
     if not home_short or not away_short:
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    today = datetime.now()
-    date_str = format_friendly_date(today)
-    filename = f"{home_short}_{away_short}_{date_str}.pdf"
-    filepath = os.path.join(REPORTS_DIR, filename)
-
-    if not os.path.isfile(filepath):
+    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    files = glob.glob(pattern)
+    if not files:
         return jsonify({"error": "Report not found. Please generate it first."}), 404
 
+    filepath = max(files, key=os.path.getmtime)
+    filename = os.path.basename(filepath)
+
     return send_file(filepath, mimetype='application/pdf', as_attachment=True, download_name=filename)
+
+
+@app.route('/has-report', methods=['GET'])
+def has_report():
+    api_key_param = request.args.get('api_key')
+    if SERVICE_API_KEY and api_key_param != SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    home_short = request.args.get('home_team')
+    away_short = request.args.get('away_team')
+    if not home_short or not away_short:
+        return jsonify({"error": "Missing team name parameters"}), 400
+
+    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    files = glob.glob(pattern)
+    return jsonify({"exists": bool(files)}), 200
 
 
 if __name__ == "__main__":
