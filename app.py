@@ -282,10 +282,9 @@ def generate_report():
     cfbd_api_key = get_api_key('CFD') or get_api_key('CFBD') or os.getenv('CFBD_API_KEY')
     search_api_key = get_api_key('search') or os.getenv('GOOGLE_SEARCH_API_KEY')
     google_cx = get_api_key('google_cx') or os.getenv('GOOGLE_CX')
-    bright_key = get_api_key('bright')
     gemini_api_key = get_api_key('google') or os.getenv('GOOGLE_API_KEY')
 
-    if not all([cfbd_api_key, search_api_key, google_cx, bright_key, gemini_api_key]):
+    if not all([cfbd_api_key, search_api_key, google_cx, gemini_api_key]):
         return jsonify({"error": "Missing required API keys"}), 500
 
     # 5) CFBD stats (external calls; no DB connection held)
@@ -326,7 +325,7 @@ def generate_report():
 
         fetchedData[label] = {"teamA": dataA, "teamB": dataB}
 
-    # 6) Google CSE searches
+    # 6) Google CSE searches (unchanged definitions, but we'll cap to 20 URLs overall)
     categories = {
         "Team A injury updates":                 f'Latest football injury news for the "{home_full}" team. Only the latest news associated with the team, no more than 14 days old.',
         "Team B injury updates":                 f'Latest football injury news for the "{away_full}" team. Only the latest news associated with the team, no more than 14 days old.',
@@ -338,7 +337,7 @@ def generate_report():
     }
 
     search_results: dict[str, list[dict[str, str]]] = {}
-    all_links: list[str] = []
+    raw_links: list[tuple[str, str]] = []  # (category, url)
 
     for label, query in categories.items():
         params = {
@@ -361,68 +360,50 @@ def generate_report():
             title = item.get("title", "")
             snippet = item.get("snippet", "")
             display = item.get("displayLink", "")
-            cleaned.append({
-                "title": title,
-                "snippet": snippet,
-                "url": link,
-                "displayLink": display,
-            })
-            if link:
-                all_links.append(link)
+            if not link:
+                continue
+            cleaned.append({"title": title, "snippet": snippet, "url": link, "displayLink": display, "category": label})
+            raw_links.append((label, link))
         search_results[label] = cleaned
 
-    # 7) Bright Data article scraping
-    scraped_map: dict[str, dict] = {}
-    if all_links:
-        payload = [{"url": u} for u in all_links]
-        trigger_endpoint = "https://api.brightdata.com/dca/trigger?collector=c_medq28351ctcsbh6vu"
-        headers_bd = {"Authorization": f"Bearer {bright_key}", "Content-Type": "application/json"}
-        trig_resp = requests.post(trigger_endpoint, json=payload, headers=headers_bd, timeout=45)
-        if trig_resp.status_code == 200:
-            cid = None
-            try:
-                cid = trig_resp.json().get("collection_id")
-            except Exception:
-                pass
-            if cid:
-                dataset_endpoint = f"https://api.brightdata.com/dca/dataset?id={cid}"
-                deadline = time.time() + 120
-                while time.time() < deadline:
-                    ds_resp = requests.get(dataset_endpoint, headers={"Authorization": f"Bearer {bright_key}"}, timeout=30)
-                    if ds_resp.status_code == 200 and ds_resp.text.strip():
-                        try:
-                            data_items = ds_resp.json()
-                        except ValueError:
-                            lines = ds_resp.text.strip().splitlines()
-                            data_items = [json.loads(line) for line in lines if line.strip()]
-                        if isinstance(data_items, list) and len(data_items) >= len(all_links):
-                            for item in data_items:
-                                url = item.get('source_url') or item.get('url') or (item.get('input', {}).get('url') if item.get('input') else '')
-                                if not url:
-                                    continue
-                                text = item.get('article_text') or ""
-                                title = item.get('title') or ""
-                                published = item.get('published_time') or item.get('published') or ""
-                                scraped_map[url] = {"ok": True, "text": text, "title": title, "published": published}
-                            break
-                    time.sleep(1)
-        else:
-            logging.error(f"Bright Data trigger failed: {trig_resp.status_code}, {trig_resp.text}")
+    # Cap to <= 20 total URLs for URL context (preferring Matchup Analysis first, then others)
+    def dedupe_ordered(pairs: list[tuple[str, str]]):
+        seen = set()
+        out = []
+        for cat, u in pairs:
+            if u not in seen:
+                out.append((cat, u))
+                seen.add(u)
+        return out
 
-    # Merge search + scraped
+    # Preference order: Matchup first, then injuries/roster/practice buckets
+    priority = ["Matchup Analysis",
+                "Team A injury updates", "Team B injury updates",
+                "Team A roster Updates", "Team B Roster Updates",
+                "Team A practice and Scrimmage updates", "Team B practice and scrimmage updates"]
+
+    raw_links = [p for p in raw_links if p[0] in priority]
+    raw_links = sorted(raw_links, key=lambda p: priority.index(p[0]))
+    raw_links = dedupe_ordered(raw_links)
+
+    MAX_URLS = 20
+    urls_for_ai_pairs = raw_links[:MAX_URLS]
+    urls_for_ai = [u for _, u in urls_for_ai_pairs]
+
+    # 7) Build a compact article source list for the prompt (no scraping)
+    articles_struct = []
     for label, results in search_results.items():
-        articles = []
-        for res in results:
-            url = res["url"]
-            title = res["title"]
-            snippet = res["snippet"]
-            text = ""
-            if url in scraped_map and scraped_map[url].get("ok"):
-                text = scraped_map[url].get("text", "")
-                if scraped_map[url].get("title"):
-                    title = scraped_map[url]["title"]
-            articles.append({"title": title or "", "text": text if text else snippet})
-        fetchedData[label] = articles
+        for r in results:
+            if r["url"] in urls_for_ai:
+                articles_struct.append({
+                    "category": label,
+                    "title": r["title"],
+                    "url": r["url"],
+                    "snippet": r["snippet"],
+                })
+
+    # If you want to see what we'll ask Gemini to read:
+    fetchedData["Media Sources"] = articles_struct
 
     # 8) Injury news (open a FRESH DB connection now; the previous one may have timed out)
     injury_news: list[dict] = []
@@ -471,20 +452,37 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not retrieve team logos from CFBD: {e}")
 
-    # 10) Build LLM prompt & call Gemini
+    # 10) Build LLM prompt & call Gemini (URL context enabled)
     prompt_intro = (
         f"You are a top-tier, seasoned sports analyst. Using the provided CFD statistics and news articles to craft a full-length matchup report for {home_full} vs {away_full} in {year}. You speak in the voice and style of a seasoned sports analyst, handicapper, and writer. "
+        f"You have the url_context tool enabled—READ the linked articles directly and prefer their actual content over snippets. "
         f"Create a dedicated section for each of the following data groups: SP Ratings, ELO Ratings, FPI Ratings, Advanced Team Stats, Returning Production, Team Talent, Team PPA, Player PPA, Team Season Stats, Adjusted Team Metrics, {home_full} injury updates, {away_full} injury updates, {home_full} roster Updates, {away_full} Roster Updates, {home_full} practice and Scrimmage updates, {away_full} practice and scrimmage updates, {home_full} vs {away_full} Media Matchup Analysis (This is a summary on the the matchup news articles provided). "
         f"For every section list key statistics followed by at least two in-depth paragraphs analyzing how those numbers impact the game. Use the confident, authoritative tone of a national sports analyst. The final section should be called Conclusion, and deliver your overall verdict and a projected point spread based on all data that you have. Remember this is your estimated point spread, and you will be evaluated based on how close you are to the actual final score. \n\n"
         f"Note: When reviewing the The injury News, you should only include items within the Last 7 Days and data from the 2 teams in teh matchup. Do not summarize or include any data that is not specific to this matchup. Only use news items relevant to {home_full} or {away_full} when writing the sections. Do not include or take into account content about former players, or news stories not relevant to the two current teams that would/could impact performance. The purpose of this report is to give the reader the best and most relevant information needed to make a decision on the outcome of this specific game. In addition, if there is no information or statistics provided for one of the specified sections, keep the section header, but only note to the reader that their was no data available for that section. Do not write any more details that that notification. \n\n"
         f"Data: "
     )
-    prompt = prompt_intro + json.dumps(fetchedData)
+
+    # List the URLs explicitly (this is what URL context will fetch)
+    url_list_text = "Sources to read (max 20):\n" + "\n".join(f"- {a['category']}: {a['url']}" for a in articles_struct)
+
+    # Keep your existing data bundle (stats + injuries + our media source list)
+    data_blob = json.dumps(fetchedData)
+
+    prompt = prompt_intro + url_list_text + "\n\n" + data_blob + "\n\n" + (
+        "Citations rule: when you reference specific claims from an article, add an inline marker like [1], [2], etc., "
+        "and include a short SOURCES section at the end mapping [n] -> URL."
+    )
 
     gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7},
+        # >>> Enable URL context <<<
+        "tools": [
+            {"url_context": {}}
+            # Optionally also allow search grounding:
+            # , {"google_search": {}}
+        ],
     }
     headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_api_key}
 
@@ -495,6 +493,9 @@ def generate_report():
     try:
         result = ai_resp.json()
         report_text = result['candidates'][0]['content']['parts'][0]['text']
+        # For debugging/auditing, you can log which URLs the tool actually retrieved:
+        used_url_meta = result['candidates'][0].get('url_context_metadata', {})
+        logging.info(f"URL context used: {used_url_meta}")
     except Exception:
         return jsonify({"error": "Unexpected response format from Gemini", "response": ai_resp.text[:800]}), 502
 
