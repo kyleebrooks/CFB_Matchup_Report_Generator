@@ -1,5 +1,7 @@
 <?php
 include 'common.inc';
+// Allow this script to run as long as needed without timing out
+set_time_limit(0);
 if (!SessionStarted())
     $ses = 'true';
 else
@@ -350,8 +352,16 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
         api_key: API_KEY,
         home_full, away_full, home_short, away_short
       })
-    }).catch(() => {
-      setStatus('Network error starting report generation.', true);
+    })
+    .then(resp => {
+      // If the request was received, confirm to the user that generation has started
+      if (resp && resp.ok) {
+        setStatus('Report generation started. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
+      }
+    })
+    .catch(err => {
+      // Keep the original waiting message if the request fails and log for debugging
+      console.log('Network error starting report generation.', err);
     });
 
     // Re-enable the button shortly since we do not wait for the report to finish generating.
