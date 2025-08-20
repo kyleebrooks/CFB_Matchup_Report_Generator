@@ -13,6 +13,7 @@ from flask import Flask, request, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 
 # ---------------------------
 # App & CORS
@@ -141,6 +142,8 @@ def get_api_key(name: str) -> str | None:
 # JSON error handler for easier debugging
 @app.errorhandler(Exception)
 def handle_any_error(e):
+    if isinstance(e, HTTPException):
+        return e
     logging.exception("Unhandled error")
     return jsonify({
         "error": "Server error",
@@ -250,6 +253,11 @@ sched.start()
 @app.route('/ping')
 def ping():
     return jsonify({"ok": True, "time": datetime.utcnow().isoformat() + "Z"})
+
+
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({"status": "CFB Matchup Report Generator running"}), 200
 
 
 @app.route('/generate-report', methods=['POST'])
