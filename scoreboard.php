@@ -334,9 +334,38 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   function setStatus(msg, isErr=false) {
     $st.textContent = msg;
     $st.style.color = isErr ? '#c00' : '#0a0';
+    $st.style.backgroundColor = (!isErr && msg) ? '#cfc' : 'transparent';
+    $st.style.padding = (!isErr && msg) ? '2px 4px' : '0';
   }
 
-  function generateReport() {
+  async function checkReportExists(showStatus = false) {
+    const home_short = $gen.dataset.homeshort;
+    const away_short = $gen.dataset.awayshort;
+
+    try {
+      const resp = await fetch(`${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.exists) {
+          if (showStatus) setStatus('Available!');
+          return true;
+        }
+      }
+    } catch (err) {
+      console.log('Error checking report availability', err);
+    }
+
+    if (showStatus) setStatus('');
+    return false;
+  }
+
+  async function generateReport() {
+    const exists = await checkReportExists(false);
+    if (exists) {
+      const proceed = confirm('A report is already available for this game. Do you want to regenerate a newer one?');
+      if (!proceed) return;
+    }
+
     const home_full  = $gen.dataset.homefull;
     const away_full  = $gen.dataset.awayfull;
     const home_short = $gen.dataset.homeshort;
@@ -379,6 +408,9 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     // Simple, reliable download via navigation
     window.location.href = url;
   }
+
+  // Initial availability check on load
+  checkReportExists(true);
 
   $gen.addEventListener('click', generateReport);
   $dl.addEventListener('click', downloadReport);
