@@ -277,14 +277,19 @@ def generate_report():
     if not all([home_full, away_full, home_short, away_short]):
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    # 3) File path (today)
+    # 3) Check for existing reports regardless of date unless forced
+    force_regen = bool(data.get('force'))
+    pattern = os.path.join(REPORTS_DIR, glob.escape(f"{home_short}_{away_short}_*.pdf"))
+    existing_files = glob.glob(pattern)
+    if existing_files and not force_regen:
+        latest = max(existing_files, key=os.path.getmtime)
+        return jsonify({"message": "Report already exists", "filename": os.path.basename(latest)}), 200
+
+    # Filename for new report (today)
     today = datetime.now()
     date_str = format_friendly_date(today)
     filename = f"{home_short}_{away_short}_{date_str}.pdf"
     filepath = os.path.join(REPORTS_DIR, filename)
-
-    if os.path.isfile(filepath):
-        return jsonify({"message": "Report already exists", "filename": filename}), 200
 
     # 4) Load API keys (short-lived DB connection)
     cfbd_api_key = get_api_key('CFD') or get_api_key('CFBD') or os.getenv('CFBD_API_KEY')

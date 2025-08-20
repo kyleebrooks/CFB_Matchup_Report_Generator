@@ -326,6 +326,7 @@ if (!empty($otherGames)) {
 const API_BASE = "<?= $AFPLNA_API_BASE ?>";
 const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
 
+window.addEventListener('DOMContentLoaded', () => {
 document.querySelectorAll('.ai-controls').forEach(ctrl => {
   const $gen = ctrl.querySelector('.btn-generate');
   const $dl  = ctrl.querySelector('.btn-download');
@@ -361,9 +362,11 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
 
   async function generateReport() {
     const exists = await checkReportExists(false);
+    let force = false;
     if (exists) {
       const proceed = confirm('A report is already available for this game. Do you want to regenerate a newer one?');
       if (!proceed) return;
+      force = true;
     }
 
     const home_full  = $gen.dataset.homefull;
@@ -379,21 +382,18 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         api_key: API_KEY,
-        home_full, away_full, home_short, away_short
+        home_full, away_full, home_short, away_short, force
       })
     })
     .then(resp => {
-      // If the request was received, confirm to the user that generation has started
       if (resp && resp.ok) {
         setStatus('Report generation started. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
       }
     })
     .catch(err => {
-      // Keep the original waiting message if the request fails and log for debugging
       console.log('Network error starting report generation.', err);
     });
 
-    // Re-enable the button shortly since we do not wait for the report to finish generating.
     setTimeout(() => { $gen.disabled = false; }, 1000);
   }
 
@@ -414,6 +414,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
 
   $gen.addEventListener('click', generateReport);
   $dl.addEventListener('click', downloadReport);
+});
 });
 </script>
 </body>
