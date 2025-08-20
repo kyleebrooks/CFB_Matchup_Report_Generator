@@ -1,0 +1,107 @@
+Where the vars live
+
+Your service reads vars from: /etc/afplna.env
+(loaded by the systemd unit via EnvironmentFile=/etc/afplna.env)
+
+Option A — Edit the file (most straightforward)
+
+Open the env file:
+
+sudo nano /etc/afplna.env
+
+
+Add new vars (example for a 2nd SQL env):
+
+# Secondary SQL env
+SECONDARY_DB_HOST=db2.example.com
+SECONDARY_DB_USER=afplna_ro
+SECONDARY_DB_NAME=kdogg4207_secondary
+SECONDARY_DB_PASSWORD='Super$ecret!With#Symbols='
+
+
+Tips:
+
+No spaces around =.
+
+If the value has spaces or special chars (#, ;, =), wrap it in single quotes.
+
+Lock permissions (if needed):
+
+sudo chmod 600 /etc/afplna.env
+sudo chown root:root /etc/afplna.env
+sudo sed -i 's/\r$//' /etc/afplna.env   # strip accidental Windows CRLFs
+
+
+Restart the app to load changes:
+
+sudo systemctl restart afplna
+sudo systemctl status afplna --no-pager -l
+
+Option B — One-liners (add or update without opening an editor)
+
+Update if present, or append if missing (replace VALUE):
+
+VAR=SECONDARY_DB_HOST VALUE='db2.example.com'; \
+  if grep -q "^$VAR=" /etc/afplna.env; then \
+    sudo sed -i "s|^$VAR=.*|$VAR=$VALUE|" /etc/afplna.env; \
+  else \
+    echo "$VAR=$VALUE" | sudo tee -a /etc/afplna.env >/dev/null; \
+  fi
+sudo systemctl restart afplna
+
+
+Repeat for each var (SECONDARY_DB_USER, SECONDARY_DB_NAME, SECONDARY_DB_PASSWORD, …).
+
+Verify the value (quick checks)
+
+Show what’s in the file:
+
+grep -E 'SECONDARY_DB_(HOST|USER|NAME|PASSWORD)=' /etc/afplna.env
+
+
+Source the file and echo a value (doesn’t require changing your app):
+
+sudo bash -c 'source /etc/afplna.env; echo "$SECONDARY_DB_HOST"'
+
+
+App logs after restart (look for your app’s own startup messages):
+
+journalctl -u afplna -n 100 --no-pager -o cat
+
+Don’t forget: update the app to use the new var(s)
+
+Adding a var won’t change behavior unless the code reads it. Example pattern:
+
+# app.py
+import os
+DB_HOST = os.getenv('DB_HOST', 'p3nlmysql149plsk.secureserver.net')
+DB_USER = os.getenv('DB_USER', 'kdogg4207')
+DB_NAME = os.getenv('DB_NAME', 'kdogg4207')
+DB_PASSWORD = os.getenv('DB_PASSWORD')
+
+# New secondary env (fallbacks to primary if not set)
+SECONDARY_DB_HOST = os.getenv('SECONDARY_DB_HOST', DB_HOST)
+SECONDARY_DB_USER = os.getenv('SECONDARY_DB_USER', DB_USER)
+SECONDARY_DB_NAME = os.getenv('SECONDARY_DB_NAME', DB_NAME)
+SECONDARY_DB_PASSWORD = os.getenv('SECONDARY_DB_PASSWORD', DB_PASSWORD)
+
+
+Then create a connection using those new values where needed.
+
+After code changes:
+
+# if requirements changed
+source /opt/afplna/venv/bin/activate && pip install -r /opt/afplna/requirements.txt
+sudo systemctl restart afplna
+
+(Optional) Temporary env (testing only)
+
+Sets a var just for the service manager until next reboot/daemon-reload:
+
+sudo systemctl set-environment SECONDARY_DB_HOST='db2.example.com'
+sudo systemctl restart afplna
+
+
+Prefer the env file for persistent configuration.
+
+That’s it—add/edit the line(s) in /etc/afplna.env, restart the service, and (if needed) adjust the app to read the new variable.
