@@ -37,7 +37,7 @@ DB_NAME = os.getenv('DB_NAME', 'kdogg4207')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY')
 WKHTMLTOPDF_PATH = os.getenv('WKHTMLTOPDF_PATH')  # /usr/bin/wkhtmltopdf
-# Local Rotowire DB path
+# Local Rotowire DB path; defaults to 'rotowire.db' in the project root
 ROTOWIRE_DB_PATH = os.getenv('ROTOWIRE_DB_PATH', os.path.join(os.getcwd(), 'rotowire.db'))
 
 # ---------------------------
