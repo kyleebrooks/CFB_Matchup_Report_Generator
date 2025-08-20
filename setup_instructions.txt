@@ -1,0 +1,458 @@
+AFPLNA AI Report Service — Full Setup on DigitalOcean
+
+This guide bootstraps a brand-new Ubuntu Droplet and deploys the Flask/Gunicorn/Nginx service that generates and serves matchup PDFs, runs scheduled Rotowire updates, and exposes the /generate-report and /get-report endpoints.
+
+Contents
+
+Prerequisites
+
+1) Create Droplet
+
+2) First login & user
+
+3) System updates, firewall, timezone
+
+4) Install system packages
+
+5) Directory layout
+
+6) Get the code
+
+7) Python venv & dependencies
+
+8) Environment variables
+
+9) Systemd service (Gunicorn)
+
+10) Nginx reverse proxy
+
+11) HTTPS (optional, recommended)
+
+12) CORS
+
+13) Smoke tests
+
+14) Frontend integration
+
+15) Scheduler notes
+
+16) Logs & troubleshooting
+
+17) Updating deployments
+
+18) Backup & restore
+
+Appendix A: requirements.txt
+
+Appendix B: systemd unit
+
+Appendix C: Nginx server block
+
+Prerequisites
+
+DigitalOcean account.
+
+Domain (optional, for HTTPS).
+
+GitHub repo access.
+
+Your MySQL (GoDaddy) DB credentials for user/database kdogg4207.
+
+1) Create Droplet
+
+DigitalOcean → Create → Droplets
+
+Image: Ubuntu 22.04 LTS
+
+Size: 2 vCPU / 4 GB RAM (or larger)
+
+Datacenter: near you
+
+Auth: SSH key or strong root password
+
+Create → note the public IP.
+
+2) First login & user
+ssh root@YOUR_DROPLET_IP
+# enter password if you chose password auth
+adduser deploy
+usermod -aG sudo deploy
+
+
+Open a second terminal to verify:
+
+ssh deploy@YOUR_DROPLET_IP
+
+
+Lock down root SSH (after deploy user works):
+
+sudo sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+
+3) System updates, firewall, timezone
+sudo apt update && sudo apt -y upgrade
+sudo timedatectl set-timezone America/New_York
+sudo ufw allow OpenSSH
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw --force enable
+
+4) Install system packages
+sudo apt -y install python3-venv python3-pip build-essential \
+                    wkhtmltopdf nginx git mysql-client
+
+
+wkhtmltopdf is required by pdfkit to render PDFs.
+
+5) Directory layout
+
+Runtime: /opt/afplna (runs the app, holds venv + reports)
+
+Source (git): /opt/afplna_src (clean git checkout, rsync to runtime)
+
+sudo mkdir -p /opt/afplna/reports
+sudo mkdir -p /opt/afplna_src
+sudo chown -R deploy:deploy /opt/afplna /opt/afplna_src
+
+6) Get the code
+
+Option A (HTTPS):
+
+sudo -u deploy -H git clone https://github.com/OWNER/REPO.git /opt/afplna_src
+
+
+Option B (SSH; recommended for private repos):
+
+sudo -u deploy -H ssh-keygen -t ed25519 -C "deploy@server" -f /home/deploy/.ssh/id_ed25519 -N ""
+sudo -u deploy -H bash -lc 'cat /home/deploy/.ssh/id_ed25519.pub'
+# paste into GitHub → Settings → SSH and GPG keys → New SSH key
+sudo -u deploy -H git clone git@github.com:OWNER/REPO.git /opt/afplna_src
+
+
+Deploy to runtime:
+
+sudo rsync -a --delete \
+  --exclude 'venv/' --exclude 'reports/' --exclude '.git/' \
+  /opt/afplna_src/ /opt/afplna/
+sudo chown -R deploy:www-data /opt/afplna
+
+7) Python venv & dependencies
+cd /opt/afplna
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+# create requirements.txt if not present; see Appendix A
+pip install -r requirements.txt
+which wkhtmltopdf   # should output /usr/bin/wkhtmltopdf
+
+8) Environment variables
+
+Create /etc/afplna.env:
+
+sudo tee /etc/afplna.env >/dev/null << 'EOF'
+# API auth for clients (what your frontend sends)
+SERVICE_API_KEY=REPLACE_WITH_A_STRONG_RANDOM_STRING
+
+# MySQL (GoDaddy) connection for kdogg4207
+DB_HOST=p3nlmysql149plsk.secureserver.net
+DB_USER=kdogg4207
+DB_NAME=kdogg4207
+DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
+
+# CORS: lock later to your site domain (e.g., https://afplna.yourdomain.com)
+ALLOWED_ORIGIN=*
+
+# Optional if keys are not stored in DB
+# CFBD_API_KEY=
+# GOOGLE_SEARCH_API_KEY=
+# GOOGLE_CX=
+# GOOGLE_API_KEY=   # Gemini
+# WKHTMLTOPDF_PATH=/usr/bin/wkhtmltopdf
+EOF
+
+sudo chmod 600 /etc/afplna.env
+sudo chown root:root /etc/afplna.env
+sudo sed -i 's/\r$//' /etc/afplna.env
+
+9) Systemd service (Gunicorn)
+
+Important: use 1 worker so APScheduler jobs don’t double-fire.
+
+Create unit:
+
+sudo tee /etc/systemd/system/afplna.service >/dev/null << 'EOF'
+[Unit]
+Description=AFPLNA Flask service (Gunicorn)
+After=network.target
+
+[Service]
+User=deploy
+Group=www-data
+WorkingDirectory=/opt/afplna
+EnvironmentFile=/etc/afplna.env
+ExecStart=/opt/afplna/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
+Restart=always
+RestartSec=3
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now afplna
+sudo systemctl status afplna --no-pager -l
+
+10) Nginx reverse proxy
+
+Create server block:
+
+sudo tee /etc/nginx/sites-available/afplna >/dev/null << 'EOF'
+server {
+    listen 80;
+    server_name _;
+
+    proxy_read_timeout 600s;
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host               $host;
+        proxy_set_header X-Real-IP          $remote_addr;
+        proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto  $scheme;
+    }
+}
+EOF
+
+sudo ln -s /etc/nginx/sites-available/afplna /etc/nginx/sites-enabled/afplna
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t
+sudo systemctl reload nginx
+
+11) HTTPS (optional, recommended)
+
+Point DNS of api.yourdomain.com → Droplet IP, then:
+
+sudo sed -i 's/server_name _;/server_name api.yourdomain.com;/' /etc/nginx/sites-available/afplna
+sudo nginx -t && sudo systemctl reload nginx
+sudo apt -y install certbot python3-certbot-nginx
+sudo certbot --nginx -d api.yourdomain.com
+
+12) CORS
+
+Install and enable:
+
+source /opt/afplna/venv/bin/activate
+pip install Flask-Cors~=4.0
+
+
+In app.py, after app = Flask(__name__):
+
+from flask_cors import CORS
+import os
+ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
+CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
+
+
+Lock ALLOWED_ORIGIN to your site later for security.
+
+13) Smoke tests
+
+From the Droplet:
+
+# Nginx → Gunicorn alive?
+curl -I http://localhost/
+
+# Generate (replace names and SERVICE_API_KEY)
+curl -sS -X POST http://localhost/generate-report \
+ -H 'Content-Type: application/json' \
+ -d '{"api_key":"YOUR_API_KEY","home_full":"Georgia Bulldogs","away_full":"Marshall Thundering Herd","home_short":"Georgia","away_short":"Marshall"}' | jq
+
+# Download
+curl -L -o report.pdf "http://localhost/get-report?api_key=YOUR_API_KEY&home_team=Georgia&away_team=Marshall"
+
+14) Frontend integration
+
+On your PHP page (e.g., scoreboard.php):
+
+Add Generate → POST to /generate-report.
+
+Add Download → GET /get-report?api_key=...&home_team=...&away_team=....
+
+Show a spinner during generate (can take 60–120s).
+
+If generate responds “Report already exists”, just enable Download.
+
+(We already gave you drop-in PHP/JS snippets earlier. Reuse those, set API_BASE and API_KEY accordingly.)
+
+15) Scheduler notes
+
+APScheduler triggers the Rotowire/Bright collector at 9:00 and 18:00 (America/New_York) and upserts into the rotowire table.
+
+Keep Gunicorn workers at 1 in the unit to avoid duplicate runs.
+
+Optional: add a debug route to trigger the job manually (remove after testing).
+
+16) Logs & troubleshooting
+# Live app logs
+journalctl -fu afplna -o cat
+
+# Recent errors
+journalctl -u afplna -n 200 --no-pager -o cat
+
+# Nginx logs
+tail -f /var/log/nginx/error.log
+tail -f /var/log/nginx/access.log
+
+
+Common issues:
+
+Env file missing → ensure /etc/afplna.env exists and is referenced in unit.
+
+Port 5000 in use → fuser -k 5000/tcp.
+
+Gunicorn missing → install via requirements.
+
+Module name mismatch → app.py must expose app; else change app:app to <module>:app.
+
+wkhtmltopdf not found → install or set WKHTMLTOPDF_PATH.
+
+DB access → whitelist Droplet IP on DB host; test with mysql -h ... -u ... -p.
+
+17) Updating deployments
+
+Recommended flow (source → runtime):
+
+ssh deploy@YOUR_DROPLET_IP
+
+# pull latest in source
+cd /opt/afplna_src
+git pull --ff-only
+
+# deploy to runtime
+sudo rsync -a --delete --exclude 'venv/' --exclude 'reports/' --exclude '.git/' \
+  /opt/afplna_src/ /opt/afplna/
+
+# update deps if needed
+source /opt/afplna/venv/bin/activate
+pip install -r /opt/afplna/requirements.txt
+
+# restart
+sudo systemctl restart afplna
+sudo systemctl status afplna --no-pager -l
+
+
+One-liner helper (optional):
+
+sudo tee /usr/local/bin/deploy_afplna >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cd /opt/afplna_src
+git pull --ff-only
+sudo rsync -a --delete --exclude 'venv/' --exclude 'reports/' --exclude '.git/' . /opt/afplna/
+source /opt/afplna/venv/bin/activate
+pip install -r /opt/afplna/requirements.txt
+sudo systemctl restart afplna
+sudo systemctl status afplna --no-pager -l
+EOF
+sudo chmod +x /usr/local/bin/deploy_afplna
+# usage:
+sudo /usr/local/bin/deploy_afplna
+
+18) Backup & restore
+
+Reports: /opt/afplna/reports — rsync to DO Spaces/S3 if needed.
+
+Configs: /etc/afplna.env, /etc/systemd/system/afplna.service, Nginx site file.
+
+Snapshots: take DO Droplet snapshots periodically.
+
+Appendix A: requirements.txt
+Flask~=3.0
+Flask-Cors~=4.0
+requests~=2.32
+PyMySQL~=1.1
+APScheduler~=3.10
+Markdown~=3.6
+pdfkit~=1.0
+gunicorn~=22.0
+
+
+System package required: wkhtmltopdf.
+
+Appendix B: systemd unit
+
+/etc/systemd/system/afplna.service
+
+[Unit]
+Description=AFPLNA Flask service (Gunicorn)
+After=network.target
+
+[Service]
+User=deploy
+Group=www-data
+WorkingDirectory=/opt/afplna
+EnvironmentFile=/etc/afplna.env
+ExecStart=/opt/afplna/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
+Restart=always
+RestartSec=3
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+
+Appendix C: Nginx server block
+
+/etc/nginx/sites-available/afplna
+
+server {
+    listen 80;
+    server_name _;  # replace with api.yourdomain.com when ready
+
+    proxy_read_timeout 600s;
+    client_max_body_size 16m;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host               $host;
+        proxy_set_header X-Real-IP          $remote_addr;
+        proxy_set_header X-Forwarded-For    $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto  $scheme;
+    }
+}
+
+
+Enable and reload:
+
+sudo ln -s /etc/nginx/sites-available/afplna /etc/nginx/sites-enabled/afplna
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+
+Rebuild Checklist (TL;DR)
+
+Create Droplet (Ubuntu 22.04).
+
+Add deploy user; disable root SSH.
+
+Update, set firewall & timezone.
+
+Install python3-venv, wkhtmltopdf, nginx, git, mysql-client.
+
+Create /opt/afplna and /opt/afplna_src.
+
+Clone repo → /opt/afplna_src, rsync → /opt/afplna.
+
+Create venv, pip install -r requirements.txt.
+
+Create /etc/afplna.env with SERVICE_API_KEY + DB vars.
+
+Install systemd unit; enable --now afplna.
+
+Add Nginx server block; reload (add HTTPS if using domain).
+
+Test: generate & download endpoints.
+
+Wire up frontend buttons to call API.
+
+That’s everything you need to fully recreate the environment end-to-end.
