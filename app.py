@@ -154,7 +154,7 @@ def scheduled_rotowire_job():
         bright_headers = {"Authorization": f"Bearer {bright_key}"}
 
         # Poll up to 90s
-        deadline = time.time() + 90
+        deadline = time.time() + 720
         rotowire_data = None
         while time.time() < deadline:
             resp = requests.get(dataset_url, headers=bright_headers, timeout=15)
