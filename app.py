@@ -7,6 +7,7 @@ import time
 import base64
 
 import pymysql
+import sqlite3
 import requests
 from flask import Flask, request, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -36,6 +37,8 @@ DB_NAME = os.getenv('DB_NAME', 'kdogg4207')
 DB_PASSWORD = os.getenv('DB_PASSWORD')
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY')
 WKHTMLTOPDF_PATH = os.getenv('WKHTMLTOPDF_PATH')  # /usr/bin/wkhtmltopdf
+# Local Rotowire DB path; defaults to 'rotowire.db' in the project root
+ROTOWIRE_DB_PATH = os.getenv('ROTOWIRE_DB_PATH', os.path.join(os.getcwd(), 'rotowire.db'))
 
 # ---------------------------
 # Helpers
@@ -87,6 +90,33 @@ def get_db_connection():
                 pass
     except Exception:
         pass
+    return conn
+
+
+def get_rotowire_db_connection():
+    """Return a connection to the local SQLite Rotowire database.
+    Ensures the table structure exists."""
+    db_dir = os.path.dirname(ROTOWIRE_DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(ROTOWIRE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    with conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rotowire (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_name TEXT,
+                headline TEXT,
+                team_name TEXT,
+                date_text TEXT,
+                news_text TEXT,
+                source_name TEXT,
+                position TEXT,
+                analysis_text TEXT
+            )
+            """
+        )
     return conn
 
 
@@ -171,33 +201,35 @@ def scheduled_rotowire_job():
             logging.error("Rotowire data not ready or empty.")
             return
 
-        # Insert rows; open DB only when needed
-        conn = get_db_connection()
+        # Insert rows into local SQLite DB
+        conn = get_rotowire_db_connection()
         inserted = 0
-        with conn.cursor() as cur:
-            for entry in rotowire_data:
-                player_name = (entry.get('player_name') or '').strip()
-                headline = (entry.get('headline') or '').strip()
-                team_name = (entry.get('team_name') or '').strip()
-                date_text = (entry.get('date_text') or '').strip()
-                news_text = (entry.get('news_text') or '').strip()
-                source_name = (entry.get('source_name') or '').strip()
-                position = (entry.get('position') or '').strip()
-                analysis_text = (entry.get('analysis_text') or '').strip()
+        cur = conn.cursor()
+        for entry in rotowire_data:
+            player_name = (entry.get('player_name') or '').strip()
+            headline = (entry.get('headline') or '').strip()
+            team_name = (entry.get('team_name') or '').strip()
+            date_text = (entry.get('date_text') or '').strip()
+            news_text = (entry.get('news_text') or '').strip()
+            source_name = (entry.get('source_name') or '').strip()
+            position = (entry.get('position') or '').strip()
+            analysis_text = (entry.get('analysis_text') or '').strip()
 
-                cur.execute(
-                    "SELECT 1 FROM rotowire WHERE player_name=%s AND headline=%s AND team_name=%s "
-                    "AND date_text=%s AND news_text=%s AND source_name=%s AND position=%s AND analysis_text=%s LIMIT 1",
-                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
-                )
-                if cur.fetchone():
-                    continue
-                cur.execute(
-                    "INSERT INTO rotowire (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
-                )
-                inserted += cur.rowcount or 0
+            cur.execute(
+                "SELECT 1 FROM rotowire WHERE player_name=? AND headline=? AND team_name=? "
+                "AND date_text=? AND news_text=? AND source_name=? AND position=? AND analysis_text=? LIMIT 1",
+                (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
+            )
+            if cur.fetchone():
+                continue
+            cur.execute(
+                "INSERT INTO rotowire (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
+            )
+            inserted += 1
+        conn.commit()
+        cur.close()
         logging.info(f"Rotowire scrape completed. Inserted {inserted} new records.")
     except Exception:
         logging.exception("Error during Rotowire scheduled job")
@@ -396,24 +428,16 @@ def generate_report():
     injury_news: list[dict] = []
     dates = [format_friendly_date(datetime.now() - timedelta(days=i)) for i in range(7)]
 
-    conn = get_db_connection()
+    conn = get_rotowire_db_connection()
     try:
-        with conn.cursor() as cur:
-            conn.ping(reconnect=True)
-            placeholders = ",".join(["%s"] * len(dates))
-            query = f"SELECT player_name, headline, team_name, date_text, news_text, analysis_text FROM rotowire WHERE date_text IN ({placeholders})"
-            # Retry once on transient disconnects
-            for attempt in range(2):
-                try:
-                    cur.execute(query, tuple(dates))
-                    rows = cur.fetchall() or []
-                    break
-                except pymysql.err.OperationalError as e:
-                    if attempt == 0 and e.args and e.args[0] in (2006, 2013):
-                        time.sleep(1)
-                        conn.ping(reconnect=True)
-                        continue
-                    raise
+        cur = conn.cursor()
+        placeholders = ",".join(["?"] * len(dates))
+        query = (
+            "SELECT player_name, headline, team_name, date_text, news_text, analysis_text "
+            f"FROM rotowire WHERE date_text IN ({placeholders})"
+        )
+        cur.execute(query, dates)
+        rows = cur.fetchall() or []
         for (player, headline, team, date_text, news_text, analysis_text) in rows:
             injury_news.append({
                 "team": team,
@@ -422,11 +446,9 @@ def generate_report():
                 "news": news_text,
                 "analysis": analysis_text,
             })
+        cur.close()
     finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
+        conn.close()
 
     fetchedData["Injury News Last 7 Days"] = injury_news
 
