@@ -125,15 +125,6 @@ $googleApiKey = '';
      mysql_free_result($googleResult);
  }
 
-// Where the AFPLNA Flask API lives and its API key
-$AFPLNA_API_BASE = 'http://143.198.20.72';
-$AFPLNA_API_KEY = '';
-$afplnaKeyResult = mysql_query("select `KEY` from API_KEYS where API_NAME='cfbmatchupreport' limit 1", $connection);
-if ($afplnaKeyResult && $row = mysql_fetch_array($afplnaKeyResult, MYSQL_ASSOC)) {
-    $AFPLNA_API_KEY = trim($row['KEY']);
-    mysql_free_result($afplnaKeyResult);
-}
-
 // Call the live scoreboard endpoint
 $url = "https://api.collegefootballdata.com/scoreboard?classification=fbs";
 $ch = curl_init($url);
@@ -325,9 +316,6 @@ if (!empty($otherGames)) {
 ?>
 </div>
 <script>
-const API_BASE = "<?= $AFPLNA_API_BASE ?>";
-const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
-
 window.addEventListener('DOMContentLoaded', () => {
 document.querySelectorAll('.ai-controls').forEach(ctrl => {
   const $gen = ctrl.querySelector('.btn-generate');
@@ -347,7 +335,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     const away_short = $gen.dataset.awayshort;
 
     try {
-      const chkUrl = `/api/has_report.php?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
+      const chkUrl = `/svc/has_report.php?home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
       const resp = await fetch(chkUrl, { cache: 'no-store' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
@@ -389,10 +377,10 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     setStatus('The AI report is being generated. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
     $gen.disabled = true;
 
-    fetch(`/api/generate_report.php`, {
+    fetch(`/svc/generate_report.php`, {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
-      body: new URLSearchParams({ api_key: API_KEY, home_full, away_full, home_short, away_short, force: String(force) })
+      body: new URLSearchParams({ home_full, away_full, home_short, away_short, force: String(force) })
     })
     .then(resp => {
       if (resp && resp.ok) {
@@ -414,7 +402,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
 
     // cache-buster to avoid any weird proxy caching
     const ts = Date.now();
-    const url = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
+    const url = `/svc/get_report.php?home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
 
     // Simple, reliable download via navigation
     window.location.href = url;

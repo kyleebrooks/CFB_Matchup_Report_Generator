@@ -91,6 +91,18 @@ REPORTS_DIR = os.getenv("REPORTS_DIR", os.path.join(BASE_DIR, "reports"))
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
+def _extract_api_key():
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:].strip()
+    x = request.headers.get("X-Api-Key")
+    if x:
+        return x.strip()
+    # Fallbacks for older clients:
+    body = request.get_json(silent=True) or {}
+    return request.args.get("api_key") or body.get("api_key") or request.form.get("api_key")
+
+
 def format_friendly_date(dt: datetime) -> str:
     """Return 'Month D, YYYY' without zero-padding the day, cross-platform."""
     try:
@@ -312,7 +324,7 @@ def generate_report():
         data = request.get_json(force=True, silent=True) or {}
 
     # 1) Auth
-    user_api_key = data.get('api_key')
+    user_api_key = _extract_api_key()
     if SERVICE_API_KEY and user_api_key != SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -609,7 +621,7 @@ def generate_report():
 
 @app.route('/get-report', methods=['GET'])
 def get_report():
-    api_key_param = request.args.get('api_key')
+    api_key_param = _extract_api_key()
     if SERVICE_API_KEY and api_key_param != SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -631,7 +643,7 @@ def get_report():
 
 @app.route('/has-report', methods=['GET'])
 def has_report():
-    api_key_param = request.args.get('api_key')
+    api_key_param = _extract_api_key()
     if SERVICE_API_KEY and api_key_param != SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
