@@ -276,7 +276,7 @@ if (!empty($featuredGames)) {
         }
         echo '<div class="ai-controls" style="margin:12px 0;">';
         echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
-        echo '<button type="button" class="btn-download">Download AI Report</button>';
+        echo '<button type="button" class="btn btn-download" disabled>Download AI Report</button>';
         echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
         echo '</div>';
         echo "</div>";
@@ -313,7 +313,7 @@ if (!empty($otherGames)) {
         echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
         echo '<div class="ai-controls" style="margin:12px 0;">';
         echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
-        echo '<button type="button" class="btn-download">Download AI Report</button>';
+        echo '<button type="button" class="btn btn-download" disabled>Download AI Report</button>';
         echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
         echo '</div>';
         echo "</div>";
@@ -342,8 +342,6 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   async function checkReportExists(showStatus = false) {
     const home_short = $gen.dataset.homeshort;
     const away_short = $gen.dataset.awayshort;
-    // add a cache-busting query param so the browser doesn't reuse stale
-    // results and incorrectly report that no file exists
     const ts = Date.now();
 
     try {
@@ -351,18 +349,29 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
         `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`,
         { cache: 'no-store' }
       );
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && data.exists) {
-          if (showStatus) setStatus('Available!');
-          return true;
-        }
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+
+      const exists = (data && data.exists === true);
+      if (exists) {
+        $dl.disabled = false;
+        $dl.title = 'Download AI Report';
+        if ($gen) $gen.textContent = 'Regenerate AI Report';
+        if (showStatus) setStatus('Available!');
+      } else {
+        $dl.disabled = true;
+        $dl.title = 'Report not ready yet';
+        if ($gen) $gen.textContent = 'Generate AI Report';
+        if (showStatus) setStatus('Not generated yet', true);
       }
+      return exists;
     } catch (err) {
       console.log('Error checking report availability', err);
     }
 
     if (showStatus) setStatus('');
+    $dl.disabled = true;
+    $dl.title = 'Report not ready yet';
     return false;
   }
 
@@ -394,6 +403,8 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     .then(resp => {
       if (resp && resp.ok) {
         setStatus('Report generation started. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
+        setTimeout(() => checkReportExists(true), 5000);
+        setTimeout(() => checkReportExists(true), 20000);
       }
     })
     .catch(err => {
@@ -404,6 +415,10 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   }
 
   function downloadReport() {
+    if ($dl.disabled) {
+      return;
+    }
+
     const home_short = $gen.dataset.homeshort;
     const away_short = $gen.dataset.awayshort;
 
