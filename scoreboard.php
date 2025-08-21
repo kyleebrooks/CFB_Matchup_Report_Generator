@@ -1,7 +1,5 @@
 <?php
 include 'common.inc';
-// Allow this script to run as long as needed without timing out
-set_time_limit(0);
 if (!SessionStarted())
     $ses = 'true';
 else
@@ -11,46 +9,38 @@ require_once 'api_keys.php';
 // Connect to the database
 $connection = mysql_connect("p3nlmysql149plsk.secureserver.net", "kdogg4207", "xMkM2941")
     or die("Could not connect to database server");
-mysql_select_db("kdogg4207", $connection)
-    or die("Problem with database on server");
+mysql_select_db("kdogg4207", $connection) or die("Problem with database on server");
 
+// Get current week and year
 $weekID = null;
-$year = null;
-
-$weekResult = mysql_query("select weekID from week where currentWeek='true'", $connection) or die('Query failed.');
+$year   = null;
+$weekResult = mysql_query("SELECT weekID FROM week WHERE currentWeek='true'", $connection) or die('Query failed.');
 if ($row = mysql_fetch_array($weekResult, MYSQL_ASSOC)) {
     $weekID = $row['weekID'];
 }
-
-$yearResult = mysql_query("select year from year where currentYear='true'", $connection) or die('Query failed.');
+$yearResult = mysql_query("SELECT year FROM year WHERE currentYear='true'", $connection) or die('Query failed.');
 if ($row = mysql_fetch_array($yearResult, MYSQL_ASSOC)) {
     $year = $row['year'];
 }
 
-// Load the logged in user's picks for this week
-// Match picks to the team_logo table by team name so we can use the logo's
-// team ID (which aligns with the CFBD API) when matching against the
-// scoreboard data.
+// Load the logged-in user's picks for this week (to highlight their chosen teams)
 $userPicks = array();
 if (isset($_SESSION['username'])) {
     $username = $_SESSION['username'];
-    $memberResult = mysql_query("select memberid from member where username='$username' limit 1", $connection) or die('Query failed.');
+    $memberResult = mysql_query("SELECT memberid FROM member WHERE username='$username' LIMIT 1", $connection) or die('Query failed.');
     if ($row = mysql_fetch_array($memberResult, MYSQL_ASSOC)) {
         $memberId = $row['memberid'];
         mysql_free_result($memberResult);
-        // Retrieve the CFBD team ID (via team_logo.id) and the normalized team name
-        // for each pick. Some teams may not have an entry in the team_logo table,
-        // so store both identifiers to improve matching later.
-        $pickQuery = "select tl.id as logoId, lower(trim(t.teamname)) as teamName from pick p "
-                   . "join team t on p.teamID = t.teamID "
-                   . "left join team_logo tl on lower(trim(t.teamname)) = lower(trim(tl.team)) "
-                   . "where p.memberID='$memberId' and p.weekID='$weekID' and p.yearID='$year'";
+        $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName 
+                      FROM pick p 
+                      JOIN team t ON p.teamID = t.teamID 
+                      LEFT JOIN team_logo tl ON LOWER(TRIM(t.teamname)) = LOWER(TRIM(tl.team)) 
+                      WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_array($pickResult, MYSQL_ASSOC)) {
-            $logoId = isset($row['logoId']) ? (string)trim($row['logoId']) : '';
-            $teamName = isset($row['teamName']) ? trim($row['teamName']) : '';
+            $logoId  = isset($row['logoId'])  ? (string)trim($row['logoId'])    : '';
+            $teamName= isset($row['teamName'])? trim($row['teamName'])          : '';
             if ($logoId !== '') {
-                // Prefix with 'id:' so numeric strings are not converted to ints when used as keys
                 $userPicks['id:' . $logoId] = true;
             }
             if ($teamName !== '') {
@@ -63,15 +53,15 @@ if (isset($_SESSION['username'])) {
     }
 }
 
-// Pull AFPLNA games for the current week using team IDs from the team_logo table
+// Identify AFPLNA “Games of the Week” (to mark them specially)
 $afplnaGames = array();
-$gamesQuery = "select tlh.id as homeId, tla.id as awayId "
-            . "from game g "
-            . "join team th on g.homeID = th.teamID "
-            . "join team ta on g.awayID = ta.teamID "
-            . "left join team_logo tlh on lower(trim(th.teamname)) = lower(trim(tlh.team)) "
-            . "left join team_logo tla on lower(trim(ta.teamname)) = lower(trim(tla.team)) "
-            . "where g.weekID = '$weekID' and g.yearID = '$year'";
+$gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId 
+               FROM game g 
+               JOIN team th ON g.homeID = th.teamID 
+               JOIN team ta ON g.awayID = ta.teamID 
+               LEFT JOIN team_logo tlh ON LOWER(TRIM(th.teamname)) = LOWER(TRIM(tlh.team))
+               LEFT JOIN team_logo tla ON LOWER(TRIM(ta.teamname)) = LOWER(TRIM(tla.team))
+               WHERE g.weekID='$weekID' AND g.yearID='$year'";
 $gamesResult = mysql_query($gamesQuery, $connection) or die('Query failed.');
 while ($row = mysql_fetch_array($gamesResult, MYSQL_ASSOC)) {
     $homeId = isset($row['homeId']) ? (string)$row['homeId'] : '';
@@ -82,13 +72,12 @@ while ($row = mysql_fetch_array($gamesResult, MYSQL_ASSOC)) {
 }
 mysql_free_result($gamesResult);
 
-// Load team logos and names from the database so that we can map CFBD team
-// IDs to the normalized team names used within AFPLNA. These names will be
-// used when calling the CFBD API to ensure consistency with the coach page.
+// Load team logos and names for mapping team IDs to names
 $teamData = array();
 $teamResult = mysql_query(
-    "select tl.id, tl.url, t.teamname from team_logo tl " .
-    "join team t on lower(trim(tl.team)) = lower(trim(t.teamname))",
+    "SELECT tl.id, tl.url, t.teamname 
+     FROM team_logo tl 
+     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.teamname))",
     $connection
 ) or die('Query failed.');
 while ($row = mysql_fetch_array($teamResult, MYSQL_ASSOC)) {
@@ -100,14 +89,15 @@ while ($row = mysql_fetch_array($teamResult, MYSQL_ASSOC)) {
 }
 mysql_free_result($teamResult);
 
-// Retrieve API key for CollegeFootballData
+// Retrieve API key for external CollegeFootballData API (for live scores)
 $apiKey = '';
-$keyResult = mysql_query("select `KEY` from API_KEYS where API_NAME='CFD' limit 1", $connection);
+$keyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='CFD' LIMIT 1", $connection);
 if ($keyResult && $row = mysql_fetch_array($keyResult, MYSQL_ASSOC)) {
     $apiKey = trim($row['KEY']);
     mysql_free_result($keyResult);
 }
 if (!$apiKey) {
+    // fallback to constants or env if not found in DB
     if (defined('CFBD_API_KEY') && CFBD_API_KEY) {
         $apiKey = CFBD_API_KEY;
     } elseif (!empty($CFBD_API_KEY)) {
@@ -117,19 +107,28 @@ if (!$apiKey) {
     }
 }
 
-// Retrieve Google Gemini API key
+// Retrieve Google API key (if used for ads or other services)
 $googleApiKey = '';
- $googleResult = mysql_query("select `KEY` from API_KEYS where API_NAME='google' limit 1", $connection);
- if ($googleResult && $row = mysql_fetch_array($googleResult, MYSQL_ASSOC)) {
-     $googleApiKey = trim($row['KEY']);
-     mysql_free_result($googleResult);
- }
+$googleResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='google' LIMIT 1", $connection);
+if ($googleResult && $row = mysql_fetch_array($googleResult, MYSQL_ASSOC)) {
+    $googleApiKey = trim($row['KEY']);
+    mysql_free_result($googleResult);
+}
 
-// Call the live scoreboard endpoint
+// ** AFPLNA API Base URL and Key ** 
+$AFPLNA_API_BASE = 'http://143.198.20.72';  // DigitalOcean droplet base (HTTP)
+$AFPLNA_API_KEY  = '';
+$afplnaKeyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='cfbmatchupreport' LIMIT 1", $connection);
+if ($afplnaKeyResult && $row = mysql_fetch_array($afplnaKeyResult, MYSQL_ASSOC)) {
+    $AFPLNA_API_KEY = trim($row['KEY']);
+    mysql_free_result($afplnaKeyResult);
+}
+
+// Fetch live FBS scoreboard data (current games and scores)
 $url = "https://api.collegefootballdata.com/scoreboard?classification=fbs";
-$ch = curl_init($url);
+$ch  = curl_init($url);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-$headers = array("accept: application/json");
+$headers = array("Accept: application/json");
 if ($apiKey) {
     $headers[] = "Authorization: Bearer $apiKey";
 }
@@ -145,18 +144,17 @@ if ($httpCode === 200) {
     }
 }
 
+// Separate out featured (AFPLNA) games vs other games
 $featuredGames = array();
-$otherGames = array();
+$otherGames    = array();
 foreach ($data as $game) {
-    $homeName = isset($game['homeTeam']['name']) ? $game['homeTeam']['name'] : '';
-    $awayName = isset($game['awayTeam']['name']) ? $game['awayTeam']['name'] : '';
-    // Cast API team IDs to string for consistent lookup in the logo table and AFPLNA matching
-    $homeId = isset($game['homeTeam']['id']) ? (string)$game['homeTeam']['id'] : '';
-    $awayId = isset($game['awayTeam']['id']) ? (string)$game['awayTeam']['id'] : '';
-    $key = $homeId . '|' . $awayId;
+    $homeName = $game['homeTeam']['name'] ?? '';
+    $awayName = $game['awayTeam']['name'] ?? '';
+    $homeId   = isset($game['homeTeam']['id']) ? (string)$game['homeTeam']['id'] : '';
+    $awayId   = isset($game['awayTeam']['id']) ? (string)$game['awayTeam']['id'] : '';
+    $key      = $homeId . '|' . $awayId;
+    // Determine if the logged-in user picked one of these teams
     $yourPick = '';
-    // Determine if the user picked one of these teams. First check by CFBD team
-    // ID, then fall back to a normalized team name match if needed.
     $homeNameNorm = strtolower(trim($homeName));
     $awayNameNorm = strtolower(trim($awayName));
     if (isset($userPicks['id:' . $homeId]) || isset($userPicks['name:' . $homeNameNorm])) {
@@ -165,37 +163,32 @@ foreach ($data as $game) {
         $yourPick = $awayName;
     }
     $info = array(
-        // Use the API-provided names for display but store database team
-        // names separately for use with the CFBD API and AI reporting.
-        'home' => $homeName,
-        'away' => $awayName,
-        'homeDbName' => isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : $homeName,
-        'awayDbName' => isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : $awayName,
-
-        // Match team IDs against the logo table to populate logo URLs
-        'homeLogo' => isset($teamData[$homeId]['logo']) ? $teamData[$homeId]['logo'] : '',
-        'awayLogo' => isset($teamData[$awayId]['logo']) ? $teamData[$awayId]['logo'] : '',
-
-        'venue' => isset($game['venue']['name']) ? $game['venue']['name'] : '',
-        'start' => isset($game['startDate']) ? date('n/j g:i A', strtotime($game['startDate'])) : '',
-        'tv' => isset($game['tv']) ? $game['tv'] : '',
-        'status' => isset($game['status']) ? $game['status'] : '',
-        'period' => isset($game['period']) ? $game['period'] : '',
-        'clock' => isset($game['clock']) ? $game['clock'] : '',
-        'situation' => isset($game['situation']) ? $game['situation'] : '',
-        'possession' => isset($game['possession']) ? $game['possession'] : '',
-        'lastPlay' => isset($game['lastPlay']) ? $game['lastPlay'] : '',
-        'homePoints' => isset($game['homeTeam']['points']) ? $game['homeTeam']['points'] : '',
-        'awayPoints' => isset($game['awayTeam']['points']) ? $game['awayTeam']['points'] : '',
-        'windDir' => isset($game['weather']['windDirection']) ? $game['weather']['windDirection'] : '',
-        'windSpeed' => isset($game['weather']['windSpeed']) ? $game['weather']['windSpeed'] : '',
-        'weatherDesc' => isset($game['weather']['description']) ? $game['weather']['description'] : '',
-        'temperature' => isset($game['weather']['temperature']) ? $game['weather']['temperature'] : '',
-        'awayML' => isset($game['betting']['awayMoneyline']) ? $game['betting']['awayMoneyline'] : '',
-        'homeML' => isset($game['betting']['homeMoneyline']) ? $game['betting']['homeMoneyline'] : '',
-        'overUnder' => isset($game['betting']['overUnder']) ? $game['betting']['overUnder'] : '',
-        'spread' => isset($game['betting']['spread']) ? $game['betting']['spread'] : '',
-        'yourPick' => $yourPick
+        'home'       => $homeName,
+        'away'       => $awayName,
+        'homeDbName' => $teamData[$homeId]['name'] ?? $homeName,  // normalized name for consistency
+        'awayDbName' => $teamData[$awayId]['name'] ?? $awayName,
+        'homeLogo'   => $teamData[$homeId]['logo'] ?? '',
+        'awayLogo'   => $teamData[$awayId]['logo'] ?? '',
+        'venue'      => $game['venue']['name'] ?? '',
+        'start'      => isset($game['startDate']) ? date('n/j g:i A', strtotime($game['startDate'])) : '',
+        'tv'         => $game['tv'] ?? '',
+        'status'     => $game['status'] ?? '',
+        'period'     => $game['period'] ?? '',
+        'clock'      => $game['clock'] ?? '',
+        'situation'  => $game['situation'] ?? '',
+        'possession' => $game['possession'] ?? '',
+        'lastPlay'   => $game['lastPlay'] ?? '',
+        'homePoints' => $game['homeTeam']['points'] ?? '',
+        'awayPoints' => $game['awayTeam']['points'] ?? '',
+        'windDir'    => $game['weather']['windDirection'] ?? '',
+        'windSpeed'  => $game['weather']['windSpeed'] ?? '',
+        'weatherDesc'=> $game['weather']['description'] ?? '',
+        'temperature'=> $game['weather']['temperature'] ?? '',
+        'awayML'     => $game['betting']['awayMoneyline'] ?? '',
+        'homeML'     => $game['betting']['homeMoneyline'] ?? '',
+        'overUnder'  => $game['betting']['overUnder'] ?? '',
+        'spread'     => $game['betting']['spread'] ?? '',
+        'yourPick'   => $yourPick
     );
     if (isset($afplnaGames[$key])) {
         $info['afplna'] = true;
@@ -209,212 +202,246 @@ mysql_close($connection);
 ?>
 <html>
 <head>
-<title>Scoreboard</title>
-<style>
-body { font-family: Arial, sans-serif; background-image: url('yellow_weave.gif'); }
-.scoreboard { max-width: 1000px; margin: 0 auto; }
-.game { border-radius: 8px; overflow: hidden; margin: 20px 0; box-shadow: 0 2px 6px rgba(0,0,0,0.15); background: #fff; }
-.game.afplna { border: 2px solid gold; }
-.score-header { display: flex; justify-content: space-between; align-items: center; background: #003366; color: #fff; padding: 10px; font-size: 18px; font-weight: bold; }
-.score-header .team-name { flex: 1; text-align: center; }
-.score-header .score { font-size: 24px; min-width: 100px; text-align: center; }
-.game-details { padding: 10px; background: #f9f9f9; font-size: 14px; line-height: 1.4; }
-.game-details div { margin: 4px 0; }
-.section-title { background: #003366; color: white; padding: 5px; margin-top: 20px; }
-.refresh { margin-bottom: 15px; }
-.team-logo { width: 24px; height: 24px; object-fit: contain; vertical-align: middle; margin-right: 5px; }
-</style>
+    <title>Scoreboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; background-image: url('yellow_weave.gif'); }
+        .scoreboard { max-width: 1000px; margin: 0 auto; }
+        .game { border-radius: 8px; overflow: hidden; margin: 20px 0; 
+                box-shadow: 0 2px 6px rgba(0,0,0,0.15); background: #fff; }
+        .game.afplna { border: 2px solid gold; }
+        .score-header { display: flex; justify-content: space-between; align-items: center;
+                        background: #003366; color: #fff; padding: 10px; font-size: 18px; font-weight: bold; }
+        .score-header .team-name { flex: 1; text-align: center; }
+        .score-header .score { font-size: 24px; min-width: 100px; text-align: center; }
+        .game-details { padding: 10px; background: #f9f9f9; font-size: 14px; line-height: 1.4; }
+        .game-details div { margin: 4px 0; }
+        .section-title { background: #003366; color: white; padding: 5px; margin-top: 20px; }
+        .refresh { margin-bottom: 15px; }
+        .team-logo { width: 24px; height: 24px; object-fit: contain; vertical-align: middle; margin-right: 5px; }
+    </style>
 </head>
 <body>
 <div class="scoreboard">
-<center><img src="afplnalogo.gif" alt="AFPLNA Logo"></center>
-<h1>FBS Scoreboard</h1>
-<form method="post" class="refresh">
-<input type="submit" value="Refresh Scores">
-<button type="button" onclick="window.location.href='index.php';">Home</button>
-</form>
-<?php
-if (!empty($featuredGames)) {
-    echo "<h2 class='section-title'>AFPLNA Games of the Week</h2>";
-    foreach ($featuredGames as $g) {
-        echo "<div class='game afplna'>";
-        echo "<div class='score-header'>";
+    <center><img src="afplnalogo.gif" alt="AFPLNA Logo"></center>
+    <h1>FBS Scoreboard</h1>
+    <form method="post" class="refresh">
+        <input type="submit" value="Refresh Scores">
+        <button type="button" onclick="window.location.href='index.php';">Home</button>
+    </form>
+    <?php
+    if (!empty($featuredGames)) {
+        echo "<h2 class='section-title'>AFPLNA Games of the Week</h2>";
+        foreach ($featuredGames as $g) {
+            echo "<div class='game afplna'>";
+            echo "<div class='score-header'>";
+            // Away team
+            echo "<div class='team-name'>";
+            if (!empty($g['awayLogo'])) {
+                echo "<img src='" . htmlspecialchars($g['awayLogo']) . "' class='team-logo'>";
+            }
+            echo htmlspecialchars($g['away']) . "</div>";
+            // Score
+            echo "<div class='score'>" . htmlspecialchars($g['awayPoints']) . " @ " . htmlspecialchars($g['homePoints']) . "</div>";
+            // Home team
+            echo "<div class='team-name'>";
+            if (!empty($g['homeLogo'])) {
+                echo "<img src='" . htmlspecialchars($g['homeLogo']) . "' class='team-logo'>";
+            }
+            echo htmlspecialchars($g['home']) . "</div>";
+            echo "</div>";  // .score-header
 
-        $awayLogo = $g['awayLogo'];
-        $homeLogo = $g['homeLogo'];
+            echo "<div class='game-details'>";
+            echo "<div><b>Venue:</b> " . htmlspecialchars($g['venue']) . " | <b>Start:</b> " . htmlspecialchars($g['start']) . " | <b>TV:</b> " . htmlspecialchars($g['tv']) . "</div>";
+            echo "<div><b>Status:</b> " . htmlspecialchars($g['status']) . " | <b>Period:</b> " . htmlspecialchars($g['period']) . " | <b>Clock:</b> " . htmlspecialchars($g['clock']) . "</div>";
+            echo "<div><b>Situation:</b> " . htmlspecialchars($g['situation']) . " | <b>Possession:</b> " . htmlspecialchars($g['possession']) . "</div>";
+            echo "<div><b>Last Play:</b> " . htmlspecialchars($g['lastPlay']) . "</div>";
+            echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "°, Wind " . htmlspecialchars($g['windDir']) . "° @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
+            echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
+            if (!empty($g['yourPick'])) {
+                echo "<div><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
+            }
+            // AI Report controls
+            echo '<div class="ai-controls" style="margin:12px 0;">';
+            echo '<button type="button" class="btn-generate" '
+                 . 'data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" '
+                 . 'data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" '
+                 . 'data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" '
+                 . 'data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">'
+                 . 'Generate AI Report</button> ';
+            echo '<button type="button" class="btn-check">Check AI Report</button> ';
+            echo '<button type="button" class="btn-download">Download AI Report</button>';
+            echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
+            echo '</div>';  // .ai-controls
 
-        echo "<div class='team-name'>";
-        if ($awayLogo) {
-            echo "<img src='" . htmlspecialchars($awayLogo) . "' class='team-logo'>";
+            echo "</div>";  // .game-details
+            echo "</div>";  // .game
         }
-        echo htmlspecialchars($g['away']) . "</div>";
-        echo "<div class='score'>" . htmlspecialchars($g['awayPoints']) . " @ " . htmlspecialchars($g['homePoints']) . "</div>";
-        echo "<div class='team-name'>";
-        if ($homeLogo) {
-            echo "<img src='" . htmlspecialchars($homeLogo) . "' class='team-logo'>";
-        }
-        echo htmlspecialchars($g['home']) . "</div>";
-        echo "</div>";
-        echo "<div class='game-details'>";
-        echo "<div><b>Venue:</b> " . htmlspecialchars($g['venue']) . " | <b>Start:</b> " . htmlspecialchars($g['start']) . " | <b>TV:</b> " . htmlspecialchars($g['tv']) . "</div>";
-        echo "<div><b>Status:</b> " . htmlspecialchars($g['status']) . " | <b>Period:</b> " . htmlspecialchars($g['period']) . " | <b>Clock:</b> " . htmlspecialchars($g['clock']) . "</div>";
-        echo "<div><b>Situation:</b> " . htmlspecialchars($g['situation']) . " | <b>Possession:</b> " . htmlspecialchars($g['possession']) . "</div>";
-        echo "<div><b>Last Play:</b> " . htmlspecialchars($g['lastPlay']) . "</div>";
-        echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "&deg;, Wind " . htmlspecialchars($g['windDir']) . "&deg; @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
-        echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
-        if (!empty($g['yourPick'])) {
-            echo "<div><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
-        }
-        echo '<div class="ai-controls" style="margin:12px 0;">';
-        echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
-        echo '<button type="button" class="btn btn-check">Check AI Report</button>';
-        echo '<button type="button" class="btn btn-download">Download AI Report</button>';
-        echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
-        echo '</div>';
-        echo "</div>";
-        echo "</div>";
     }
-}
-if (!empty($otherGames)) {
-    echo "<h2 class='section-title'>All FBS Games</h2>";
-    foreach ($otherGames as $g) {
-        echo "<div class='game'>";
-        echo "<div class='score-header'>";
+    if (!empty($otherGames)) {
+        echo "<h2 class='section-title'>All FBS Games</h2>";
+        foreach ($otherGames as $g) {
+            echo "<div class='game'>";
+            echo "<div class='score-header'>";
+            // Away team
+            echo "<div class='team-name'>";
+            if (!empty($g['awayLogo'])) {
+                echo "<img src='" . htmlspecialchars($g['awayLogo']) . "' class='team-logo'>";
+            }
+            echo htmlspecialchars($g['away']) . "</div>";
+            // Score
+            echo "<div class='score'>" . htmlspecialchars($g['awayPoints']) . " @ " . htmlspecialchars($g['homePoints']) . "</div>";
+            // Home team
+            echo "<div class='team-name'>";
+            if (!empty($g['homeLogo'])) {
+                echo "<img src='" . htmlspecialchars($g['homeLogo']) . "' class='team-logo'>";
+            }
+            echo htmlspecialchars($g['home']) . "</div>";
+            echo "</div>";
 
-        $awayLogo = $g['awayLogo'];
-        $homeLogo = $g['homeLogo'];
+            echo "<div class='game-details'>";
+            echo "<div><b>Venue:</b> " . htmlspecialchars($g['venue']) . " | <b>Start:</b> " . htmlspecialchars($g['start']) . " | <b>TV:</b> " . htmlspecialchars($g['tv']) . "</div>";
+            echo "<div><b>Status:</b> " . htmlspecialchars($g['status']) . " | <b>Period:</b> " . htmlspecialchars($g['period']) . " | <b>Clock:</b> " . htmlspecialchars($g['clock']) . "</div>";
+            echo "<div><b>Situation:</b> " . htmlspecialchars($g['situation']) . " | <b>Possession:</b> " . htmlspecialchars($g['possession']) . "</div>";
+            echo "<div><b>Last Play:</b> " . htmlspecialchars($g['lastPlay']) . "</div>";
+            echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "°, Wind " . htmlspecialchars($g['windDir']) . "° @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
+            echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
+            if (!empty($g['yourPick'])) {
+                echo "<div><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
+            }
+            // AI Report controls (for completeness, allow reports on any game)
+            echo '<div class="ai-controls" style="margin:12px 0;">';
+            echo '<button type="button" class="btn-generate" '
+                 . 'data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" '
+                 . 'data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" '
+                 . 'data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" '
+                 . 'data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">'
+                 . 'Generate AI Report</button> ';
+            echo '<button type="button" class="btn-check">Check AI Report</button> ';
+            echo '<button type="button" class="btn-download">Download AI Report</button>';
+            echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
+            echo '</div>';
 
-        echo "<div class='team-name'>";
-        if ($awayLogo) {
-            echo "<img src='" . htmlspecialchars($awayLogo) . "' class='team-logo'>";
+            echo "</div>";
+            echo "</div>";
         }
-        echo htmlspecialchars($g['away']) . "</div>";
-        echo "<div class='score'>" . htmlspecialchars($g['awayPoints']) . " @ " . htmlspecialchars($g['homePoints']) . "</div>";
-        echo "<div class='team-name'>";
-        if ($homeLogo) {
-            echo "<img src='" . htmlspecialchars($homeLogo) . "' class='team-logo'>";
-        }
-        echo htmlspecialchars($g['home']) . "</div>";
-        echo "</div>";
-        echo "<div class='game-details'>";
-        echo "<div><b>Venue:</b> " . htmlspecialchars($g['venue']) . " | <b>Start:</b> " . htmlspecialchars($g['start']) . " | <b>TV:</b> " . htmlspecialchars($g['tv']) . "</div>";
-        echo "<div><b>Status:</b> " . htmlspecialchars($g['status']) . " | <b>Period:</b> " . htmlspecialchars($g['period']) . " | <b>Clock:</b> " . htmlspecialchars($g['clock']) . "</div>";
-        echo "<div><b>Situation:</b> " . htmlspecialchars($g['situation']) . " | <b>Possession:</b> " . htmlspecialchars($g['possession']) . "</div>";
-        echo "<div><b>Last Play:</b> " . htmlspecialchars($g['lastPlay']) . "</div>";
-        echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "&deg;, Wind " . htmlspecialchars($g['windDir']) . "&deg; @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
-        echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
-        echo '<div class="ai-controls" style="margin:12px 0;">';
-        echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
-        echo '<button type="button" class="btn btn-check">Check AI Report</button>';
-        echo '<button type="button" class="btn btn-download">Download AI Report</button>';
-        echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
-        echo '</div>';
-        echo "</div>";
-        echo "</div>";
     }
-}
-?>
+    ?>
 </div>
 <script>
+// Embed API base URL and key from PHP into JavaScript constants
+const API_BASE = "<?= $AFPLNA_API_BASE ?>";
+const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
+
 window.addEventListener('DOMContentLoaded', () => {
-document.querySelectorAll('.ai-controls').forEach(ctrl => {
-  const $gen = ctrl.querySelector('.btn-generate');
-  const $dl  = ctrl.querySelector('.btn-download');
-  const $chk = ctrl.querySelector('.btn-check');
-  const $st  = ctrl.querySelector('.ai-status');
+  document.querySelectorAll('.ai-controls').forEach(ctrl => {
+    const $gen = ctrl.querySelector('.btn-generate');
+    const $chk = ctrl.querySelector('.btn-check');
+    const $dl  = ctrl.querySelector('.btn-download');
+    const $st  = ctrl.querySelector('.ai-status');
 
-  function setStatus(msg, isErr=false) {
-    $st.textContent = msg;
-    $st.style.color = isErr ? '#c00' : '#0a0';
-    $st.style.backgroundColor = (!isErr && msg) ? '#cfc' : 'transparent';
-    $st.style.padding = (!isErr && msg) ? '2px 4px' : '0';
-  }
+    function setStatus(msg, isErr=false) {
+      $st.textContent = msg;
+      $st.style.color = isErr ? '#c00' : '#0a0';
+      $st.style.backgroundColor = (!isErr && msg) ? '#cfc' : 'transparent';
+      $st.style.padding = (!isErr && msg) ? '2px 4px' : '0';
+    }
 
-  async function checkReportExists(showStatus = false) {
-    const home_short = $gen.dataset.homeshort;
-    const away_short = $gen.dataset.awayshort;
-
-    try {
-      const chkUrl = `/svc/has_report.php?home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
-      const resp = await fetch(chkUrl, { cache: 'no-store' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const data = await resp.json();
-
-      const exists = (data && data.exists === true);
-      if (exists) {
-        $dl.title = 'Download AI Report';
-        if ($gen) $gen.textContent = 'Regenerate AI Report';
-        if (showStatus) setStatus('Yes');
-      } else {
+    // Check if a report PDF exists on the server for this matchup
+    async function checkReportExists(showStatus = false) {
+      const home_short = $gen.dataset.homeshort;
+      const away_short = $gen.dataset.awayshort;
+      try {
+        const url = `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        const exists = data && data.exists === true;
+        if (exists) {
+          $dl.title = 'Download AI Report';
+          $gen.textContent = 'Regenerate AI Report';
+          if (showStatus) setStatus('Report is ready ✔');
+        } else {
+          $dl.title = 'Report not ready yet';
+          $gen.textContent = 'Generate AI Report';
+          if (showStatus) setStatus('Report not ready yet', true);
+        }
+        return exists;
+      } catch (err) {
+        console.error('Error checking report availability:', err);
+        if (showStatus) setStatus('Error checking report', true);
         $dl.title = 'Report not ready yet';
-        if ($gen) $gen.textContent = 'Generate AI Report';
-        if (showStatus) setStatus('No', true);
+        return false;
       }
-      return exists;
-    } catch (err) {
-      console.log('Error checking report availability', err);
     }
 
-    if (showStatus) setStatus('');
-    $dl.title = 'Report not ready yet';
-    return false;
-  }
+    async function generateReport() {
+      // If a report already exists, confirm if user really wants to regenerate
+      const exists = await checkReportExists(false);
+      if (exists) {
+        if (!confirm('A report is already available for this game. Do you want to generate a new updated report?')) {
+          return;
+        }
+      }
+      // Prepare data from the buttons’ data attributes
+      const home_full  = $gen.dataset.homefull;
+      const away_full  = $gen.dataset.awayfull;
+      const home_short = $gen.dataset.homeshort;
+      const away_short = $gen.dataset.awayshort;
 
-  async function generateReport() {
-    const exists = await checkReportExists(false);
-    let force = false;
-    if (exists) {
-      const proceed = confirm('A report is already available for this game. Do you want to regenerate a newer one?');
-      if (!proceed) return;
-      force = true;
+      setStatus('The AI report is being generated. This can take a few minutes...', false);
+      $gen.disabled = true;
+
+      // Send POST request to start report generation
+      fetch(`${API_BASE}/generate-report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          api_key: API_KEY,
+          home_full, away_full, home_short, away_short 
+        })
+      })
+      .then(async resp => {
+        if (resp.ok) {
+          setStatus('Report generation started. Please wait ~5 minutes then click Download.', false);
+        } else {
+          // If server returned an error, display it
+          let errMsg = `Error starting report (HTTP ${resp.status})`;
+          try {
+            const errData = await resp.json();
+            if (errData.error) errMsg = errData.error;
+          } catch {}
+          setStatus(errMsg, true);
+        }
+      })
+      .catch(err => {
+        console.error('Network error starting report generation:', err);
+        setStatus('Network error – could not start report.', true);
+      })
+      .finally(() => {
+        // Re-enable the Generate button after a brief delay
+        setTimeout(() => { $gen.disabled = false; }, 1000);
+      });
+
+      // Optionally, poll the report status after some intervals to give user feedback
+      setTimeout(() => checkReportExists(true), 15000);  // 15 seconds check
+      setTimeout(() => checkReportExists(true), 60000);  // 60 seconds check
     }
 
-    const home_full  = $gen.dataset.homefull;
-    const away_full  = $gen.dataset.awayfull;
-    const home_short = $gen.dataset.homeshort;
-    const away_short = $gen.dataset.awayshort;
+    function downloadReport() {
+      const home_short = $gen.dataset.homeshort;
+      const away_short = $gen.dataset.awayshort;
+      const ts = Date.now();  // cache-buster
+      const url = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
+      window.location.href = url;
+    }
 
-    setStatus('The AI report is being generated. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
-    $gen.disabled = true;
-
-    fetch(`/svc/generate_report.php`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
-      body: new URLSearchParams({ home_full, away_full, home_short, away_short, force: String(force) })
-    })
-    .then(resp => {
-      if (resp && resp.ok) {
-        setStatus('Report generation started. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
-        setTimeout(() => checkReportExists(true), 5000);
-        setTimeout(() => checkReportExists(true), 20000);
-      }
-    })
-    .catch(err => {
-      console.log('Network error starting report generation.', err);
-    });
-
-    setTimeout(() => { $gen.disabled = false; }, 1000);
-  }
-
-  function downloadReport() {
-    const home_short = $gen.dataset.homeshort;
-    const away_short = $gen.dataset.awayshort;
-
-    // cache-buster to avoid any weird proxy caching
-    const ts = Date.now();
-    const url = `/svc/get_report.php?home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
-
-    // Simple, reliable download via navigation
-    window.location.href = url;
-  }
-
-  // Initial availability check on load
-  checkReportExists(true);
-
-  if ($chk) $chk.addEventListener('click', () => checkReportExists(true));
-  $gen.addEventListener('click', generateReport);
-  $dl.addEventListener('click', downloadReport);
-});
+    // Initial check on page load for existing report
+    checkReportExists(false);
+    // Set up event listeners
+    if ($chk) $chk.addEventListener('click', () => checkReportExists(true));
+    $gen.addEventListener('click', generateReport);
+    $dl.addEventListener('click', downloadReport);
+  });
 });
 </script>
 </body>
