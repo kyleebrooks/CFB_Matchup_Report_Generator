@@ -19,19 +19,28 @@ from werkzeug.exceptions import HTTPException
 # App & CORS
 # ---------------------------
 app = Flask(__name__)
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
-CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
+
+ALLOWED_ORIGINS = [
+    "http://afplnapicks.com",
+    "http://www.afplnapicks.com",
+]
+
+CORS(
+    app,
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
+    supports_credentials=True,
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    expose_headers=["Content-Type"],
+)
 
 
 @app.after_request
 def ensure_cors_headers(resp):
-    """Guarantee CORS headers are present on every response.
-    The automatic configuration from ``flask_cors`` occasionally misses
-    error responses generated outside of the normal request flow.  By
-    adding this hook we make sure the browser always receives the
-    ``Access-Control-Allow-Origin`` header, preventing fetch requests
-    from being blocked even when the API returns an error."""
-    resp.headers.setdefault("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
     return resp
 
 try:

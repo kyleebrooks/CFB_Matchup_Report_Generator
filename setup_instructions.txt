@@ -159,9 +159,6 @@ DB_USER=kdogg4207
 DB_NAME=kdogg4207
 DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 
-# CORS: lock later to your site domain (e.g., https://afplna.yourdomain.com)
-ALLOWED_ORIGIN=*
-
 # Optional if keys are not stored in DB
 # CFBD_API_KEY=
 # GOOGLE_SEARCH_API_KEY=
@@ -176,8 +173,6 @@ sudo sed -i 's/\r$//' /etc/afplna.env
 
 9) Systemd service (Gunicorn)
 
-Important: use 1 worker so APScheduler jobs don’t double-fire.
-
 Create unit:
 
 sudo tee /etc/systemd/system/afplna.service >/dev/null << 'EOF'
@@ -190,7 +185,7 @@ User=deploy
 Group=www-data
 WorkingDirectory=/opt/afplna
 EnvironmentFile=/etc/afplna.env
-ExecStart=/opt/afplna/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
+ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 2 --threads 4 --timeout 600 --graceful-timeout 600
 Restart=always
 RestartSec=3
 TimeoutStartSec=60
@@ -250,12 +245,30 @@ pip install Flask-Cors~=4.0
 In app.py, after app = Flask(__name__):
 
 from flask_cors import CORS
-import os
-ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
-CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
+ALLOWED_ORIGINS = [
+    "http://afplnapicks.com",
+    "http://www.afplnapicks.com",
+]
 
-Lock ALLOWED_ORIGIN to your site later for security.
+CORS(
+    app,
+    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
+    supports_credentials=True,
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+    expose_headers=["Content-Type"],
+)
+
+@app.after_request
+def ensure_cors_headers(resp):
+    origin = request.headers.get("Origin")
+    if origin in ALLOWED_ORIGINS:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp
+
+Adjust ``ALLOWED_ORIGINS`` for your deployment as needed.
 
 13) Smoke tests
 
@@ -394,7 +407,7 @@ User=deploy
 Group=www-data
 WorkingDirectory=/opt/afplna
 EnvironmentFile=/etc/afplna.env
-ExecStart=/opt/afplna/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
+ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 2 --threads 4 --timeout 600 --graceful-timeout 600
 Restart=always
 RestartSec=3
 TimeoutStartSec=60
