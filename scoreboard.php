@@ -342,9 +342,15 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   async function checkReportExists(showStatus = false) {
     const home_short = $gen.dataset.homeshort;
     const away_short = $gen.dataset.awayshort;
+    // add a cache-busting query param so the browser doesn't reuse stale
+    // results and incorrectly report that no file exists
+    const ts = Date.now();
 
     try {
-      const resp = await fetch(`${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}`);
+      const resp = await fetch(
+        `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`,
+        { cache: 'no-store' }
+      );
       if (resp.ok) {
         const data = await resp.json();
         if (data && data.exists) {
