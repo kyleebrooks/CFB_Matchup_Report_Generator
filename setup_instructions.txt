@@ -236,39 +236,9 @@ sudo certbot --nginx -d api.yourdomain.com
 
 12) CORS
 
-Install and enable:
+CORS headers are handled directly in app.py without Flask-Cors.
+Adjust `ALLOWED_ORIGINS` in the code as needed for your deployment.
 
-source /opt/afplna/venv/bin/activate
-pip install Flask-Cors~=4.0
-
-
-In app.py, after app = Flask(__name__):
-
-from flask_cors import CORS
-
-ALLOWED_ORIGINS = [
-    "http://afplnapicks.com",
-    "http://www.afplnapicks.com",
-]
-
-CORS(
-    app,
-    resources={r"/*": {"origins": ALLOWED_ORIGINS}},
-    supports_credentials=True,
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    expose_headers=["Content-Type"],
-)
-
-@app.after_request
-def ensure_cors_headers(resp):
-    origin = request.headers.get("Origin")
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-    return resp
-
-Adjust ``ALLOWED_ORIGINS`` for your deployment as needed.
 
 13) Smoke tests
 
@@ -383,7 +353,6 @@ Snapshots: take DO Droplet snapshots periodically.
 
 Appendix A: requirements.txt
 Flask~=3.0
-Flask-Cors~=4.0
 requests~=2.32
 PyMySQL~=1.1
 APScheduler~=3.10

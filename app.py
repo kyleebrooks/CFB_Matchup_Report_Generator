@@ -12,7 +12,6 @@ import requests
 from flask import Flask, request, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 from urllib.parse import urlsplit
 
@@ -21,55 +20,42 @@ from urllib.parse import urlsplit
 # ---------------------------
 app = Flask(__name__)
 
-# Accept both www/non-www, normalize for comparison
-RAW_ALLOWED = {
+# --- ONE CORS LAYER ONLY ---
+ALLOWED_ORIGINS = {
     "http://afplnapicks.com",
     "http://www.afplnapicks.com",
 }
-ALLOWED = {f"{urlsplit(o).scheme}://{urlsplit(o).hostname}".lower() for o in RAW_ALLOWED}
+ALLOWED = {f"{urlsplit(o).scheme}://{urlsplit(o).hostname}".lower() for o in ALLOWED_ORIGINS}
 
-CORS(
-    app,
-    resources={r"/*": {"origins": list(RAW_ALLOWED)}},
-    supports_credentials=True,
-    methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    expose_headers=["Content-Type"],
-)
-
-
-@app.after_request
-def add_cors_headers(resp):
-    origin = request.headers.get("Origin")
-    # Normalize the header we got
-    if origin:
-        o = urlsplit(origin)
-        normalized = f"{o.scheme}://{o.hostname}".lower()
-        if normalized in ALLOWED:
-            resp.headers["Access-Control-Allow-Origin"] = origin  # echo exact origin
+def _set_cors_headers(resp, origin_hdr):
+    # Normalize the Origin (ignore port to be lenient)
+    if origin_hdr:
+        o = urlsplit(origin_hdr)
+        norm = f"{o.scheme}://{o.hostname}".lower()
+        if norm in ALLOWED:
+            resp.headers["Access-Control-Allow-Origin"] = origin_hdr  # echo exact
             resp.headers["Access-Control-Allow-Credentials"] = "true"
-            resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            # Mirror requested headers if present (preflight)
-            req_ah = request.headers.get("Access-Control-Request-Headers")
-            if req_ah:
-                resp.headers["Access-Control-Allow-Headers"] = req_ah
-            # Help caches keep variants separate
-            vary = resp.headers.get("Vary")
-            resp.headers["Vary"] = f"{vary}, Origin" if vary else "Origin"
-            return resp
+    else:
+        # Safe default for GET/HEAD when no Origin is sent
+        resp.headers.setdefault("Access-Control-Allow-Origin", "*")
 
-    # If there was no Origin or it didn't match, still allow safe reads
-    # This makes GET/HEAD readable from anywhere (no credentials), but keeps POST strict.
-    if request.method in ("GET", "HEAD"):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers.pop("Access-Control-Allow-Credentials", None)
+    # Be explicit; don’t rely on mirroring
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+    # Help caches keep variants separate
+    vary = resp.headers.get("Vary")
+    resp.headers["Vary"] = (vary + ", Origin") if vary else "Origin"
     return resp
 
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        resp = app.make_response(("", 204))
+        return _set_cors_headers(resp, request.headers.get("Origin"))
 
-# Optional: handle explicit preflights (some proxies are picky)
-@app.route("/generate-report", methods=["OPTIONS"])
-def generate_report_preflight():
-    return ("", 204)
+@app.after_request
+def add_cors(resp):
+    return _set_cors_headers(resp, request.headers.get("Origin"))
 
 try:
     import markdown  # optional for Markdown -> HTML
