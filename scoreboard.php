@@ -395,10 +395,11 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     fetch(`${API_BASE}/generate-report`, {
       method: 'POST',
       mode: 'cors',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+      body: new URLSearchParams({
         api_key: API_KEY,
-        home_full, away_full, home_short, away_short, force
+        home_full, away_full, home_short, away_short,
+        force: String(force)
       })
     })
     .then(resp => {
