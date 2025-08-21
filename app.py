@@ -22,6 +22,18 @@ app = Flask(__name__)
 ALLOWED_ORIGIN = os.getenv("ALLOWED_ORIGIN", "*")
 CORS(app, resources={r"/*": {"origins": ALLOWED_ORIGIN}}, supports_credentials=False)
 
+
+@app.after_request
+def ensure_cors_headers(resp):
+    """Guarantee CORS headers are present on every response.
+    The automatic configuration from ``flask_cors`` occasionally misses
+    error responses generated outside of the normal request flow.  By
+    adding this hook we make sure the browser always receives the
+    ``Access-Control-Allow-Origin`` header, preventing fetch requests
+    from being blocked even when the API returns an error."""
+    resp.headers.setdefault("Access-Control-Allow-Origin", ALLOWED_ORIGIN)
+    return resp
+
 try:
     import markdown  # optional for Markdown -> HTML
 except ImportError:
