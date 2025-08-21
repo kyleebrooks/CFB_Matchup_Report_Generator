@@ -44,7 +44,8 @@ ROTOWIRE_DB_PATH = os.getenv('ROTOWIRE_DB_PATH', os.path.join(os.getcwd(), 'roto
 # ---------------------------
 # Helpers
 # ---------------------------
-REPORTS_DIR = os.path.join(os.getcwd(), "reports")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+REPORTS_DIR = os.getenv("REPORTS_DIR", os.path.join(BASE_DIR, "reports"))
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 
@@ -279,7 +280,7 @@ def generate_report():
 
     # 3) Check for existing reports regardless of date unless forced
     force_regen = bool(data.get('force'))
-    pattern = os.path.join(REPORTS_DIR, glob.escape(f"{home_short}_{away_short}_*.pdf"))
+    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     existing_files = glob.glob(pattern)
     if existing_files and not force_regen:
         latest = max(existing_files, key=os.path.getmtime)
@@ -597,6 +598,7 @@ def has_report():
 
     pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     files = glob.glob(pattern)
+    logging.info(f"[has-report] REPORTS_DIR={REPORTS_DIR} pattern={pattern} matches={len(files)}")
     return jsonify({"exists": bool(files)}), 200
 
 
