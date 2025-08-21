@@ -276,6 +276,7 @@ if (!empty($featuredGames)) {
         }
         echo '<div class="ai-controls" style="margin:12px 0;">';
         echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
+        echo '<button type="button" class="btn btn-check">Check AI Report</button>';
         echo '<button type="button" class="btn btn-download">Download AI Report</button>';
         echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
         echo '</div>';
@@ -313,6 +314,7 @@ if (!empty($otherGames)) {
         echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
         echo '<div class="ai-controls" style="margin:12px 0;">';
         echo '<button type="button" class="btn-generate" data-homefull="' . htmlspecialchars($g['home'], ENT_QUOTES) . '" data-awayfull="' . htmlspecialchars($g['away'], ENT_QUOTES) . '" data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">Generate AI Report</button>';
+        echo '<button type="button" class="btn btn-check">Check AI Report</button>';
         echo '<button type="button" class="btn btn-download">Download AI Report</button>';
         echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
         echo '</div>';
@@ -330,6 +332,7 @@ window.addEventListener('DOMContentLoaded', () => {
 document.querySelectorAll('.ai-controls').forEach(ctrl => {
   const $gen = ctrl.querySelector('.btn-generate');
   const $dl  = ctrl.querySelector('.btn-download');
+  const $chk = ctrl.querySelector('.btn-check');
   const $st  = ctrl.querySelector('.ai-status');
 
   function setStatus(msg, isErr=false) {
@@ -356,11 +359,11 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
       if (exists) {
         $dl.title = 'Download AI Report';
         if ($gen) $gen.textContent = 'Regenerate AI Report';
-        if (showStatus) setStatus('Available!');
+        if (showStatus) setStatus('Yes');
       } else {
         $dl.title = 'Report not ready yet';
         if ($gen) $gen.textContent = 'Generate AI Report';
-        if (showStatus) setStatus('Not generated yet', true);
+        if (showStatus) setStatus('No', true);
       }
       return exists;
     } catch (err) {
@@ -426,6 +429,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   // Initial availability check on load
   checkReportExists(true);
 
+  if ($chk) $chk.addEventListener('click', () => checkReportExists(true));
   $gen.addEventListener('click', generateReport);
   $dl.addEventListener('click', downloadReport);
 });
