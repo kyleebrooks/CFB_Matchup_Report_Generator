@@ -6,20 +6,26 @@ else
     $ses = 'false';
 require_once 'api_keys.php';
 
-// Connect to the database
-$connection = mysql_connect("p3nlmysql149plsk.secureserver.net", "kdogg4207", "xMkM2941")
-    or die("Could not connect to database server");
-mysql_select_db("kdogg4207", $connection) or die("Problem with database on server");
+// Connect to the database using MySQLi (mysql_* functions are deprecated/removed)
+$connection = mysqli_connect(
+    "p3nlmysql149plsk.secureserver.net",
+    "kdogg4207",
+    "xMkM2941",
+    "kdogg4207"
+);
+if (!$connection) {
+    die("Could not connect to database server");
+}
 
 // Get current week and year
 $weekID = null;
 $year   = null;
-$weekResult = mysql_query("SELECT weekID FROM week WHERE currentWeek='true'", $connection) or die('Query failed.');
-if ($row = mysql_fetch_array($weekResult, MYSQL_ASSOC)) {
+$weekResult = mysqli_query($connection, "SELECT weekID FROM week WHERE currentWeek='true'") or die('Query failed.');
+if ($row = mysqli_fetch_assoc($weekResult)) {
     $weekID = $row['weekID'];
 }
-$yearResult = mysql_query("SELECT year FROM year WHERE currentYear='true'", $connection) or die('Query failed.');
-if ($row = mysql_fetch_array($yearResult, MYSQL_ASSOC)) {
+$yearResult = mysqli_query($connection, "SELECT year FROM year WHERE currentYear='true'") or die('Query failed.');
+if ($row = mysqli_fetch_assoc($yearResult)) {
     $year = $row['year'];
 }
 
@@ -27,17 +33,17 @@ if ($row = mysql_fetch_array($yearResult, MYSQL_ASSOC)) {
 $userPicks = array();
 if (isset($_SESSION['username'])) {
     $username = $_SESSION['username'];
-    $memberResult = mysql_query("SELECT memberid FROM member WHERE username='$username' LIMIT 1", $connection) or die('Query failed.');
-    if ($row = mysql_fetch_array($memberResult, MYSQL_ASSOC)) {
+    $memberResult = mysqli_query($connection, "SELECT memberid FROM member WHERE username='$username' LIMIT 1") or die('Query failed.');
+    if ($row = mysqli_fetch_assoc($memberResult)) {
         $memberId = $row['memberid'];
-        mysql_free_result($memberResult);
+        mysqli_free_result($memberResult);
         $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName 
                       FROM pick p 
                       JOIN team t ON p.teamID = t.teamID 
                       LEFT JOIN team_logo tl ON LOWER(TRIM(t.teamname)) = LOWER(TRIM(tl.team)) 
                       WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
-        $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
-        while ($row = mysql_fetch_array($pickResult, MYSQL_ASSOC)) {
+        $pickResult = mysqli_query($connection, $pickQuery) or die('Query failed.');
+        while ($row = mysqli_fetch_assoc($pickResult)) {
             $logoId  = isset($row['logoId'])  ? (string)trim($row['logoId'])    : '';
             $teamName= isset($row['teamName'])? trim($row['teamName'])          : '';
             if ($logoId !== '') {
@@ -47,9 +53,9 @@ if (isset($_SESSION['username'])) {
                 $userPicks['name:' . $teamName] = true;
             }
         }
-        mysql_free_result($pickResult);
+        mysqli_free_result($pickResult);
     } else {
-        mysql_free_result($memberResult);
+        mysqli_free_result($memberResult);
     }
 }
 
@@ -62,39 +68,39 @@ $gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId
                LEFT JOIN team_logo tlh ON LOWER(TRIM(th.teamname)) = LOWER(TRIM(tlh.team))
                LEFT JOIN team_logo tla ON LOWER(TRIM(ta.teamname)) = LOWER(TRIM(tla.team))
                WHERE g.weekID='$weekID' AND g.yearID='$year'";
-$gamesResult = mysql_query($gamesQuery, $connection) or die('Query failed.');
-while ($row = mysql_fetch_array($gamesResult, MYSQL_ASSOC)) {
+$gamesResult = mysqli_query($connection, $gamesQuery) or die('Query failed.');
+while ($row = mysqli_fetch_assoc($gamesResult)) {
     $homeId = isset($row['homeId']) ? (string)$row['homeId'] : '';
     $awayId = isset($row['awayId']) ? (string)$row['awayId'] : '';
     if ($homeId && $awayId) {
         $afplnaGames[$homeId . '|' . $awayId] = true;
     }
 }
-mysql_free_result($gamesResult);
+mysqli_free_result($gamesResult);
 
 // Load team logos and names for mapping team IDs to names
 $teamData = array();
-$teamResult = mysql_query(
-    "SELECT tl.id, tl.url, t.teamname 
-     FROM team_logo tl 
-     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.teamname))",
-    $connection
+$teamResult = mysqli_query(
+    $connection,
+    "SELECT tl.id, tl.url, t.teamname
+     FROM team_logo tl
+     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.teamname))"
 ) or die('Query failed.');
-while ($row = mysql_fetch_array($teamResult, MYSQL_ASSOC)) {
+while ($row = mysqli_fetch_assoc($teamResult)) {
     $id = (string)trim($row['id']);
     $teamData[$id] = array(
         'logo' => trim($row['url']),
         'name' => trim($row['teamname'])
     );
 }
-mysql_free_result($teamResult);
+mysqli_free_result($teamResult);
 
 // Retrieve API key for external CollegeFootballData API (for live scores)
 $apiKey = '';
-$keyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='CFD' LIMIT 1", $connection);
-if ($keyResult && $row = mysql_fetch_array($keyResult, MYSQL_ASSOC)) {
+$keyResult = mysqli_query($connection, "SELECT `KEY` FROM API_KEYS WHERE API_NAME='CFD' LIMIT 1");
+if ($keyResult && $row = mysqli_fetch_assoc($keyResult)) {
     $apiKey = trim($row['KEY']);
-    mysql_free_result($keyResult);
+    mysqli_free_result($keyResult);
 }
 if (!$apiKey) {
     // fallback to constants or env if not found in DB
@@ -109,19 +115,19 @@ if (!$apiKey) {
 
 // Retrieve Google API key (if used for ads or other services)
 $googleApiKey = '';
-$googleResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='google' LIMIT 1", $connection);
-if ($googleResult && $row = mysql_fetch_array($googleResult, MYSQL_ASSOC)) {
+$googleResult = mysqli_query($connection, "SELECT `KEY` FROM API_KEYS WHERE API_NAME='google' LIMIT 1");
+if ($googleResult && $row = mysqli_fetch_assoc($googleResult)) {
     $googleApiKey = trim($row['KEY']);
-    mysql_free_result($googleResult);
+    mysqli_free_result($googleResult);
 }
 
 // ** AFPLNA API Base URL and Key ** 
 $AFPLNA_API_BASE = 'http://143.198.20.72';  // DigitalOcean droplet base (HTTP)
 $AFPLNA_API_KEY  = '';
-$afplnaKeyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='cfbmatchupreport' LIMIT 1", $connection);
-if ($afplnaKeyResult && $row = mysql_fetch_array($afplnaKeyResult, MYSQL_ASSOC)) {
+$afplnaKeyResult = mysqli_query($connection, "SELECT `KEY` FROM API_KEYS WHERE API_NAME='cfbmatchupreport' LIMIT 1");
+if ($afplnaKeyResult && $row = mysqli_fetch_assoc($afplnaKeyResult)) {
     $AFPLNA_API_KEY = trim($row['KEY']);
-    mysql_free_result($afplnaKeyResult);
+    mysqli_free_result($afplnaKeyResult);
 }
 
 // Fetch live FBS scoreboard data (current games and scores)
@@ -198,7 +204,7 @@ foreach ($data as $game) {
         $otherGames[] = $info;
     }
 }
-mysql_close($connection);
+mysqli_close($connection);
 ?>
 <html>
 <head>
