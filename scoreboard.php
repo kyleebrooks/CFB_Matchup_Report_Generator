@@ -345,13 +345,10 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
   async function checkReportExists(showStatus = false) {
     const home_short = $gen.dataset.homeshort;
     const away_short = $gen.dataset.awayshort;
-    const ts = Date.now();
 
     try {
-      const resp = await fetch(
-        `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`,
-        { cache: 'no-store', mode: 'cors' }
-      );
+      const chkUrl = `/api/has_report.php?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
+      const resp = await fetch(chkUrl, { cache: 'no-store' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
 
@@ -392,15 +389,10 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     setStatus('The AI report is being generated. This can take up to 5 minutes. Try the download report button after 5 minutes to receive the report.');
     $gen.disabled = true;
 
-    fetch(`${API_BASE}/generate-report`, {
+    fetch(`/api/generate_report.php`, {
       method: 'POST',
-      mode: 'cors',
       headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
-      body: new URLSearchParams({
-        api_key: API_KEY,
-        home_full, away_full, home_short, away_short,
-        force: String(force)
-      })
+      body: new URLSearchParams({ api_key: API_KEY, home_full, away_full, home_short, away_short, force: String(force) })
     })
     .then(resp => {
       if (resp && resp.ok) {
