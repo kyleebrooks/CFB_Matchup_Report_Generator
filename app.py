@@ -24,25 +24,32 @@ app = Flask(__name__)
 ALLOWED_ORIGINS = {
     "http://afplnapicks.com",
     "http://www.afplnapicks.com",
+    "https://afplnapicks.com",
+    "https://www.afplnapicks.com",
 }
 ALLOWED = {f"{urlsplit(o).scheme}://{urlsplit(o).hostname}".lower() for o in ALLOWED_ORIGINS}
 
 def _set_cors_headers(resp, origin_hdr):
-    # Normalize the Origin (ignore port to be lenient)
+    # Normalize the Origin (ignore port)
+    allowed = None
     if origin_hdr:
         o = urlsplit(origin_hdr)
         norm = f"{o.scheme}://{o.hostname}".lower()
-        if norm in ALLOWED:
-            resp.headers["Access-Control-Allow-Origin"] = origin_hdr  # echo exact
+        allowed = norm in ALLOWED
+        if allowed:
+            resp.headers["Access-Control-Allow-Origin"] = origin_hdr   # echo exact
             resp.headers["Access-Control-Allow-Credentials"] = "true"
+        else:
+            # Fallback so GET/HEAD JSON is still readable even if scheme/domain mismatch
+            if request.method in ("GET", "HEAD"):
+                resp.headers["Access-Control-Allow-Origin"] = "*"
     else:
-        # Safe default for GET/HEAD when no Origin is sent
+        # No Origin header (e.g., curl) — allow reads
         resp.headers.setdefault("Access-Control-Allow-Origin", "*")
 
-    # Be explicit; don’t rely on mirroring
+    # Be explicit
     resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
-    # Help caches keep variants separate
     vary = resp.headers.get("Vary")
     resp.headers["Vary"] = (vary + ", Origin") if vary else "Origin"
     return resp
