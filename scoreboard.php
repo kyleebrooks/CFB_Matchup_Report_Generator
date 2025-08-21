@@ -350,7 +350,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
     try {
       const resp = await fetch(
         `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`,
-        { cache: 'no-store' }
+        { cache: 'no-store', mode: 'cors' }
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
@@ -394,6 +394,7 @@ document.querySelectorAll('.ai-controls').forEach(ctrl => {
 
     fetch(`${API_BASE}/generate-report`, {
       method: 'POST',
+      mode: 'cors',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         api_key: API_KEY,
