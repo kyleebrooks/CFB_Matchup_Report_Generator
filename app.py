@@ -522,9 +522,13 @@ def generate_report():
 
     try:
         result = ai_resp.json()
-        report_text = result['candidates'][0]['content']['parts'][0]['text']
+        parts = result.get('candidates', [{}])[0].get('content', {}).get('parts', [])
+        text_parts = [p.get('text', '') for p in parts if isinstance(p, dict) and 'text' in p]
+        report_text = "\n".join(text_parts).strip()
+        if not report_text:
+            return jsonify({"error": "No text returned from Gemini", "response": ai_resp.text[:800]}), 502
         # For debugging/auditing, you can log which URLs the tool actually retrieved:
-        used_url_meta = result['candidates'][0].get('url_context_metadata', {})
+        used_url_meta = result.get('candidates', [{}])[0].get('url_context_metadata', {})
         logging.info(f"URL context used: {used_url_meta}")
     except Exception:
         return jsonify({"error": "Unexpected response format from Gemini", "response": ai_resp.text[:800]}), 502
