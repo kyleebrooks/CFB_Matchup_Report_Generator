@@ -57,10 +57,10 @@ def format_friendly_date(dt: datetime) -> str:
         return dt.strftime("%B %d, %Y").replace(" 0", " ")
 
 
-def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str) -> None:
+def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None) -> None:
     pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     for path in glob.glob(pattern):
-        if os.path.basename(path) != keep_filename:
+        if not keep_filename or os.path.basename(path) != keep_filename:
             try:
                 os.remove(path)
             except Exception as e:
@@ -278,13 +278,8 @@ def generate_report():
     if not all([home_full, away_full, home_short, away_short]):
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    # 3) Check for existing reports regardless of date unless forced
-    force_regen = bool(data.get('force'))
-    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
-    existing_files = glob.glob(pattern)
-    if existing_files and not force_regen:
-        latest = max(existing_files, key=os.path.getmtime)
-        return jsonify({"message": "Report already exists", "filename": os.path.basename(latest)}), 200
+    # 3) Remove any existing report for this matchup before generating a new one
+    cleanup_old_reports(home_short, away_short)
 
     # Filename for new report (today)
     today = datetime.now()
@@ -555,7 +550,6 @@ def generate_report():
     pdfkit_config = pdfkit.configuration(wkhtmltopdf=WKHTMLTOPDF_PATH) if WKHTMLTOPDF_PATH else None
     try:
         pdfkit.from_string(html_content, filepath, configuration=pdfkit_config)
-        cleanup_old_reports(home_short, away_short, filename)
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
