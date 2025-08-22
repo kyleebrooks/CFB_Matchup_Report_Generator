@@ -276,7 +276,6 @@ mysql_close($connection);
                  . 'data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" '
                  . 'data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">'
                  . 'Generate AI Report</button> ';
-            echo '<button type="button" class="btn-check">Check AI Report</button> ';
             echo '<button type="button" class="btn-download">Download AI Report</button>';
             echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
             echo '</div>';  // .ai-controls
@@ -324,7 +323,6 @@ mysql_close($connection);
                  . 'data-homeshort="' . htmlspecialchars($g['homeDbName'], ENT_QUOTES) . '" '
                  . 'data-awayshort="' . htmlspecialchars($g['awayDbName'], ENT_QUOTES) . '">'
                  . 'Generate AI Report</button> ';
-            echo '<button type="button" class="btn-check">Check AI Report</button> ';
             echo '<button type="button" class="btn-download">Download AI Report</button>';
             echo '<span class="ai-status" style="margin-left:10px;color:#0a0;">&nbsp;</span>';
             echo '</div>';
@@ -343,7 +341,6 @@ const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
 window.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.ai-controls').forEach(ctrl => {
     const $gen = ctrl.querySelector('.btn-generate');
-    const $chk = ctrl.querySelector('.btn-check');
     const $dl  = ctrl.querySelector('.btn-download');
     const $st  = ctrl.querySelector('.ai-status');
 
@@ -403,15 +400,13 @@ window.addEventListener('DOMContentLoaded', () => {
       fetch(`${API_BASE}/generate-report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           api_key: API_KEY,
-          home_full, away_full, home_short, away_short 
+          home_full, away_full, home_short, away_short
         })
       })
       .then(async resp => {
-        if (resp.ok) {
-          setStatus('Report generation started. Please wait ~5 minutes then click Download.', false);
-        } else {
+        if (!resp.ok) {
           // If server returned an error, display it
           let errMsg = `Error starting report (HTTP ${resp.status})`;
           try {
@@ -430,23 +425,35 @@ window.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => { $gen.disabled = false; }, 1000);
       });
 
-      // Optionally, poll the report status after some intervals to give user feedback
-      setTimeout(() => checkReportExists(true), 15000);  // 15 seconds check
-      setTimeout(() => checkReportExists(true), 60000);  // 60 seconds check
+      // Poll the report status until it's available, keeping the initial message
+      function pollForReport() {
+        checkReportExists(false).then(exists => {
+          if (exists) {
+            setStatus('Report is ready ✔');
+          } else {
+            setTimeout(pollForReport, 15000); // check again in 15s
+          }
+        });
+      }
+      setTimeout(pollForReport, 15000);
     }
 
-    function downloadReport() {
+    async function downloadReport() {
       const home_short = $gen.dataset.homeshort;
       const away_short = $gen.dataset.awayshort;
       const ts = Date.now();  // cache-buster
       const url = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
-      window.location.href = url;
+      const exists = await checkReportExists(false);
+      if (exists) {
+        window.location.href = url;
+      } else {
+        setStatus('A report is not available, please run the AI report generation for this matchup.', true);
+      }
     }
 
     // Initial check on page load for existing report
-    checkReportExists(false);
+    checkReportExists(true);
     // Set up event listeners
-    if ($chk) $chk.addEventListener('click', () => checkReportExists(true));
     $gen.addEventListener('click', generateReport);
     $dl.addEventListener('click', downloadReport);
   });
