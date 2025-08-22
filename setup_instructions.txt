@@ -236,8 +236,33 @@ sudo certbot --nginx -d api.yourdomain.com
 
 12) CORS
 
-CORS headers are handled directly in app.py without Flask-Cors.
-Adjust `ALLOWED_ORIGINS` in the code as needed for your deployment.
+The app implements CORS in `app.py` with a custom `@app.after_request`
+handler—**do not** add Flask-Cors. Make sure your server is running the
+latest code so this handler is active.
+
+Edit `ALLOWED_ORIGINS` in the code to list every allowed domain
+exactly. Include both HTTP and HTTPS and any `www` variations, for
+example:
+
+```
+ALLOWED_ORIGINS = {
+    "http://afplnapicks.com",
+    "http://www.afplnapicks.com",
+    "https://afplnapicks.com",
+    "https://www.afplnapicks.com",
+}
+```
+
+After saving changes, restart the service and verify startup logs for
+errors:
+
+```
+sudo systemctl restart afplna
+sudo systemctl status afplna --no-pager -l
+```
+
+Re-test the API from the browser and confirm the
+`Access-Control-Allow-Origin` header matches the requesting origin.
 
 
 13) Smoke tests
