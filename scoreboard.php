@@ -39,20 +39,15 @@ if (isset($_SESSION['username'])) {
     if ($row = mysql_fetch_assoc($memberResult)) {
         $memberId = $row['memberid'];
         mysql_free_result($memberResult);
-        $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName
+        $pickQuery = "SELECT LOWER(TRIM(t.teamname)) as teamName
                       FROM pick p
                       JOIN team t ON p.teamID = t.teamID
-                      LEFT JOIN team_logo tl ON LOWER(TRIM(t.teamname)) = LOWER(TRIM(tl.team))
                       WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_assoc($pickResult)) {
-            $logoId  = isset($row['logoId'])  ? (string)trim($row['logoId'])    : '';
-            $teamName= isset($row['teamName'])? trim($row['teamName'])          : '';
-            if ($logoId !== '') {
-                $userPicks['id:' . $logoId] = true;
-            }
+            $teamName = isset($row['teamName']) ? trim($row['teamName']) : '';
             if ($teamName !== '') {
-                $userPicks['name:' . $teamName] = true;
+                $userPicks[$teamName] = true;
             }
         }
         mysql_free_result($pickResult);
@@ -63,19 +58,18 @@ if (isset($_SESSION['username'])) {
 
 // Identify AFPLNA “Games of the Week” (to mark them specially)
 $afplnaGames = array();
-$gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId 
-               FROM game g 
-               JOIN team th ON g.homeID = th.teamID 
-               JOIN team ta ON g.awayID = ta.teamID 
-               LEFT JOIN team_logo tlh ON LOWER(TRIM(th.teamname)) = LOWER(TRIM(tlh.team))
-               LEFT JOIN team_logo tla ON LOWER(TRIM(ta.teamname)) = LOWER(TRIM(tla.team))
+$gamesQuery = "SELECT LOWER(TRIM(th.teamname)) as homeName,
+                      LOWER(TRIM(ta.teamname)) as awayName
+               FROM game g
+               JOIN team th ON g.homeID = th.teamID
+               JOIN team ta ON g.awayID = ta.teamID
                WHERE g.weekID='$weekID' AND g.yearID='$year'";
 $gamesResult = mysql_query($gamesQuery, $connection) or die('Query failed.');
 while ($row = mysql_fetch_assoc($gamesResult)) {
-    $homeId = isset($row['homeId']) ? (string)$row['homeId'] : '';
-    $awayId = isset($row['awayId']) ? (string)$row['awayId'] : '';
-    if ($homeId && $awayId) {
-        $afplnaGames[$homeId . '|' . $awayId] = true;
+    $homeName = isset($row['homeName']) ? $row['homeName'] : '';
+    $awayName = isset($row['awayName']) ? $row['awayName'] : '';
+    if ($homeName && $awayName) {
+        $afplnaGames[$homeName . '|' . $awayName] = true;
     }
 }
 mysql_free_result($gamesResult);
@@ -160,14 +154,14 @@ foreach ($data as $game) {
     $awayName = isset($game['awayTeam']['name']) ? $game['awayTeam']['name'] : '';
     $homeId   = isset($game['homeTeam']['id']) ? (string)$game['homeTeam']['id'] : '';
     $awayId   = isset($game['awayTeam']['id']) ? (string)$game['awayTeam']['id'] : '';
-    $key      = $homeId . '|' . $awayId;
-    // Determine if the logged-in user picked one of these teams
-    $yourPick = '';
     $homeNameNorm = strtolower(trim($homeName));
     $awayNameNorm = strtolower(trim($awayName));
-    if (isset($userPicks['id:' . $homeId]) || isset($userPicks['name:' . $homeNameNorm])) {
+    $key      = $homeNameNorm . '|' . $awayNameNorm;
+    // Determine if the logged-in user picked one of these teams
+    $yourPick = '';
+    if (isset($userPicks[$homeNameNorm])) {
         $yourPick = $homeName;
-    } elseif (isset($userPicks['id:' . $awayId]) || isset($userPicks['name:' . $awayNameNorm])) {
+    } elseif (isset($userPicks[$awayNameNorm])) {
         $yourPick = $awayName;
     }
     $info = array(
