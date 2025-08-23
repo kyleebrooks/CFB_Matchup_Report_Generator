@@ -366,15 +366,15 @@ window.addEventListener('DOMContentLoaded', () => {
           $gen.textContent = 'Regenerate AI Report';
           if (showStatus) setStatus('Report is ready ✔');
         } else {
-          $dl.title = 'Report not ready yet';
+          $dl.title = 'Report not yet Generated.';
           $gen.textContent = 'Generate AI Report';
-          if (showStatus) setStatus('Report not ready yet', true);
+          if (showStatus) setStatus('Report not yet Generated.', true);
         }
         return exists;
       } catch (err) {
         console.error('Error checking report availability:', err);
         if (showStatus) setStatus('Error checking report', true);
-        $dl.title = 'Report not ready yet';
+        $dl.title = 'Report not yet Generated.';
         return false;
       }
     }
