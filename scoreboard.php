@@ -223,6 +223,7 @@ mysql_close($connection);
         .score-header .score { font-size: 24px; min-width: 100px; text-align: center; }
         .game-details { padding: 10px; background: #f9f9f9; font-size: 14px; line-height: 1.4; }
         .game-details div { margin: 4px 0; }
+        .your-pick { background-color: yellow; }
         .section-title { background: #003366; color: white; padding: 5px; margin-top: 20px; }
         .refresh { margin-bottom: 15px; }
         .team-logo { width: 24px; height: 24px; object-fit: contain; vertical-align: middle; margin-right: 5px; }
@@ -266,7 +267,7 @@ mysql_close($connection);
             echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "°, Wind " . htmlspecialchars($g['windDir']) . "° @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
             echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
             if (!empty($g['yourPick'])) {
-                echo "<div><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
+                echo "<div class='your-pick'><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
             }
             // AI Report controls
             echo '<div class="ai-controls" style="margin:12px 0;">';
@@ -313,7 +314,7 @@ mysql_close($connection);
             echo "<div><b>Weather:</b> " . htmlspecialchars($g['weatherDesc']) . ", Temp " . htmlspecialchars($g['temperature']) . "°, Wind " . htmlspecialchars($g['windDir']) . "° @ " . htmlspecialchars($g['windSpeed']) . " mph</div>";
             echo "<div><b>Lines:</b> Away ML " . htmlspecialchars($g['awayML']) . ", Home ML " . htmlspecialchars($g['homeML']) . ", O/U " . htmlspecialchars($g['overUnder']) . ", Spread " . htmlspecialchars($g['spread']) . "</div>";
             if (!empty($g['yourPick'])) {
-                echo "<div><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
+                echo "<div class='your-pick'><b>Your Pick:</b> " . htmlspecialchars($g['yourPick']) . "</div>";
             }
             // AI Report controls (for completeness, allow reports on any game)
             echo '<div class="ai-controls" style="margin:12px 0;">';
