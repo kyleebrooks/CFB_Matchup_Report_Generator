@@ -123,8 +123,9 @@ if ($googleResult && $row = mysql_fetch_assoc($googleResult)) {
     mysql_free_result($googleResult);
 }
 
-// ** AFPLNA API Base URL and Key ** 
-$AFPLNA_API_BASE = 'http://143.198.20.72';  // DigitalOcean droplet base (HTTP)
+// ** AFPLNA API Base URL and Key **
+// Use HTTPS to ensure generated reports are downloaded securely
+$AFPLNA_API_BASE = 'https://afplnapicks.com';
 $AFPLNA_API_KEY  = '';
 $afplnaKeyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='cfbmatchupreport' LIMIT 1", $connection);
 if ($afplnaKeyResult && $row = mysql_fetch_assoc($afplnaKeyResult)) {
