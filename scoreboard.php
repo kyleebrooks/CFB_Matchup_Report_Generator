@@ -42,7 +42,7 @@ if (isset($_SESSION['username'])) {
         $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName
                       FROM pick p
                       JOIN team t ON p.teamID = t.teamID
-                      LEFT JOIN team_logo tl ON LOWER(TRIM(t.teamname)) = LOWER(TRIM(tl.team))
+                      LEFT JOIN team_logo tl ON t.teamname = tl.team
                       WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_assoc($pickResult)) {
