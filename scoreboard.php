@@ -39,15 +39,15 @@ if (isset($_SESSION['username'])) {
     if ($row = mysql_fetch_assoc($memberResult)) {
         $memberId = $row['memberid'];
         mysql_free_result($memberResult);
-        $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.shortName)) as teamName
+        $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName
                       FROM pick p
                       JOIN team t ON p.teamID = t.teamID
-                      LEFT JOIN team_logo tl ON LOWER(TRIM(t.shortName)) = LOWER(TRIM(tl.team))
+                      LEFT JOIN team_logo tl ON LOWER(TRIM(t.teamname)) = LOWER(TRIM(tl.team))
                       WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_assoc($pickResult)) {
             $logoId  = isset($row['logoId'])  ? (string)trim($row['logoId'])    : '';
-            $teamName= isset($row['teamName'])? strtolower(trim($row['teamName'])) : '';
+            $teamName= isset($row['teamName'])? trim($row['teamName'])          : '';
             if ($logoId !== '') {
                 $userPicks['id:' . $logoId] = true;
             }
@@ -63,12 +63,12 @@ if (isset($_SESSION['username'])) {
 
 // Identify AFPLNA “Games of the Week” (to mark them specially)
 $afplnaGames = array();
-$gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId
-               FROM game g
-               JOIN team th ON g.homeID = th.teamID
-               JOIN team ta ON g.awayID = ta.teamID
-               LEFT JOIN team_logo tlh ON LOWER(TRIM(th.shortName)) = LOWER(TRIM(tlh.team))
-               LEFT JOIN team_logo tla ON LOWER(TRIM(ta.shortName)) = LOWER(TRIM(tla.team))
+$gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId 
+               FROM game g 
+               JOIN team th ON g.homeID = th.teamID 
+               JOIN team ta ON g.awayID = ta.teamID 
+               LEFT JOIN team_logo tlh ON LOWER(TRIM(th.teamname)) = LOWER(TRIM(tlh.team))
+               LEFT JOIN team_logo tla ON LOWER(TRIM(ta.teamname)) = LOWER(TRIM(tla.team))
                WHERE g.weekID='$weekID' AND g.yearID='$year'";
 $gamesResult = mysql_query($gamesQuery, $connection) or die('Query failed.');
 while ($row = mysql_fetch_assoc($gamesResult)) {
@@ -83,9 +83,9 @@ mysql_free_result($gamesResult);
 // Load team logos and names for mapping team IDs to names
 $teamData = array();
 $teamResult = mysql_query(
-    "SELECT tl.id, tl.url, t.shortName AS teamname
+    "SELECT tl.id, tl.url, t.teamname
      FROM team_logo tl
-     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.shortName))",
+     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.teamname))",
     $connection
 ) or die('Query failed.');
 while ($row = mysql_fetch_assoc($teamResult)) {
@@ -156,10 +156,8 @@ if ($httpCode === 200) {
 $featuredGames = array();
 $otherGames    = array();
 foreach ($data as $game) {
-    $homeFull = isset($game['homeTeam']['name']) ? $game['homeTeam']['name'] : '';
-    $awayFull = isset($game['awayTeam']['name']) ? $game['awayTeam']['name'] : '';
-    $homeName = isset($game['homeTeam']['school']) ? $game['homeTeam']['school'] : $homeFull;
-    $awayName = isset($game['awayTeam']['school']) ? $game['awayTeam']['school'] : $awayFull;
+    $homeName = isset($game['homeTeam']['name']) ? $game['homeTeam']['name'] : '';
+    $awayName = isset($game['awayTeam']['name']) ? $game['awayTeam']['name'] : '';
     $homeId   = isset($game['homeTeam']['id']) ? (string)$game['homeTeam']['id'] : '';
     $awayId   = isset($game['awayTeam']['id']) ? (string)$game['awayTeam']['id'] : '';
     $key      = $homeId . '|' . $awayId;
@@ -173,8 +171,8 @@ foreach ($data as $game) {
         $yourPick = $awayName;
     }
     $info = array(
-        'home'       => $homeFull,
-        'away'       => $awayFull,
+        'home'       => $homeName,
+        'away'       => $awayName,
         'homeDbName' => isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : $homeName,  // normalized name for consistency
         'awayDbName' => isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : $awayName,
         'homeLogo'   => isset($teamData[$homeId]['logo']) ? $teamData[$homeId]['logo'] : '',
