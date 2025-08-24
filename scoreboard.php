@@ -82,6 +82,7 @@ mysql_free_result($gamesResult);
 
 // Load team logos and names for mapping team IDs to names
 $teamData = array();
+$teamNameToId = array();
 $teamResult = mysql_query(
     "SELECT tl.id, tl.url, t.teamname
      FROM team_logo tl
@@ -89,11 +90,19 @@ $teamResult = mysql_query(
     $connection
 ) or die('Query failed.');
 while ($row = mysql_fetch_assoc($teamResult)) {
-    $id = (string)trim($row['id']);
+    $id       = (string)trim($row['id']);
+    $teamName = trim($row['teamname']);
+    $nameNorm = strtolower($teamName);
+
+    // Primary lookup by numeric ID
     $teamData[$id] = array(
+        'id'   => $id,
         'logo' => trim($row['url']),
-        'name' => trim($row['teamname'])
+        'name' => $teamName
     );
+
+    // Secondary lookup by normalized school name for fallback matches
+    $teamNameToId[$nameNorm] = $id;
 }
 mysql_free_result($teamResult);
 
@@ -132,8 +141,10 @@ if ($afplnaKeyResult && $row = mysql_fetch_assoc($afplnaKeyResult)) {
     mysql_free_result($afplnaKeyResult);
 }
 
-// Fetch live FBS scoreboard data (current games and scores)
-$url = "https://api.collegefootballdata.com/scoreboard?classification=fbs";
+// Fetch live FBS scoreboard data for the current AFPLNA week/year
+$url = "https://api.collegefootballdata.com/scoreboard?classification=fbs"
+     . "&year=" . urlencode($year)
+     . "&week=" . urlencode($weekID);
 $ch  = curl_init($url);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 $headers = array("Accept: application/json");
@@ -156,25 +167,39 @@ if ($httpCode === 200) {
 $featuredGames = array();
 $otherGames    = array();
 foreach ($data as $game) {
-    $homeName = isset($game['homeTeam']['name']) ? $game['homeTeam']['name'] : '';
-    $awayName = isset($game['awayTeam']['name']) ? $game['awayTeam']['name'] : '';
-    $homeId   = isset($game['homeTeam']['id']) ? (string)$game['homeTeam']['id'] : '';
-    $awayId   = isset($game['awayTeam']['id']) ? (string)$game['awayTeam']['id'] : '';
-    $key      = $homeId . '|' . $awayId;
+    $homeName   = isset($game['homeTeam']['name'])   ? $game['homeTeam']['name']   : '';
+    $awayName   = isset($game['awayTeam']['name'])   ? $game['awayTeam']['name']   : '';
+    $homeSchool = isset($game['homeTeam']['school']) ? $game['homeTeam']['school'] : '';
+    $awaySchool = isset($game['awayTeam']['school']) ? $game['awayTeam']['school'] : '';
+    $homeId     = isset($game['homeTeam']['id'])     ? (string)$game['homeTeam']['id']     : '';
+    $awayId     = isset($game['awayTeam']['id'])     ? (string)$game['awayTeam']['id']     : '';
+
+    $homeNorm = strtolower(trim($homeSchool));
+    $awayNorm = strtolower(trim($awaySchool));
+
+    // Resolve IDs via team name if missing or mismatched
+    if ((!$homeId || !isset($teamData[$homeId])) && $homeNorm && isset($teamNameToId[$homeNorm])) {
+        $homeId = $teamNameToId[$homeNorm];
+    }
+    if ((!$awayId || !isset($teamData[$awayId])) && $awayNorm && isset($teamNameToId[$awayNorm])) {
+        $awayId = $teamNameToId[$awayNorm];
+    }
+
+    $key = $homeId . '|' . $awayId;
+
     // Determine if the logged-in user picked one of these teams
     $yourPick = '';
-    $homeNameNorm = strtolower(trim($homeName));
-    $awayNameNorm = strtolower(trim($awayName));
-    if (isset($userPicks['id:' . $homeId]) || isset($userPicks['name:' . $homeNameNorm])) {
-        $yourPick = $homeName;
-    } elseif (isset($userPicks['id:' . $awayId]) || isset($userPicks['name:' . $awayNameNorm])) {
-        $yourPick = $awayName;
+    if (isset($userPicks['id:' . $homeId]) || ($homeNorm && isset($userPicks['name:' . $homeNorm]))) {
+        $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
+    } elseif (isset($userPicks['id:' . $awayId]) || ($awayNorm && isset($userPicks['name:' . $awayNorm]))) {
+        $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
     }
+
     $info = array(
-        'home'       => $homeName,
-        'away'       => $awayName,
-        'homeDbName' => isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : $homeName,  // normalized name for consistency
-        'awayDbName' => isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : $awayName,
+        'home'       => isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName),
+        'away'       => isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName),
+        'homeDbName' => isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName),
+        'awayDbName' => isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName),
         'homeLogo'   => isset($teamData[$homeId]['logo']) ? $teamData[$homeId]['logo'] : '',
         'awayLogo'   => isset($teamData[$awayId]['logo']) ? $teamData[$awayId]['logo'] : '',
         'venue'      => isset($game['venue']['name']) ? $game['venue']['name'] : '',
@@ -198,6 +223,7 @@ foreach ($data as $game) {
         'spread'     => isset($game['betting']['spread']) ? $game['betting']['spread'] : '',
         'yourPick'   => $yourPick
     );
+
     if (isset($afplnaGames[$key])) {
         $info['afplna'] = true;
         $featuredGames[] = $info;
