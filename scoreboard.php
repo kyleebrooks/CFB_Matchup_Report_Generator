@@ -31,7 +31,7 @@ if ($row = mysql_fetch_assoc($yearResult)) {
     $year = $row['year'];
 }
 
-// Load the logged-in user's picks for this week (to highlight their chosen teams)
+// Load the logged-in user's picks for this week (keyed by matchup to handle duplicate teams)
 $userPicks = array();
 if (isset($_SESSION['username'])) {
     $username = $_SESSION['username'];
@@ -39,20 +39,32 @@ if (isset($_SESSION['username'])) {
     if ($row = mysql_fetch_assoc($memberResult)) {
         $memberId = $row['memberid'];
         mysql_free_result($memberResult);
-        $pickQuery = "SELECT tl.id as logoId, t.teamname as teamName
-                      FROM pick p
-                      JOIN team t ON p.teamID = t.teamID
-                      LEFT JOIN team_logo tl ON BINARY t.teamname = BINARY tl.team
-                      WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
+        $pickQuery = "SELECT g.homeID  AS homeTeamId,"
+                     . "       g.awayID  AS awayTeamId,"
+                     . "       p.teamID  AS pickTeamId,"
+                     . "       tlh.id    AS homeLogoId,"
+                     . "       tla.id    AS awayLogoId"
+                     . "  FROM pick p"
+                     . "  JOIN game g ON p.gameID = g.gameID"
+                     . "  JOIN team th ON g.homeID = th.teamID"
+                     . "  JOIN team ta ON g.awayID = ta.teamID"
+                     . "  LEFT JOIN team_logo tlh ON BINARY th.teamname = BINARY tlh.team"
+                     . "  LEFT JOIN team_logo tla ON BINARY ta.teamname = BINARY tla.team"
+                     . " WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_assoc($pickResult)) {
-            $logoId  = isset($row['logoId'])  ? (string)trim($row['logoId'])    : '';
-            $teamName= isset($row['teamName'])? trim($row['teamName'])          : '';
-            if ($logoId !== '') {
-                $userPicks['id:' . $logoId] = true;
-            }
-            if ($teamName !== '') {
-                $userPicks['name:' . $teamName] = true;
+            $homeLogoId = isset($row['homeLogoId']) ? (string)$row['homeLogoId'] : '';
+            $awayLogoId = isset($row['awayLogoId']) ? (string)$row['awayLogoId'] : '';
+            $homeTeamId = isset($row['homeTeamId']) ? (string)$row['homeTeamId'] : '';
+            $awayTeamId = isset($row['awayTeamId']) ? (string)$row['awayTeamId'] : '';
+            $pickTeamId = isset($row['pickTeamId']) ? (string)$row['pickTeamId'] : '';
+            if ($homeLogoId && $awayLogoId) {
+                $key = $homeLogoId . '|' . $awayLogoId;
+                if ($pickTeamId === $homeTeamId) {
+                    $userPicks[$key] = $homeLogoId;
+                } elseif ($pickTeamId === $awayTeamId) {
+                    $userPicks[$key] = $awayLogoId;
+                }
             }
         }
         mysql_free_result($pickResult);
@@ -186,12 +198,15 @@ foreach ($data as $game) {
 
     $key = $homeId . '|' . $awayId;
 
-    // Determine if the logged-in user picked one of these teams
+    // Determine if the logged-in user picked this specific matchup
     $yourPick = '';
-    if (isset($userPicks['id:' . $homeId]) || ($homeKey && isset($userPicks['name:' . $homeKey]))) {
-        $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
-    } elseif (isset($userPicks['id:' . $awayId]) || ($awayKey && isset($userPicks['name:' . $awayKey]))) {
-        $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
+    if (isset($userPicks[$key])) {
+        $pickId = $userPicks[$key];
+        if ($pickId === $homeId) {
+            $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
+        } elseif ($pickId === $awayId) {
+            $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
+        }
     }
 
     $info = array(
