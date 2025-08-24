@@ -184,14 +184,18 @@ foreach ($data as $game) {
         $awayId = $teamNameToId[$awayKey];
     }
 
-    $key = $homeId . '|' . $awayId;
+    $key       = $homeId . '|' . $awayId;
+    $isAfplna  = isset($afplnaGames[$key]);
 
-    // Determine if the logged-in user picked one of these teams
+    // Determine if the logged-in user picked one of these teams.
+    // Only display the pick when the matchup is an AFPLNA game (Game of the Week).
     $yourPick = '';
-    if (isset($userPicks['id:' . $homeId]) || ($homeKey && isset($userPicks['name:' . $homeKey]))) {
-        $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
-    } elseif (isset($userPicks['id:' . $awayId]) || ($awayKey && isset($userPicks['name:' . $awayKey]))) {
-        $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
+    if ($isAfplna) {
+        if (isset($userPicks['id:' . $homeId]) || ($homeKey && isset($userPicks['name:' . $homeKey]))) {
+            $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
+        } elseif (isset($userPicks['id:' . $awayId]) || ($awayKey && isset($userPicks['name:' . $awayKey]))) {
+            $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
+        }
     }
 
     $info = array(
@@ -223,7 +227,7 @@ foreach ($data as $game) {
         'yourPick'   => $yourPick
     );
 
-    if (isset($afplnaGames[$key])) {
+    if ($isAfplna) {
         $info['afplna'] = true;
         $featuredGames[] = $info;
     } else {
