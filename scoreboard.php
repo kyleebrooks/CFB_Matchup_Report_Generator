@@ -39,10 +39,10 @@ if (isset($_SESSION['username'])) {
     if ($row = mysql_fetch_assoc($memberResult)) {
         $memberId = $row['memberid'];
         mysql_free_result($memberResult);
-        $pickQuery = "SELECT tl.id as logoId, LOWER(TRIM(t.teamname)) as teamName
+        $pickQuery = "SELECT tl.id as logoId, t.teamname as teamName
                       FROM pick p
                       JOIN team t ON p.teamID = t.teamID
-                      LEFT JOIN team_logo tl ON t.teamname = tl.team
+                      LEFT JOIN team_logo tl ON BINARY t.teamname = BINARY tl.team
                       WHERE p.memberID='$memberId' AND p.weekID='$weekID' AND p.yearID='$year'";
         $pickResult = mysql_query($pickQuery, $connection) or die('Query failed.');
         while ($row = mysql_fetch_assoc($pickResult)) {
@@ -67,8 +67,8 @@ $gamesQuery = "SELECT tlh.id as homeId, tla.id as awayId
                FROM game g 
                JOIN team th ON g.homeID = th.teamID 
                JOIN team ta ON g.awayID = ta.teamID 
-               LEFT JOIN team_logo tlh ON LOWER(TRIM(th.teamname)) = LOWER(TRIM(tlh.team))
-               LEFT JOIN team_logo tla ON LOWER(TRIM(ta.teamname)) = LOWER(TRIM(tla.team))
+               LEFT JOIN team_logo tlh ON BINARY th.teamname = BINARY tlh.team
+               LEFT JOIN team_logo tla ON BINARY ta.teamname = BINARY tla.team
                WHERE g.weekID='$weekID' AND g.yearID='$year'";
 $gamesResult = mysql_query($gamesQuery, $connection) or die('Query failed.');
 while ($row = mysql_fetch_assoc($gamesResult)) {
@@ -86,13 +86,12 @@ $teamNameToId = array();
 $teamResult = mysql_query(
     "SELECT tl.id, tl.url, t.teamname
      FROM team_logo tl
-     JOIN team t ON LOWER(TRIM(tl.team)) = LOWER(TRIM(t.teamname))",
+     JOIN team t ON BINARY tl.team = BINARY t.teamname",
     $connection
 ) or die('Query failed.');
 while ($row = mysql_fetch_assoc($teamResult)) {
     $id       = (string)trim($row['id']);
     $teamName = trim($row['teamname']);
-    $nameNorm = strtolower($teamName);
 
     // Primary lookup by numeric ID
     $teamData[$id] = array(
@@ -101,8 +100,8 @@ while ($row = mysql_fetch_assoc($teamResult)) {
         'name' => $teamName
     );
 
-    // Secondary lookup by normalized school name for fallback matches
-    $teamNameToId[$nameNorm] = $id;
+    // Secondary lookup by exact school name for fallback matches
+    $teamNameToId[$teamName] = $id;
 }
 mysql_free_result($teamResult);
 
@@ -174,24 +173,24 @@ foreach ($data as $game) {
     $homeId     = isset($game['homeTeam']['id'])     ? (string)$game['homeTeam']['id']     : '';
     $awayId     = isset($game['awayTeam']['id'])     ? (string)$game['awayTeam']['id']     : '';
 
-    $homeNorm = strtolower(trim($homeSchool));
-    $awayNorm = strtolower(trim($awaySchool));
+    $homeKey = trim($homeSchool);
+    $awayKey = trim($awaySchool);
 
-    // Resolve IDs via team name if missing or mismatched
-    if ((!$homeId || !isset($teamData[$homeId])) && $homeNorm && isset($teamNameToId[$homeNorm])) {
-        $homeId = $teamNameToId[$homeNorm];
+    // Resolve IDs via team name if missing or mismatched using exact matches
+    if ((!$homeId || !isset($teamData[$homeId])) && $homeKey && isset($teamNameToId[$homeKey])) {
+        $homeId = $teamNameToId[$homeKey];
     }
-    if ((!$awayId || !isset($teamData[$awayId])) && $awayNorm && isset($teamNameToId[$awayNorm])) {
-        $awayId = $teamNameToId[$awayNorm];
+    if ((!$awayId || !isset($teamData[$awayId])) && $awayKey && isset($teamNameToId[$awayKey])) {
+        $awayId = $teamNameToId[$awayKey];
     }
 
     $key = $homeId . '|' . $awayId;
 
     // Determine if the logged-in user picked one of these teams
     $yourPick = '';
-    if (isset($userPicks['id:' . $homeId]) || ($homeNorm && isset($userPicks['name:' . $homeNorm]))) {
+    if (isset($userPicks['id:' . $homeId]) || ($homeKey && isset($userPicks['name:' . $homeKey]))) {
         $yourPick = isset($teamData[$homeId]['name']) ? $teamData[$homeId]['name'] : ($homeSchool ?: $homeName);
-    } elseif (isset($userPicks['id:' . $awayId]) || ($awayNorm && isset($userPicks['name:' . $awayNorm]))) {
+    } elseif (isset($userPicks['id:' . $awayId]) || ($awayKey && isset($userPicks['name:' . $awayKey]))) {
         $yourPick = isset($teamData[$awayId]['name']) ? $teamData[$awayId]['name'] : ($awaySchool ?: $awayName);
     }
 
