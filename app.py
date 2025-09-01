@@ -539,8 +539,8 @@ def generate_report():
             position: fixed;
             top: 0;
             left: 0;
-            width: 100%;
-            height: 100%;
+            width: 100vw;
+            height: 100vh;
             background: url('data:image/png;base64,{watermark_b64}') center center no-repeat;
             background-size: 70%;
             opacity: 0.1;
