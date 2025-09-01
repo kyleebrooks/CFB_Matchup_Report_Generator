@@ -521,6 +521,15 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not retrieve team logos from CFBD: {e}")
 
+    # 9b) Load watermark image for PDF
+    watermark_b64 = ""
+    watermark_path = os.path.join(BASE_DIR, "AFPLNA_LOGO.png")
+    try:
+        with open(watermark_path, "rb") as wm:
+            watermark_b64 = base64.b64encode(wm.read()).decode("ascii")
+    except Exception as e:
+        logging.warning(f"Could not load watermark image: {e}")
+
     # 10) Build LLM prompt & call Gemini (URL context enabled)
     prompt_intro = (
         f"You are a top-tier, seasoned sports analyst. Using the provided CFD statistics and news articles to craft a full-length matchup report for {home_full} vs {away_full} in {year}. You speak in the voice and style of a seasoned sports analyst, handicapper, and writer. Avoid cheesey and overused terms, and try to be more edgy with dark humor where appropriate."
@@ -578,6 +587,8 @@ def generate_report():
     else:
         report_html_body = "<br>\n".join(report_text.split("\n"))
 
+    report_created = f"{format_friendly_date(today)} {today.strftime('%I:%M %p')}"
+
     html_content = f"""
     <html>
     <head>
@@ -589,14 +600,17 @@ def generate_report():
         .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
         .content {{ text-align:left; }}
+        .watermark {{ position:fixed; top:35%; left:50%; transform:translate(-50%, -50%); opacity:0.1; z-index:-1; }}
       </style>
     </head>
     <body>
+      <div class=\"watermark\"><img src=\"data:image/png;base64,{watermark_b64}\" alt=\"AFPLNA watermark\" style=\"width:60%; height:auto;\"></div>
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
             <h1>AFPLNA College Football Matchup Report</h1>
             <h2>{home_full} vs {away_full} ({year})</h2>
+            <p style=\"margin:0;\">Report created on: {report_created}</p>
         </div>
         <img src=\"{away_logo}\" alt=\"{away_full} logo\">
       </div>
