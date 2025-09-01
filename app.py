@@ -597,10 +597,10 @@ def generate_report():
       <style>
         body {{ font-family: Arial, sans-serif; line-height: 1.45; }}
         h1, h2, h3 {{ margin: 0.2em 0; }}
-        .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; }}
+        .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
-        .content {{ text-align:left; }}
-        .watermark {{ position:fixed; top:35%; left:50%; transform:translate(-50%, -50%); opacity:0.1; z-index:-1; }}
+        .content {{ text-align:left; position:relative; z-index:1; }}
+        .watermark {{ position:fixed; top:35%; left:50%; transform:translate(-50%, -50%); opacity:0.1; z-index:0; pointer-events:none; }}
       </style>
     </head>
     <body>
