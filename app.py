@@ -600,12 +600,9 @@ def generate_report():
         .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
         .content {{ text-align:left; position:relative; z-index:1; }}
-        .watermark {{ position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); opacity:0.1; z-index:0; pointer-events:none; }}
-        .watermark img {{ width:70%; height:auto; }}
       </style>
     </head>
     <body>
-      <div class=\"watermark\"><img src=\"data:image/png;base64,{watermark_b64}\" alt=\"AFPLNA watermark\"/></div>
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
@@ -632,6 +629,44 @@ def generate_report():
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
+
+    # 12b) Apply watermark to each PDF page
+    if watermark_b64:
+        try:
+            from PyPDF2 import PdfReader, PdfWriter
+            from reportlab.pdfgen import canvas
+            from reportlab.lib.utils import ImageReader
+            import io
+
+            reader = PdfReader(filepath)
+            first_page = reader.pages[0]
+            page_width = float(first_page.mediabox.width)
+            page_height = float(first_page.mediabox.height)
+
+            # Create a watermark PDF with the logo centered
+            watermark_pdf = io.BytesIO()
+            c = canvas.Canvas(watermark_pdf, pagesize=(page_width, page_height))
+            c.setFillAlpha(0.1)
+            image = ImageReader(io.BytesIO(base64.b64decode(watermark_b64)))
+            img_w, img_h = image.getSize()
+            scale = min((page_width * 0.7) / img_w, (page_height * 0.7) / img_h)
+            img_w *= scale
+            img_h *= scale
+            x = (page_width - img_w) / 2
+            y = (page_height - img_h) / 2
+            c.drawImage(image, x, y, width=img_w, height=img_h, mask='auto')
+            c.save()
+            watermark_pdf.seek(0)
+            watermark_page = PdfReader(watermark_pdf).pages[0]
+
+            writer = PdfWriter()
+            for page in reader.pages:
+                page.merge_page(watermark_page)
+                writer.add_page(page)
+            with open(filepath, "wb") as stamped:
+                writer.write(stamped)
+        except Exception as e:
+            logging.warning(f"Failed to apply watermark to PDF pages: {e}")
 
     return jsonify({"message": "Report generated successfully", "filename": filename}), 200
 
