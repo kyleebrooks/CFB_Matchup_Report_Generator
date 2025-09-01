@@ -600,11 +600,11 @@ def generate_report():
         .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
         .content {{ text-align:left; position:relative; z-index:1; }}
-        .watermark {{ position:fixed; top:35%; left:50%; transform:translate(-50%, -50%); opacity:0.1; z-index:0; pointer-events:none; }}
+        .watermark {{ position:fixed; top:0; left:0; width:100%; height:100%; display:flex; justify-content:center; align-items:center; opacity:0.1; z-index:0; pointer-events:none; }}
       </style>
     </head>
     <body>
-      <div class=\"watermark\"><img src=\"data:image/png;base64,{watermark_b64}\" alt=\"AFPLNA watermark\" style=\"width:60%; height:auto;\"></div>
+      <div class=\"watermark\"><img src=\"data:image/png;base64,{watermark_b64}\" alt=\"AFPLNA watermark\" style=\"width:100%; height:auto;\"></div>
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
