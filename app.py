@@ -534,17 +534,11 @@ def generate_report():
     watermark_css = ""
     if watermark_b64:
         watermark_css = f"""
-        body::before {{
-            content: "";
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
+        body {{
             background: url('data:image/png;base64,{watermark_b64}') center center no-repeat;
             background-size: 70%;
-            opacity: 0.1;
-            z-index: 0;
+            background-repeat: repeat-y;
+            background-attachment: fixed;
         }}
         """
 
@@ -643,8 +637,17 @@ def generate_report():
         return jsonify({"error": "PDF generation library not installed on server."}), 500
 
     pdfkit_config = pdfkit.configuration(wkhtmltopdf=WKHTMLTOPDF_PATH) if WKHTMLTOPDF_PATH else None
+    pdf_options = {
+        "enable-local-file-access": None,
+        "background": None,
+    }
     try:
-        pdfkit.from_string(html_content, filepath, configuration=pdfkit_config)
+        pdfkit.from_string(
+            html_content,
+            filepath,
+            configuration=pdfkit_config,
+            options=pdf_options,
+        )
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
