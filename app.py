@@ -530,23 +530,17 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not load watermark image: {e}")
 
-    # Watermark elements (fixed-position overlay on each PDF page)
+    # CSS snippet for watermark (no extra PDF post-processing required)
     watermark_css = ""
-    watermark_html = ""
     if watermark_b64:
-        watermark_css = """
-        .watermark {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            width: 70%;
-            transform: translate(-50%, -50%);
-            opacity: 0.1;
-            z-index: 0;
-            pointer-events: none;
-        }
+        watermark_css = f"""
+        body {{
+            background: url('data:image/png;base64,{watermark_b64}') center center no-repeat;
+            background-size: 70%;
+            background-repeat: repeat-y;
+            background-attachment: fixed;
+        }}
         """
-        watermark_html = f"<img src='data:image/png;base64,{watermark_b64}' alt='Watermark' class='watermark' />"
 
     # 10) Build LLM prompt & call Gemini (URL context enabled)
     prompt_intro = (
@@ -622,7 +616,6 @@ def generate_report():
       </style>
     </head>
     <body>
-      {watermark_html}
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
