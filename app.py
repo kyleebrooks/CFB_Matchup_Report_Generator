@@ -28,6 +28,8 @@ ALLOWED_ORIGINS = {
     "https://www.afplnapicks.com",
     "http://www.afplnapicks.com/PicksSite/",
     "http://afplnapicks.com/PicksSite/",
+    "https://www.afplnapicks.com/PicksSite/",
+    "https://afplnapicks.com/PicksSite/",
 }
 ALLOWED = {f"{urlsplit(o).scheme}://{urlsplit(o).hostname}".lower() for o in ALLOWED_ORIGINS}
 
