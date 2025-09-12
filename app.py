@@ -568,6 +568,8 @@ def generate_report():
     gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
+        # maxOutputTokens limits the size of the LLM response. Increase or
+        # remove this cap if longer reports are required.
         "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7},
         # >>> Enable URL context <<<
         "tools": [
@@ -592,6 +594,10 @@ def generate_report():
         # For debugging/auditing, you can log which URLs the tool actually retrieved:
         used_url_meta = result.get('candidates', [{}])[0].get('url_context_metadata', {})
         logging.info(f"URL context used: {used_url_meta}")
+        # Capture token usage from Gemini response (if provided)
+        usage_meta = result.get('usageMetadata', {})
+        input_tokens = usage_meta.get('promptTokenCount')
+        output_tokens = usage_meta.get('candidatesTokenCount') or usage_meta.get('candidateTokenCount')
     except Exception:
         return jsonify({"error": "Unexpected response format from Gemini", "response": ai_resp.text[:800]}), 502
 
@@ -602,6 +608,11 @@ def generate_report():
         report_html_body = "<br>\n".join(report_text.split("\n"))
 
     report_created = f"{format_friendly_date(today)} {today.strftime('%I:%M %p')}"
+
+    token_html = (
+        f"<div class='token-info'><p>Input tokens: {input_tokens if input_tokens is not None else 'N/A'}</p>"
+        f"<p>Output tokens: {output_tokens if output_tokens is not None else 'N/A'}</p></div>"
+    )
 
     html_content = f"""
     <html>
@@ -628,6 +639,7 @@ def generate_report():
         <img src=\"{away_logo}\" alt=\"{away_full} logo\">
       </div>
       <div class=\"content\">{report_html_body}</div>
+      {token_html}
     </body>
     </html>
     """
