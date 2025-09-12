@@ -568,9 +568,8 @@ def generate_report():
     gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
-        # maxOutputTokens limits the size of the LLM response. Increase or
-        # remove this cap if longer reports are required.
-        "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7},
+        # Allow for longer reports by removing the tight output cap.
+        "generationConfig": {"maxOutputTokens": 64000, "temperature": 0.7},
         # >>> Enable URL context <<<
         "tools": [
             {"url_context": {}}
@@ -580,7 +579,8 @@ def generate_report():
     }
     headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_api_key}
 
-    ai_resp = requests.post(gemini_url, json=body, headers=headers, timeout=120)
+    # Extend timeout to handle larger responses without truncation.
+    ai_resp = requests.post(gemini_url, json=body, headers=headers, timeout=300)
     if ai_resp.status_code != 200:
         return jsonify({"error": "Gemini API request failed", "detail": ai_resp.text}), 502
 
