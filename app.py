@@ -351,11 +351,9 @@ def generate_report():
 
     # 4) Load API keys (short-lived DB connection)
     cfbd_api_key = get_api_key('CFD') or get_api_key('CFBD') or os.getenv('CFBD_API_KEY')
-    search_api_key = get_api_key('search') or os.getenv('GOOGLE_SEARCH_API_KEY')
-    google_cx = get_api_key('google_cx') or os.getenv('GOOGLE_CX')
-    gemini_api_key = get_api_key('google') or os.getenv('GOOGLE_API_KEY')
+    openai_api_key = get_api_key('openai') or os.getenv('OPENAI_API_KEY')
 
-    if not all([cfbd_api_key, search_api_key, google_cx, gemini_api_key]):
+    if not all([cfbd_api_key, openai_api_key]):
         return jsonify({"error": "Missing required API keys"}), 500
 
     # 5) CFBD stats (external calls; no DB connection held)
@@ -396,85 +394,19 @@ def generate_report():
 
         fetchedData[label] = {"teamA": dataA, "teamB": dataB}
 
-    # 6) Google CSE searches (unchanged definitions, but we'll cap to 20 URLs overall)
-    categories = {
-        "Team A injury updates":                 f'Latest football injury news for the "{home_full}" team. Only the latest news associated with the team, no more than 14 days old.',
-        "Team B injury updates":                 f'Latest football injury news for the "{away_full}" team. Only the latest news associated with the team, no more than 14 days old.',
-        "Team A roster Updates":                 f'Latest football roster news for the "{home_full}" team. Only the latest news associated with the team, no more than 14 days old. Only current players.',
-        "Team B Roster Updates":                 f'Latest football roster news for the "{away_full}" team. Only the latest news associated with the team, no more than 14 days old. Only current players.',
-        "Team A practice and Scrimmage updates": f'Latest "{home_full}" football practice and scrimmage report. no more than 7 days old.',
-        "Team B practice and scrimmage updates": f'Latest "{away_full}" football practice and scrimmage report. no more than 7 days old.',
-        "Matchup Analysis":                      f'The upcoming "{home_full}" vs "{away_full}" matchup. The latest expert football predictions and analysis.',
-    }
-
-    search_results: dict[str, list[dict[str, str]]] = {}
-    raw_links: list[tuple[str, str]] = []  # (category, url)
-
-    for label, query in categories.items():
-        params = {
-            "key": search_api_key,
-            "cx": google_cx,
-            "q": query,
-            "num": 5 if label == "Matchup Analysis" else 3,
-            "gl": "us",
-            "hl": "en",
-            "dateRestrict": "d7",
-        }
-        resp = requests.get("https://customsearch.googleapis.com/customsearch/v1", params=params, timeout=30)
-        if resp.status_code != 200:
-            return jsonify({"error": f"Google search failed for {label}", "detail": resp.text}), 502
-        data = resp.json()
-        items = data.get("items", [])
-        cleaned = []
-        for item in items:
-            link = item.get("link", "")
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            display = item.get("displayLink", "")
-            if not link:
-                continue
-            cleaned.append({"title": title, "snippet": snippet, "url": link, "displayLink": display, "category": label})
-            raw_links.append((label, link))
-        search_results[label] = cleaned
-
-    # Cap to <= 20 total URLs for URL context (preferring Matchup Analysis first, then others)
-    def dedupe_ordered(pairs: list[tuple[str, str]]):
-        seen = set()
-        out = []
-        for cat, u in pairs:
-            if u not in seen:
-                out.append((cat, u))
-                seen.add(u)
-        return out
-
-    # Preference order: Matchup first, then injuries/roster/practice buckets
-    priority = ["Matchup Analysis",
-                "Team A injury updates", "Team B injury updates",
-                "Team A roster Updates", "Team B Roster Updates",
-                "Team A practice and Scrimmage updates", "Team B practice and scrimmage updates"]
-
-    raw_links = [p for p in raw_links if p[0] in priority]
-    raw_links = sorted(raw_links, key=lambda p: priority.index(p[0]))
-    raw_links = dedupe_ordered(raw_links)
-
-    MAX_URLS = 20
-    urls_for_ai_pairs = raw_links[:MAX_URLS]
-    urls_for_ai = [u for _, u in urls_for_ai_pairs]
-
-    # 7) Build a compact article source list for the prompt (no scraping)
-    articles_struct = []
-    for label, results in search_results.items():
-        for r in results:
-            if r["url"] in urls_for_ai:
-                articles_struct.append({
-                    "category": label,
-                    "title": r["title"],
-                    "url": r["url"],
-                    "snippet": r["snippet"],
-                })
-
-    # If you want to see what we'll ask Gemini to read:
-    fetchedData["Media Sources"] = articles_struct
+    # 6) News gathering is handled by the model's built-in web_search tool.
+    #    Google retired the Custom Search JSON API (closed to new customers in 2025,
+    #    hard shutdown 2027-01-01), so instead of pre-fetching article URLs we hand
+    #    the model an explicit list of searches to run against the live web.
+    search_directives = [
+        f'Latest injury news for the "{home_full}" football team (last 14 days only, current players).',
+        f'Latest injury news for the "{away_full}" football team (last 14 days only, current players).',
+        f'Latest non-injury roster news for the "{home_full}" football team (last 14 days only, current players).',
+        f'Latest non-injury roster news for the "{away_full}" football team (last 14 days only, current players).',
+        f'Latest "{home_full}" football practice and scrimmage reports (last 7 days only).',
+        f'Latest "{away_full}" football practice and scrimmage reports (last 7 days only).',
+        f'Latest expert predictions and analysis for the upcoming "{home_full}" vs "{away_full}" matchup.',
+    ]
 
     # 8) Injury news (open a FRESH DB connection now; the previous one may have timed out)
     injury_news: list[dict] = []
@@ -544,62 +476,76 @@ def generate_report():
         }}
         """
 
-    # 10) Build LLM prompt & call Gemini (URL context enabled)
+    # 10) Build LLM prompt & call OpenAI GPT-5.6 Luna (web_search enabled)
     prompt_intro = (
-        f"You are a top-tier, seasoned sports analyst. Using the provided CFD statistics and news articles to craft a full-length matchup report for {home_full} vs {away_full} in {year}. You speak in the voice and style of a seasoned sports analyst, handicapper, and writer. Avoid cheesey and overused terms, and try to be more edgy with dark humor where appropriate."
-        f"You have the url_context tool enabled—READ the linked articles directly and prefer their actual content over snippets. Do not report back on url's that you could not access, just use the context appropriately from the url's that you could access."
+        f"You are a top-tier, seasoned sports analyst. Using the provided CFD statistics, the injury feed, and your own live web research to craft a full-length matchup report for {home_full} vs {away_full} in {year}. You speak in the voice and style of a seasoned sports analyst, handicapper, and writer. Avoid cheesey and overused terms, and try to be more edgy with dark humor where appropriate."
+        f"You have a web_search tool enabled—USE IT to run each of the web searches listed below, then READ the most relevant and recent articles you find and prefer their actual content over snippets. Only use news within the recency window noted for each search, and only items about the two teams in this matchup (current players only). Do not report on searches that came up empty; just use the context from the sources you could access."
         f"Create a dedicated section for each of the following data groups and provide a brief explanation of what this section covers, and if it is based on a statistic, what the statistic means in easy to understand terms: Matchup Overview (Provide an introduction to the matchup, with some context and history of the matchup to set the stage), SP Ratings (Note: For SP Ratings, do not factor in the ranking value, it will always be 1 and is irrelivent. Only factor in the the other values provided), ELO Ratings, FPI Ratings, Advanced Team Stats, Returning Production, Team Talent, Team PPA, Player PPA, Team Season Stats, Adjusted Team Metrics, {home_full} injury updates, {away_full} injury updates (Must be injury related, otherwise it should go in the roster update section), Key Player Matchups (Identify key player Matchups like a specific WR vs CB, or a Running Back vs key defencive line members, etc.. This should highlight what you believe will be the defining player to player matcup/storylines in the game), {home_full} roster Updates (only non-injury related updates), {away_full} Roster Updates, {home_full} practice and Scrimmage updates, {away_full} practice and scrimmage updates, {home_full} vs {away_full} Media Matchup Analysis (This is a summary on the the matchup news articles provided), and Final Prediction. Also, only provide these sections, no content before or after. The intro and table setting should be done in the initial matchup overview. Each section heading should be in a heading (larger font)  in bold and underlined."
         f"For every section list key statistics (where applicable) followed by at least two in-depth paragraphs analyzing how those numbers impact the game. Use the confident, authoritative tone of a national sports analyst. The final section should be called Final Prediction, and deliver your overall verdict and a projected final score and point spread based on all data that you have. Remember this is YOUR personal estimated point spread, and you will be evaluated based on how close you are to the actual final score. If you want to be the best, then you have to really be accurate! \n\n"
         f"Note: When reviewing the The injury and roster section News, you should only include items within the Last 7 Days and data from the 2 teams in the matchup. Do not summarize or include any data that is not specific to this matchup. Only use news items relevant to {home_full} or {away_full} when writing the sections. Do not include or take into account content about former players, or news stories not relevant to the two current teams that would/could impact performance. The purpose of this report is to give the reader the best and most relevant information needed to make a decision on the outcome of this specific game. In addition, if there is no information or statistics provided for one of the specified sections, keep the section header, but only note to the reader that their was no data available for that section. Do not write any more details that that notification. \n\n"
         f"Data: "
     )
 
-    # List the URLs explicitly (this is what URL context will fetch)
-    url_list_text = "Sources to read (max 20):\n" + "\n".join(f"- {a['category']}: {a['url']}" for a in articles_struct)
+    # Hand the model the exact searches to run with its web_search tool
+    search_list_text = "Run these web searches and read the best, most recent results for each:\n" + "\n".join(f"- {d}" for d in search_directives)
 
     # Keep your existing data bundle (stats + injuries + our media source list)
     data_blob = json.dumps(fetchedData)
 
-    prompt = prompt_intro + url_list_text + "\n\n" + data_blob + "\n\n" + (
+    prompt = prompt_intro + search_list_text + "\n\n" + data_blob + "\n\n" + (
         "Citations rule: when you reference specific claims from an article, add an inline marker like [1], [2], etc., "
         "and include a short SOURCES section at the end mapping [n] -> URL. Also, always add collegefootballdata.com and rotowire.com as sources in teh source list at the end of the report. In addition, never explain the url process or what urlls could not be accessed, just exclude the urls that could not be accessed from teh sources at the end."
     )
 
-    gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    # OpenAI GPT-5.6 Luna via the Responses API. The hosted web_search tool lets the
+    # model read the linked article URLs (the equivalent of Gemini's url_context).
+    # NOTE: the model id must be the explicit "gpt-5.6-luna" — the bare "gpt-5.6" alias
+    # routes to the flagship "Sol" tier, not Luna.
+    openai_url = "https://api.openai.com/v1/responses"
     body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        # Allow for longer reports by removing the tight output cap.
-        "generationConfig": {"maxOutputTokens": 64000, "temperature": 0.7},
-        # >>> Enable URL context <<<
+        "model": "gpt-5.6-luna",
+        "input": prompt,
+        # Allow for longer reports (Luna supports up to 128k output tokens).
+        "max_output_tokens": 64000,
+        # GPT-5.6 is a reasoning model and rejects "temperature". Use reasoning effort
+        # instead to balance report quality against speed/cost.
+        "reasoning": {"effort": "medium"},
+        # >>> Enable web browsing so the model can read the linked article URLs <<<
         "tools": [
-            {"url_context": {}}
-            # Optionally also allow search grounding:
-            # , {"google_search": {}}
+            {"type": "web_search"}
         ],
     }
-    headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_api_key}
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
 
     # Extend timeout to handle larger responses without truncation.
-    ai_resp = requests.post(gemini_url, json=body, headers=headers, timeout=300)
+    ai_resp = requests.post(openai_url, json=body, headers=headers, timeout=300)
     if ai_resp.status_code != 200:
-        return jsonify({"error": "Gemini API request failed", "detail": ai_resp.text}), 502
+        return jsonify({"error": "OpenAI API request failed", "detail": ai_resp.text}), 502
 
     try:
         result = ai_resp.json()
-        parts = result.get('candidates', [{}])[0].get('content', {}).get('parts', [])
-        text_parts = [p.get('text', '') for p in parts if isinstance(p, dict) and 'text' in p]
-        report_text = "\n".join(text_parts).strip()
+        # The Responses API returns an "output" array holding reasoning items, tool
+        # calls, and the assistant message. Collect text from the message item(s).
+        text_parts = []
+        for item in result.get('output', []):
+            if isinstance(item, dict) and item.get('type') == 'message':
+                for part in item.get('content', []):
+                    if isinstance(part, dict) and part.get('type') == 'output_text':
+                        text_parts.append(part.get('text', ''))
+        report_text = "\n".join(tp for tp in text_parts if tp).strip()
         if not report_text:
-            return jsonify({"error": "No text returned from Gemini", "response": ai_resp.text[:800]}), 502
-        # For debugging/auditing, you can log which URLs the tool actually retrieved:
-        used_url_meta = result.get('candidates', [{}])[0].get('url_context_metadata', {})
-        logging.info(f"URL context used: {used_url_meta}")
-        # Capture token usage from Gemini response (if provided)
-        usage_meta = result.get('usageMetadata', {})
-        input_tokens = usage_meta.get('promptTokenCount')
-        output_tokens = usage_meta.get('candidatesTokenCount') or usage_meta.get('candidateTokenCount')
+            return jsonify({"error": "No text returned from OpenAI", "response": ai_resp.text[:800]}), 502
+        # For debugging/auditing, log the response status ("completed" vs "incomplete").
+        logging.info(f"OpenAI response status: {result.get('status')}, id: {result.get('id')}")
+        # Capture token usage from the Responses API usage object (if provided).
+        usage_meta = result.get('usage', {})
+        input_tokens = usage_meta.get('input_tokens')
+        output_tokens = usage_meta.get('output_tokens')
     except Exception:
-        return jsonify({"error": "Unexpected response format from Gemini", "response": ai_resp.text[:800]}), 502
+        return jsonify({"error": "Unexpected response format from OpenAI", "response": ai_resp.text[:800]}), 502
 
     # 11) Markdown -> HTML body
     if markdown:

@@ -1,0 +1,17 @@
+# Secrets & local environment files — NEVER commit real API keys
+.env
+.env.*
+*.env
+afplna.env
+secrets.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+*.swp
