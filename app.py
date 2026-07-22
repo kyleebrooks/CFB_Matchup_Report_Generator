@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import logging
 import glob
 import time
-import base64
 
 import pymysql
 import sqlite3
@@ -196,6 +195,49 @@ def get_api_key(name: str) -> str | None:
             return None
     finally:
         conn.close()
+
+
+def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.10, scale: float = 0.92) -> None:
+    """Stamp a centered, faint watermark behind the text on every page of a PDF.
+
+    wkhtmltopdf does not reliably repeat a CSS position:fixed/background watermark on every
+    page (it can render on a single page only), so we post-process the finished PDF instead:
+    build a per-page overlay with reportlab and merge the page content on top of it with
+    PyPDF2, so the mark sits behind the text. Both libraries are already dependencies.
+    """
+    import io
+    from PyPDF2 import PdfReader, PdfWriter
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+
+    reader = PdfReader(pdf_path)
+    if not reader.pages:
+        return
+    img = ImageReader(image_path)
+    iw, ih = img.getSize()
+
+    writer = PdfWriter()
+    for page in reader.pages:
+        pw = float(page.mediabox.width)
+        ph = float(page.mediabox.height)
+        ratio = min((pw * scale) / iw, (ph * scale) / ih)   # fill the page, keep aspect ratio
+        dw, dh = iw * ratio, ih * ratio
+        x, y = (pw - dw) / 2.0, (ph - dh) / 2.0
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=(pw, ph))
+        c.setFillAlpha(opacity)                             # faint enough to read text over it
+        c.drawImage(img, x, y, width=dw, height=dh, mask="auto")
+        c.showPage()
+        c.save()
+        buf.seek(0)
+
+        overlay = PdfReader(buf).pages[0]
+        overlay.merge_page(page)                            # content over watermark -> mark behind text
+        writer.add_page(overlay)
+
+    with open(pdf_path, "wb") as f:
+        writer.write(f)
 
 
 # JSON error handler for easier debugging
@@ -455,37 +497,13 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not retrieve team logos from CFBD: {e}")
 
-    # 9b) Load watermark image for PDF (embedded as base64 so wkhtmltopdf needs no file access)
-    watermark_b64 = ""
+    # 9b) Resolve the watermark image. It is stamped onto every page of the finished PDF by
+    #     add_pdf_watermark() below, rather than via CSS — wkhtmltopdf does not reliably
+    #     repeat a CSS position:fixed/background watermark across pages.
     watermark_path = os.path.join(BASE_DIR, "AFPLNA_LOGO.png")
-    try:
-        with open(watermark_path, "rb") as wm:
-            watermark_b64 = base64.b64encode(wm.read()).decode("ascii")
-    except Exception as e:
-        logging.warning(f"Could not load watermark image: {e}")
-
-    # Centered, faint, full-page watermark. position:fixed makes wkhtmltopdf repeat it on
-    # EVERY page; the low opacity plus the report content sitting at z-index:1 keep the
-    # text fully readable on top. Scaled to fill as much of the page as possible without
-    # distorting the image (aspect ratio preserved via max-width/max-height).
-    watermark_css = ""
-    watermark_html = ""
-    if watermark_b64:
-        watermark_css = """
-        .watermark {
-            position: fixed;
-            top: 0; left: 0;
-            width: 100%; height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 0;
-        }
-        .watermark img { max-width: 92%; max-height: 92%; opacity: 0.10; }
-        """
-        watermark_html = (
-            f'<div class="watermark"><img src="data:image/png;base64,{watermark_b64}" alt=""></div>'
-        )
+    if not os.path.exists(watermark_path):
+        logging.warning(f"Watermark image not found at {watermark_path}; report will have no watermark.")
+        watermark_path = None
 
     # 10) Build LLM prompt & call OpenAI GPT-5.6 Luna (web_search enabled)
     prompt_intro = (
@@ -582,12 +600,9 @@ def generate_report():
         .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
         .content {{ text-align:left; position:relative; z-index:1; }}
-        .token-info {{ position:relative; z-index:1; }}
-        {watermark_css}
       </style>
     </head>
     <body>
-      {watermark_html}
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
@@ -624,6 +639,14 @@ def generate_report():
     except Exception as e:
         logging.error(f"PDF generation failed: {e}")
         return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
+
+    # Stamp the AFPLNA watermark onto every page (post-process). A watermark problem must
+    # never block report delivery, so failures here are logged and swallowed.
+    if watermark_path:
+        try:
+            add_pdf_watermark(filepath, watermark_path)
+        except Exception as e:
+            logging.warning(f"Watermark step failed; delivering report without watermark: {e}")
 
     return jsonify({"message": "Report generated successfully", "filename": filename}), 200
 
