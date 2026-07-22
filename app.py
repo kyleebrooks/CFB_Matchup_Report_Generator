@@ -455,7 +455,7 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not retrieve team logos from CFBD: {e}")
 
-    # 9b) Load watermark image for PDF
+    # 9b) Load watermark image for PDF (embedded as base64 so wkhtmltopdf needs no file access)
     watermark_b64 = ""
     watermark_path = os.path.join(BASE_DIR, "AFPLNA_LOGO.png")
     try:
@@ -464,17 +464,28 @@ def generate_report():
     except Exception as e:
         logging.warning(f"Could not load watermark image: {e}")
 
-    # CSS snippet for watermark (no extra PDF post-processing required)
+    # Centered, faint, full-page watermark. position:fixed makes wkhtmltopdf repeat it on
+    # EVERY page; the low opacity plus the report content sitting at z-index:1 keep the
+    # text fully readable on top. Scaled to fill as much of the page as possible without
+    # distorting the image (aspect ratio preserved via max-width/max-height).
     watermark_css = ""
+    watermark_html = ""
     if watermark_b64:
-        watermark_css = f"""
-        body {{
-            background: url('data:image/png;base64,{watermark_b64}') center center no-repeat;
-            background-size: 70%;
-            background-repeat: repeat-y;
-            background-attachment: fixed;
-        }}
+        watermark_css = """
+        .watermark {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 0;
+        }
+        .watermark img { max-width: 92%; max-height: 92%; opacity: 0.10; }
         """
+        watermark_html = (
+            f'<div class="watermark"><img src="data:image/png;base64,{watermark_b64}" alt=""></div>'
+        )
 
     # 10) Build LLM prompt & call OpenAI GPT-5.6 Luna (web_search enabled)
     prompt_intro = (
@@ -571,10 +582,12 @@ def generate_report():
         .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
         .hdr img {{ width:100px; height:100px; object-fit:contain; }}
         .content {{ text-align:left; position:relative; z-index:1; }}
+        .token-info {{ position:relative; z-index:1; }}
         {watermark_css}
       </style>
     </head>
     <body>
+      {watermark_html}
       <div class=\"hdr\">
         <img src=\"{home_logo}\" alt=\"{home_full} logo\">
         <div style=\"text-align:center; flex-grow:1;\">
