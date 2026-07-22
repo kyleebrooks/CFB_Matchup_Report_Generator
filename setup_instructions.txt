@@ -161,9 +161,7 @@ DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 
 # Optional if keys are not stored in DB
 # CFBD_API_KEY=
-# GOOGLE_SEARCH_API_KEY=
-# GOOGLE_CX=
-# OPENAI_API_KEY=   # GPT-5.6 Luna
+# OPENAI_API_KEY=   # GPT-5.6 Luna (also powers news search via its web_search tool)
 # WKHTMLTOPDF_PATH=/usr/bin/wkhtmltopdf
 EOF
 
