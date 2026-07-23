@@ -631,6 +631,10 @@ def generate_report():
     pdf_options = {
         "enable-local-file-access": None,
         "background": None,
+        # A missing/slow remote resource (e.g. a team-logo URL) makes wkhtmltopdf exit
+        # non-zero even though it writes a valid PDF; tell it to ignore load errors.
+        "load-error-handling": "ignore",
+        "load-media-error-handling": "ignore",
     }
     try:
         pdfkit.from_string(
@@ -640,8 +644,22 @@ def generate_report():
             options=pdf_options,
         )
     except Exception as e:
-        logging.error(f"PDF generation failed: {e}")
-        return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
+        # pdfkit raises whenever wkhtmltopdf returns a non-zero exit code, which it does for
+        # non-fatal warnings even after writing a perfectly good PDF. Only treat this as a
+        # real failure when no usable PDF actually landed on disk.
+        pdf_ok = os.path.exists(filepath) and os.path.getsize(filepath) > 1024
+        if pdf_ok:
+            try:
+                import fitz
+                _doc = fitz.open(filepath)
+                pdf_ok = _doc.page_count > 0
+                _doc.close()
+            except Exception:
+                pdf_ok = False
+        if not pdf_ok:
+            logging.error(f"PDF generation failed: {e}")
+            return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
+        logging.warning(f"wkhtmltopdf exited non-zero but produced a valid PDF; continuing: {e}")
 
     # Stamp the AFPLNA watermark onto every page (post-process). A watermark problem must
     # never block report delivery, so failures here are logged and swallowed.
