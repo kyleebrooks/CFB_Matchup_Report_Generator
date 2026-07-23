@@ -197,47 +197,50 @@ def get_api_key(name: str) -> str | None:
         conn.close()
 
 
-def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.10, scale: float = 0.92) -> None:
-    """Stamp a centered, faint watermark behind the text on every page of a PDF.
+def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.09, scale: float = 0.92) -> None:
+    """Stamp a centered, faint watermark on every page of a PDF.
 
-    wkhtmltopdf does not reliably repeat a CSS position:fixed/background watermark on every
-    page (it can render on a single page only), so we post-process the finished PDF instead:
-    build a per-page overlay with reportlab and merge the page content on top of it with
-    PyPDF2, so the mark sits behind the text. Both libraries are already dependencies.
+    wkhtmltopdf reuses a single shared resource dictionary across all pages, which makes a
+    PyPDF2 per-page merge render the mark on only one page. Instead we build one faint
+    overlay per page size with reportlab (opacity baked in via fill-alpha) and composite it
+    onto every page with PyMuPDF's show_pdf_page, which isolates per-page resources
+    correctly. The mark is drawn on top at low opacity, so it shows on every page while the
+    report text stays fully readable.
     """
     import io
-    from PyPDF2 import PdfReader, PdfWriter
+    import fitz  # PyMuPDF
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
 
-    reader = PdfReader(pdf_path)
-    if not reader.pages:
-        return
     img = ImageReader(image_path)
     iw, ih = img.getSize()
 
-    writer = PdfWriter()
-    for page in reader.pages:
-        pw = float(page.mediabox.width)
-        ph = float(page.mediabox.height)
+    def _overlay(pw, ph):
         ratio = min((pw * scale) / iw, (ph * scale) / ih)   # fill the page, keep aspect ratio
         dw, dh = iw * ratio, ih * ratio
-        x, y = (pw - dw) / 2.0, (ph - dh) / 2.0
-
         buf = io.BytesIO()
         c = canvas.Canvas(buf, pagesize=(pw, ph))
-        c.setFillAlpha(opacity)                             # faint enough to read text over it
-        c.drawImage(img, x, y, width=dw, height=dh, mask="auto")
+        c.setFillAlpha(opacity)                             # faint enough to read text through
+        c.drawImage(img, (pw - dw) / 2.0, (ph - dh) / 2.0, width=dw, height=dh, mask="auto")
         c.showPage()
         c.save()
-        buf.seek(0)
+        return buf.getvalue()
 
-        overlay = PdfReader(buf).pages[0]
-        overlay.merge_page(page)                            # content over watermark -> mark behind text
-        writer.add_page(overlay)
+    doc = fitz.open(pdf_path)
+    overlays: dict = {}
+    for page in doc:
+        rect = page.rect
+        key = (round(rect.width, 1), round(rect.height, 1))
+        if key not in overlays:
+            overlays[key] = _overlay(rect.width, rect.height)
+        ov = fitz.open("pdf", overlays[key])
+        page.show_pdf_page(rect, ov, 0, overlay=True)       # composite per page -> every page gets it
+        ov.close()
 
-    with open(pdf_path, "wb") as f:
-        writer.write(f)
+    tmp = pdf_path + ".wm.tmp"
+    doc.save(tmp, garbage=3, deflate=True)                  # PyMuPDF cannot save over the open file
+    doc.close()
+    os.replace(tmp, pdf_path)
 
 
 # JSON error handler for easier debugging
