@@ -19,6 +19,23 @@ SECONDARY_DB_NAME=kdogg4207_secondary
 SECONDARY_DB_PASSWORD='Super$ecret!With#Symbols='
 
 
+NOTE — the OpenRouter key
+
+OpenRouter is the only LLM provider the app uses (both the research calls and the
+report call). The app looks in the MySQL API_KEYS table FIRST:
+
+    INSERT INTO API_KEYS (`API_NAME`, `KEY`) VALUES ('openrouter', 'sk-or-v1-...');
+
+and only falls back to this env file if that row is absent:
+
+    OPENROUTER_API_KEY='sk-or-v1-...'
+
+Prefer the database row — it is where every other key already lives, and it does not
+require a service restart. After setting either one, confirm with:
+
+    curl -sS "http://localhost/health/llm?api_key=YOUR_SERVICE_API_KEY"
+
+
 Tips:
 
 No spaces around =.

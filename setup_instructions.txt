@@ -147,6 +147,23 @@ which wkhtmltopdf   # should output /usr/bin/wkhtmltopdf
 
 8) Environment variables
 
+API KEYS — where they live
+
+The app reads API keys from the MySQL API_KEYS table first, then falls back to the
+environment. OpenRouter is the ONLY LLM provider; there is no direct OpenAI call left.
+
+  Preferred (matches the existing key store):
+    INSERT INTO API_KEYS (`API_NAME`, `KEY`) VALUES ('openrouter', 'sk-or-v1-...');
+
+  Fallback (env file below):
+    OPENROUTER_API_KEY='sk-or-v1-...'
+
+Verify after deploy:
+    curl -sS "http://localhost/health/llm?api_key=YOUR_SERVICE_API_KEY" | jq
+
+That endpoint resolves the key and pings both models (research + report). Any legacy
+'openai' row in API_KEYS is now unused and can be removed.
+
 Create /etc/afplna.env:
 
 sudo tee /etc/afplna.env >/dev/null << 'EOF'
@@ -161,8 +178,16 @@ DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 
 # Optional if keys are not stored in DB
 # CFBD_API_KEY=
-# OPENAI_API_KEY=   # GPT-5.6 Luna (also powers news search via its web_search tool)
+# OPENROUTER_API_KEY=   # single gateway for ALL LLM calls (research + report)
 # WKHTMLTOPDF_PATH=/usr/bin/wkhtmltopdf
+
+# Optional model / behavior overrides (defaults shown)
+# OPENROUTER_RESEARCH_MODEL=openai/gpt-5.6-luna
+# OPENROUTER_REPORT_MODEL=moonshotai/kimi-k3
+# OPENROUTER_SEARCH_ENGINE=native      # native | exa | (blank = OpenRouter picks)
+# OPENROUTER_SEARCH_MAX_RESULTS=10
+# RESEARCH_TIMEOUT=240
+# REPORT_TIMEOUT=420
 EOF
 
 sudo chmod 600 /etc/afplna.env
@@ -183,7 +208,7 @@ User=deploy
 Group=www-data
 WorkingDirectory=/opt/afplna
 EnvironmentFile=/etc/afplna.env
-ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 2 --threads 4 --timeout 600 --graceful-timeout 600
+ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 1 --threads 8 --timeout 900 --graceful-timeout 900
 Restart=always
 RestartSec=3
 TimeoutStartSec=60
@@ -205,7 +230,7 @@ server {
     listen 80;
     server_name _;
 
-    proxy_read_timeout 600s;
+    proxy_read_timeout 900s;
     client_max_body_size 16m;
 
     location / {
@@ -286,7 +311,9 @@ Add Generate → POST to /generate-report.
 
 Add Download → GET /get-report?api_key=...&home_team=...&away_team=....
 
-Show a spinner during generate (can take 60–120s).
+Show a spinner during generate. Generation now runs eight parallel research calls plus
+one long report call, so budget 3–6 minutes and set the client-side fetch timeout to at
+least 900s to match Nginx and Gunicorn.
 
 If generate responds “Report already exists”, just enable Download.
 
@@ -296,7 +323,9 @@ If generate responds “Report already exists”, just enable Download.
 
 APScheduler triggers the Rotowire/Bright collector at 9:00 and 18:00 (America/New_York) and upserts into the rotowire table.
 
-Keep Gunicorn workers at 1 in the unit to avoid duplicate runs.
+Keep Gunicorn workers at 1 in the unit to avoid duplicate runs. The unit above is set
+to --workers 1 --threads 8 for exactly this reason: report generation is I/O-bound on
+API calls, so threads give concurrency without duplicating the scheduler.
 
 Optional: add a debug route to trigger the job manually (remove after testing).
 
@@ -375,6 +404,9 @@ Configs: /etc/afplna.env, /etc/systemd/system/afplna.service, Nginx site file.
 Snapshots: take DO Droplet snapshots periodically.
 
 Appendix A: requirements.txt
+
+Always install from the repo's requirements.txt (this list is a copy for reference):
+
 Flask~=3.0
 requests~=2.32
 PyMySQL~=1.1
@@ -382,9 +414,15 @@ APScheduler~=3.10
 Markdown~=3.6
 pdfkit~=1.0
 gunicorn~=22.0
+PyPDF2~=3.0
+reportlab~=4.0
+PyMuPDF~=1.24
+matplotlib~=3.9
 
 
 System package required: wkhtmltopdf.
+matplotlib renders the report charts headless (Agg backend) — no display or extra
+system package needed, but it does pull in numpy, so allow ~150 MB in the venv.
 
 Appendix B: systemd unit
 
@@ -399,7 +437,7 @@ User=deploy
 Group=www-data
 WorkingDirectory=/opt/afplna
 EnvironmentFile=/etc/afplna.env
-ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 2 --threads 4 --timeout 600 --graceful-timeout 600
+ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 1 --threads 8 --timeout 900 --graceful-timeout 900
 Restart=always
 RestartSec=3
 TimeoutStartSec=60
@@ -415,7 +453,7 @@ server {
     listen 80;
     server_name _;  # replace with api.yourdomain.com when ready
 
-    proxy_read_timeout 600s;
+    proxy_read_timeout 900s;
     client_max_body_size 16m;
 
     location / {
