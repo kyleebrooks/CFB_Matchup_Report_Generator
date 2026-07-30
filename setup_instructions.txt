@@ -295,8 +295,19 @@ From the Droplet:
 # Nginx → Gunicorn alive?
 curl -I http://localhost/
 
-# Generate (replace names and SERVICE_API_KEY)
+# LLM connectivity (resolves the OpenRouter key, pings both models)
+curl -sS "http://localhost/health/llm?api_key=YOUR_API_KEY" | jq
+
+# Generate — returns 202 immediately with a job handle
 curl -sS -X POST http://localhost/generate-report \
+ -H 'Content-Type: application/json' \
+ -d '{"api_key":"YOUR_API_KEY","home_full":"Georgia Bulldogs","away_full":"Marshall Thundering Herd","home_short":"Georgia","away_short":"Marshall"}' | jq
+
+# Watch progress (state: queued -> running -> done | error)
+watch -n5 'curl -sS "http://localhost/report-status?api_key=YOUR_API_KEY&home_team=Georgia&away_team=Marshall" | jq'
+
+# Or block until finished instead of polling (caller owns the timeout)
+curl -sS --max-time 900 -X POST "http://localhost/generate-report?wait=true" \
  -H 'Content-Type: application/json' \
  -d '{"api_key":"YOUR_API_KEY","home_full":"Georgia Bulldogs","away_full":"Marshall Thundering Herd","home_short":"Georgia","away_short":"Marshall"}' | jq
 
@@ -307,17 +318,24 @@ curl -L -o report.pdf "http://localhost/get-report?api_key=YOUR_API_KEY&home_tea
 
 On your PHP page (e.g., scoreboard.php):
 
-Add Generate → POST to /generate-report.
+scoreboard.php in this repo is the reference implementation — it already does all of
+the below. If you are wiring another page, follow the same shape:
 
-Add Download → GET /get-report?api_key=...&home_team=...&away_team=....
+Generate → POST /generate-report. This returns 202 in milliseconds; it does NOT wait
+for the report. Never keep the POST open for the duration of a build.
 
-Show a spinner during generate. Generation now runs eight parallel research calls plus
-one long report call, so budget 3–6 minutes and set the client-side fetch timeout to at
-least 900s to match Nginx and Gunicorn.
+Progress → poll GET /report-status?api_key=...&home_team=...&away_team=... every ~4s.
+Render state / percent / message as a progress bar. Stop polling when state becomes
+"done" or "error"; surface the error text when it is "error".
 
-If generate responds “Report already exists”, just enable Download.
+Download → GET /get-report?api_key=...&home_team=...&away_team=....
 
-(We already gave you drop-in PHP/JS snippets earlier. Reuse those, set API_BASE and API_KEY accordingly.)
+On page load, call /report-status once and resume polling if a build is already
+running — that way a refresh, or a build started in another tab, keeps showing live
+progress instead of looking idle.
+
+Because the previous PDF is only swapped out at the very end of a rebuild, Download
+stays usable the whole time a regeneration is running.
 
 15) Scheduler notes
 
