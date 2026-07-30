@@ -1,18 +1,26 @@
-import os
-import json
-from datetime import datetime, timedelta
-import logging
 import glob
+import json
+import logging
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
-import pymysql
-import sqlite3
 import requests
-from flask import Flask, request, send_file, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
-from urllib.parse import urlsplit
+
+import cfbd
+import charts as charts_mod
+import config
+import db
+import predict
+import render
+import report as report_mod
+import research
 
 # ---------------------------
 # App & CORS
@@ -31,6 +39,7 @@ ALLOWED_ORIGINS = {
     "https://afplnapicks.com/PicksSite/",
 }
 ALLOWED = {f"{urlsplit(o).scheme}://{urlsplit(o).hostname}".lower() for o in ALLOWED_ORIGINS}
+
 
 def _set_cors_headers(resp, origin_hdr):
     # Normalize the Origin (ignore port)
@@ -57,43 +66,27 @@ def _set_cors_headers(resp, origin_hdr):
     resp.headers["Vary"] = (vary + ", Origin") if vary else "Origin"
     return resp
 
+
 @app.before_request
 def handle_preflight():
     if request.method == "OPTIONS":
         resp = app.make_response(("", 204))
         return _set_cors_headers(resp, request.headers.get("Origin"))
 
+
 @app.after_request
 def add_cors(resp):
     return _set_cors_headers(resp, request.headers.get("Origin"))
 
-try:
-    import markdown  # optional for Markdown -> HTML
-except ImportError:
-    markdown = None
 
 logging.basicConfig(level=logging.INFO)
 
-# ---------------------------
-# Env config
-# ---------------------------
-DB_HOST = os.getenv('DB_HOST', 'p3nlmysql149plsk.secureserver.net')
-DB_USER = os.getenv('DB_USER', 'kdogg4207')
-DB_NAME = os.getenv('DB_NAME', 'kdogg4207')
-DB_PASSWORD = os.getenv('DB_PASSWORD')
-SERVICE_API_KEY = os.getenv('SERVICE_API_KEY')
-WKHTMLTOPDF_PATH = os.getenv('WKHTMLTOPDF_PATH')  # /usr/bin/wkhtmltopdf
-# Local Rotowire DB path; defaults to 'rotowire.db' in the project root
-ROTOWIRE_DB_PATH = os.getenv('ROTOWIRE_DB_PATH', os.path.join(os.getcwd(), 'rotowire.db'))
+os.makedirs(config.REPORTS_DIR, exist_ok=True)
+
 
 # ---------------------------
 # Helpers
 # ---------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-REPORTS_DIR = os.getenv("REPORTS_DIR", os.path.join(BASE_DIR, "reports"))
-os.makedirs(REPORTS_DIR, exist_ok=True)
-
-
 def _extract_api_key():
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
@@ -106,141 +99,14 @@ def _extract_api_key():
     return request.args.get("api_key") or body.get("api_key") or request.form.get("api_key")
 
 
-def format_friendly_date(dt: datetime) -> str:
-    """Return 'Month D, YYYY' without zero-padding the day, cross-platform."""
-    try:
-        return dt.strftime("%B %-d, %Y")
-    except Exception:
-        return dt.strftime("%B %d, %Y").replace(" 0", " ")
-
-
 def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None) -> None:
-    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     for path in glob.glob(pattern):
         if not keep_filename or os.path.basename(path) != keep_filename:
             try:
                 os.remove(path)
             except Exception as e:
                 logging.warning(f"Could not delete old report {path}: {e}")
-
-
-def get_db_connection():
-    """Return a MySQL connection configured for long-running operations.
-    We DO NOT keep connections open while doing network calls; open only when needed.
-    """
-    conn = pymysql.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME,
-        charset='utf8mb4',
-        autocommit=True,
-        connect_timeout=15,
-        read_timeout=600,
-        write_timeout=600,
-    )
-    # Attempt to raise per-connection server-side timeouts (allowed on many shared hosts)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET SESSION net_read_timeout=600, net_write_timeout=600")
-            try:
-                cur.execute("SET SESSION wait_timeout=600")
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return conn
-
-
-def get_rotowire_db_connection():
-    """Return a connection to the local SQLite Rotowire database.
-    Ensures the table structure exists."""
-    db_dir = os.path.dirname(ROTOWIRE_DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(ROTOWIRE_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    with conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS rotowire (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                player_name TEXT,
-                headline TEXT,
-                team_name TEXT,
-                date_text TEXT,
-                news_text TEXT,
-                source_name TEXT,
-                position TEXT,
-                analysis_text TEXT
-            )
-            """
-        )
-    return conn
-
-
-def get_api_key(name: str) -> str | None:
-    """Fetch an API key from API_KEYS table; returns stripped string or None."""
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT `KEY` FROM API_KEYS WHERE API_NAME=%s LIMIT 1", (name,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            # row is a tuple (key,) by default
-            key = row[0]
-            if key and str(key).strip():
-                return str(key).strip()
-            return None
-    finally:
-        conn.close()
-
-
-def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.09, scale: float = 0.92) -> None:
-    """Stamp a centered, faint watermark on every page of a PDF.
-
-    wkhtmltopdf reuses a single shared resource dictionary across all pages, which makes a
-    PyPDF2 per-page merge render the mark on only one page. Instead we build one faint
-    overlay per page size with reportlab (opacity baked in via fill-alpha) and composite it
-    onto every page with PyMuPDF's show_pdf_page, which isolates per-page resources
-    correctly. The mark is drawn on top at low opacity, so it shows on every page while the
-    report text stays fully readable.
-    """
-    import io
-    import fitz  # PyMuPDF
-    from reportlab.pdfgen import canvas
-    from reportlab.lib.utils import ImageReader
-
-    img = ImageReader(image_path)
-    iw, ih = img.getSize()
-
-    def _overlay(pw, ph):
-        ratio = min((pw * scale) / iw, (ph * scale) / ih)   # fill the page, keep aspect ratio
-        dw, dh = iw * ratio, ih * ratio
-        buf = io.BytesIO()
-        c = canvas.Canvas(buf, pagesize=(pw, ph))
-        c.setFillAlpha(opacity)                             # faint enough to read text through
-        c.drawImage(img, (pw - dw) / 2.0, (ph - dh) / 2.0, width=dw, height=dh, mask="auto")
-        c.showPage()
-        c.save()
-        return buf.getvalue()
-
-    doc = fitz.open(pdf_path)
-    overlays: dict = {}
-    for page in doc:
-        rect = page.rect
-        key = (round(rect.width, 1), round(rect.height, 1))
-        if key not in overlays:
-            overlays[key] = _overlay(rect.width, rect.height)
-        ov = fitz.open("pdf", overlays[key])
-        page.show_pdf_page(rect, ov, 0, overlay=True)       # composite per page -> every page gets it
-        ov.close()
-
-    tmp = pdf_path + ".wm.tmp"
-    doc.save(tmp, garbage=3, deflate=True)                  # PyMuPDF cannot save over the open file
-    doc.close()
-    os.replace(tmp, pdf_path)
 
 
 # JSON error handler for easier debugging
@@ -268,7 +134,7 @@ def scheduled_rotowire_job():
     conn = None
     try:
         logging.info("Starting scheduled Rotowire scrape job...")
-        bright_key = get_api_key('bright')
+        bright_key = db.get_api_key('bright')
         if not bright_key:
             logging.error("Bright Data API key not found. Rotowire scrape aborted.")
             return
@@ -290,7 +156,6 @@ def scheduled_rotowire_job():
         dataset_url = f"https://api.brightdata.com/dca/dataset?id={collection_id}"
         bright_headers = {"Authorization": f"Bearer {bright_key}"}
 
-        # Poll up to 90s
         deadline = time.time() + 720
         rotowire_data = None
         while time.time() < deadline:
@@ -309,7 +174,7 @@ def scheduled_rotowire_job():
             return
 
         # Insert rows into local SQLite DB
-        conn = get_rotowire_db_connection()
+        conn = db.get_rotowire_db_connection()
         inserted = 0
         cur = conn.cursor()
         for entry in rotowire_data:
@@ -366,6 +231,8 @@ def index():
 
 @app.route('/generate-report', methods=['POST'])
 def generate_report():
+    started = time.time()
+
     # Accept either JSON or form
     if request.content_type and request.content_type.startswith("application/x-www-form-urlencoded"):
         data = request.form.to_dict(flat=True)
@@ -374,7 +241,7 @@ def generate_report():
 
     # 1) Auth
     user_api_key = _extract_api_key()
-    if SERVICE_API_KEY and user_api_key != SERVICE_API_KEY:
+    if config.SERVICE_API_KEY and user_api_key != config.SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
     # 2) Inputs
@@ -388,294 +255,198 @@ def generate_report():
     # 3) Remove any existing report for this matchup before generating a new one
     cleanup_old_reports(home_short, away_short)
 
-    # Filename for new report (today)
     today = datetime.now()
-    date_str = format_friendly_date(today)
+    date_str = db.format_friendly_date(today)
     filename = f"{home_short}_{away_short}_{date_str}.pdf"
-    filepath = os.path.join(REPORTS_DIR, filename)
+    filepath = os.path.join(config.REPORTS_DIR, filename)
 
-    # 4) Load API keys (short-lived DB connection)
-    cfbd_api_key = get_api_key('CFD') or get_api_key('CFBD') or os.getenv('CFBD_API_KEY')
-    openai_api_key = get_api_key('openai') or os.getenv('OPENAI_API_KEY')
+    # 4) API keys. OpenRouter is the sole LLM gateway; CFBD is the sole statistics source.
+    cfbd_api_key = db.resolve_cfbd_key()
+    openrouter_api_key = db.resolve_openrouter_key()
+    missing = [n for n, v in (("CFBD", cfbd_api_key), ("OpenRouter", openrouter_api_key)) if not v]
+    if missing:
+        return jsonify({
+            "error": "Missing required API keys",
+            "missing": missing,
+            "hint": "Add an 'openrouter' row to the API_KEYS table or set OPENROUTER_API_KEY.",
+        }), 500
 
-    if not all([cfbd_api_key, openai_api_key]):
-        return jsonify({"error": "Missing required API keys"}), 500
+    # CFB seasons straddle the calendar year; January bowl games belong to the prior season.
+    try:
+        year = int(data.get('year')) if data.get('year') else cfbd.season_year(today)
+    except (TypeError, ValueError):
+        year = cfbd.season_year(today)
 
-    # 5) CFBD stats (external calls; no DB connection held)
-    headers = {"Authorization": f"Bearer {cfbd_api_key}"}
-    year = datetime.now().year
-    fetchedData: dict[str, object] = {}
+    ctx = research.build_context(
+        home_full, away_full, home_short, away_short, year, kickoff=data.get('kickoff')
+    )
 
-    stat_endpoints = [
-        ("/ratings/sp",             "SP Ratings"),
-        ("/ratings/elo",            "ELO Ratings"),
-        ("/ratings/fpi",            "FPI Ratings"),
-        ("/stats/season/advanced",  "Advanced Team Stats"),
-        ("/player/returning",       "Returning Production"),
-        ("/talent",                 "Team Talent"),
-        ("/ppa/games",              "Team PPA"),
-        ("/ppa/players/season",     "Player PPA"),
-        ("/stats/season",           "Team Season Stats"),
-        ("/wepa/team/season",       "Adjusted Team Metrics"),
-    ]
-    base_url = "https://api.collegefootballdata.com"
-
-    for endpoint, label in stat_endpoints:
-        try:
-            resA = requests.get(base_url + endpoint, headers=headers,
-                                params={"year": year, "team": home_short}, timeout=30)
-            dataA = resA.json() if resA.status_code == 200 else []
-        except Exception as e:
-            logging.warning(f"CFBD {label} for {home_short} failed: {e}")
-            dataA = []
+    # 5) CFBD statistics and the eight live-web research calls have no dependency on each
+    #    other, so run both stages concurrently — the report waits on the slower of the two,
+    #    not on their sum.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cfbd_future = pool.submit(cfbd.fetch_all, cfbd_api_key, year, home_short, away_short)
+        research_future = pool.submit(research.run_research, openrouter_api_key, ctx)
 
         try:
-            resB = requests.get(base_url + endpoint, headers=headers,
-                                params={"year": year, "team": away_short}, timeout=30)
-            dataB = resB.json() if resB.status_code == 200 else []
+            cfbd_data = cfbd_future.result()
         except Exception as e:
-            logging.warning(f"CFBD {label} for {away_short} failed: {e}")
-            dataB = []
+            logging.exception("CFBD fetch failed")
+            return jsonify({"error": "CFBD data fetch failed", "detail": str(e)}), 502
 
-        fetchedData[label] = {"teamA": dataA, "teamB": dataB}
+        try:
+            research_raw = research_future.result()
+        except Exception:
+            logging.exception("Research stage failed entirely")
+            research_raw = {}
 
-    # 6) News gathering is handled by the model's built-in web_search tool.
-    #    Google retired the Custom Search JSON API (closed to new customers in 2025,
-    #    hard shutdown 2027-01-01), so instead of pre-fetching article URLs we hand
-    #    the model an explicit list of searches to run against the live web.
-    search_directives = [
-        f'Latest injury news for the "{home_full}" football team (last 14 days only, current players).',
-        f'Latest injury news for the "{away_full}" football team (last 14 days only, current players).',
-        f'Latest non-injury roster news for the "{home_full}" football team (last 14 days only, current players).',
-        f'Latest non-injury roster news for the "{away_full}" football team (last 14 days only, current players).',
-        f'Latest "{home_full}" football practice and scrimmage reports (last 7 days only).',
-        f'Latest "{away_full}" football practice and scrimmage reports (last 7 days only).',
-        f'Latest expert predictions and analysis for the upcoming "{home_full}" vs "{away_full}" matchup.',
-    ]
+    stats = cfbd_data["stats"]
 
-    # 8) Injury news (open a FRESH DB connection now; the previous one may have timed out)
-    injury_news: list[dict] = []
-    dates = [format_friendly_date(datetime.now() - timedelta(days=i)) for i in range(7)]
+    # 6) Team metadata drives the header logos and every chart's colors.
+    home_meta = cfbd.team_meta(cfbd_data["teams"], home_short)
+    away_meta = cfbd.team_meta(cfbd_data["teams"], away_short)
 
-    conn = get_rotowire_db_connection()
+    # 7) Season results, scoring rates, and the market line.
+    home_games = cfbd.normalize_games(cfbd_data["games"]["teamA"], home_short)
+    away_games = cfbd.normalize_games(cfbd_data["games"]["teamB"], away_short)
+    home_profile = cfbd.scoring_profile(home_games)
+    away_profile = cfbd.scoring_profile(away_games)
+    market = cfbd.find_matchup_line(cfbd_data["lines"], home_short, away_short)
+
+    # 8) National percentiles turn every advanced stat into "where does this rank".
+    advanced = stats.get("Advanced Team Stats") or {}
+    home_adv = (advanced.get("teamA") or [{}])[0] if advanced.get("teamA") else {}
+    away_adv = (advanced.get("teamB") or [{}])[0] if advanced.get("teamB") else {}
+    percentiles = cfbd.build_percentiles(cfbd_data["league"]["advanced"], home_adv, away_adv)
+
+    # 9) Rotowire, filtered to the two teams in this matchup only.
     try:
-        cur = conn.cursor()
-        placeholders = ",".join(["?"] * len(dates))
-        query = (
-            "SELECT player_name, headline, team_name, date_text, news_text, analysis_text "
-            f"FROM rotowire WHERE date_text IN ({placeholders})"
-        )
-        cur.execute(query, dates)
-        rows = cur.fetchall() or []
-        for (player, headline, team, date_text, news_text, analysis_text) in rows:
-            injury_news.append({
-                "team": team,
-                "player": player,
-                "headline": headline,
-                "news": news_text,
-                "analysis": analysis_text,
-            })
-        cur.close()
-    finally:
-        conn.close()
-
-    fetchedData["Injury News Last 7 Days"] = injury_news
-
-    # 9) Team logos from CFBD
-    home_logo = ""
-    away_logo = ""
-    try:
-        teams_resp = requests.get(
-            "https://api.collegefootballdata.com/teams/fbs",
-            headers={"Authorization": f"Bearer {cfbd_api_key}"},
-            params={"year": year},
-            timeout=20,
-        )
-        teams_list = teams_resp.json() if teams_resp.status_code == 200 else []
-        for team in teams_list:
-            if team.get("school") == home_short and team.get("logos"):
-                home_logo = team["logos"][0]
-            if team.get("school") == away_short and team.get("logos"):
-                away_logo = team["logos"][0]
+        rotowire = {
+            "home": db.fetch_rotowire_for_team(home_short, home_full),
+            "away": db.fetch_rotowire_for_team(away_short, away_full),
+        }
     except Exception as e:
-        logging.warning(f"Could not retrieve team logos from CFBD: {e}")
+        logging.warning(f"Rotowire lookup failed: {e}")
+        rotowire = {"home": [], "away": []}
 
-    # 9b) Resolve the watermark image. It is stamped onto every page of the finished PDF by
-    #     add_pdf_watermark() below, rather than via CSS — wkhtmltopdf does not reliably
-    #     repeat a CSS position:fixed/background watermark across pages.
-    watermark_path = os.path.join(BASE_DIR, "AFPLNA_LOGO.png")
-    if not os.path.exists(watermark_path):
-        logging.warning(f"Watermark image not found at {watermark_path}; report will have no watermark.")
-        watermark_path = None
+    # 10) Merge research + Rotowire into per-section buckets with deterministic [n] citations.
+    registry = research.seed_registry()
+    sections = research.assemble_sections(research_raw, rotowire, registry, ctx)
 
-    # 10) Build LLM prompt & call OpenAI GPT-5.6 Luna (web_search enabled)
-    prompt_intro = (
-        f"You are a top-tier, seasoned sports analyst. Using the provided CFD statistics, the injury feed, and your own live web research to craft a full-length matchup report for {home_full} vs {away_full} in {year}. You speak in the voice and style of a seasoned sports analyst, handicapper, and writer. Avoid cheesey and overused terms, and try to be more edgy with dark humor where appropriate."
-        f"You have a web_search tool enabled—USE IT to run each of the web searches listed below, then READ the most relevant and recent articles you find and prefer their actual content over snippets. Only use news within the recency window noted for each search, and only items about the two teams in this matchup (current players only). Do not report on searches that came up empty; just use the context from the sources you could access."
-        f"Create a dedicated section for each of the following data groups and provide a brief explanation of what this section covers, and if it is based on a statistic, what the statistic means in easy to understand terms: Matchup Overview (Provide an introduction to the matchup, with some context and history of the matchup to set the stage), SP Ratings (Note: For SP Ratings, do not factor in the ranking value, it will always be 1 and is irrelivent. Only factor in the the other values provided), ELO Ratings, FPI Ratings, Advanced Team Stats, Returning Production, Team Talent, Team PPA, Player PPA, Team Season Stats, Adjusted Team Metrics, {home_full} injury updates, {away_full} injury updates (Must be injury related, otherwise it should go in the roster update section), Key Player Matchups (Identify key player Matchups like a specific WR vs CB, or a Running Back vs key defencive line members, etc.. This should highlight what you believe will be the defining player to player matcup/storylines in the game), {home_full} roster Updates (only non-injury related updates), {away_full} Roster Updates, {home_full} practice and Scrimmage updates, {away_full} practice and scrimmage updates, {home_full} vs {away_full} Media Matchup Analysis (This is a summary on the the matchup news articles provided), and Final Prediction. Also, only provide these sections, no content before or after. The intro and table setting should be done in the initial matchup overview. Each section heading should be in a heading (larger font)  in bold and underlined."
-        f"For every section list key statistics (where applicable) followed by at least two in-depth paragraphs analyzing how those numbers impact the game. Use the confident, authoritative tone of a national sports analyst. The final section should be called Final Prediction, and deliver your overall verdict and a projected final score and point spread based on all data that you have. Remember this is YOUR personal estimated point spread, and you will be evaluated based on how close you are to the actual final score. If you want to be the best, then you have to really be accurate! \n\n"
-        f"Note: When reviewing the The injury and roster section News, you should only include items within the Last 7 Days and data from the 2 teams in the matchup. Do not summarize or include any data that is not specific to this matchup. Only use news items relevant to {home_full} or {away_full} when writing the sections. Do not include or take into account content about former players, or news stories not relevant to the two current teams that would/could impact performance. The purpose of this report is to give the reader the best and most relevant information needed to make a decision on the outcome of this specific game. In addition, if there is no information or statistics provided for one of the specified sections, keep the section header, but only note to the reader that their was no data available for that section. Do not write any more details that that notification. \n\n"
-        f"Data: "
+    # 11) Quantitative anchor for the prediction.
+    baseline = predict.build_baseline(stats, home_profile, away_profile, market, home_short, away_short)
+
+    # 12) Visuals.
+    chart_set = charts_mod.build_all(
+        stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
     )
 
-    # Hand the model the exact searches to run with its web_search tool
-    search_list_text = "Run these web searches and read the best, most recent results for each:\n" + "\n".join(f"- {d}" for d in search_directives)
-
-    # Keep your existing data bundle (stats + injuries + our media source list)
-    data_blob = json.dumps(fetchedData)
-
-    prompt = prompt_intro + search_list_text + "\n\n" + data_blob + "\n\n" + (
-        "Citations rule: when you reference specific claims from an article, add an inline marker like [1], [2], etc., "
-        "and include a short SOURCES section at the end mapping [n] -> URL. Also, always add collegefootballdata.com and rotowire.com as sources in teh source list at the end of the report. In addition, never explain the url process or what urlls could not be accessed, just exclude the urls that could not be accessed from teh sources at the end."
-    )
-
-    # OpenAI GPT-5.6 Luna via the Responses API. The hosted web_search tool lets the
-    # model read the linked article URLs (the equivalent of Gemini's url_context).
-    # NOTE: the model id must be the explicit "gpt-5.6-luna" — the bare "gpt-5.6" alias
-    # routes to the flagship "Sol" tier, not Luna.
-    openai_url = "https://api.openai.com/v1/responses"
-    body = {
-        "model": "gpt-5.6-luna",
-        "input": prompt,
-        # Allow for longer reports (Luna supports up to 128k output tokens).
-        "max_output_tokens": 64000,
-        # GPT-5.6 is a reasoning model and rejects "temperature". Use reasoning effort
-        # instead to balance report quality against speed/cost.
-        "reasoning": {"effort": "medium"},
-        # >>> Enable web browsing so the model can read the linked article URLs <<<
-        "tools": [
-            {"type": "web_search"}
-        ],
-    }
-    headers = {
-        "Authorization": f"Bearer {openai_api_key}",
-        "Content-Type": "application/json",
+    # 13) Everything the report model is allowed to know.
+    bundle = {
+        "matchup": {
+            "home_team": home_full,
+            "home_short": home_short,
+            "home_conference": home_meta.get("conference"),
+            "away_team": away_full,
+            "away_short": away_short,
+            "away_conference": away_meta.get("conference"),
+            "season": year,
+            "kickoff": data.get("kickoff") or "",
+            "generated_at_utc": ctx["now_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        "statistics_cfbd": cfbd.prune_for_prompt(stats),
+        "national_percentiles": percentiles,
+        "season_results": {"home": home_games, "away": away_games},
+        "scoring_profiles": {"home": home_profile, "away": away_profile},
+        "betting_market": market,
+        "statistical_baseline": baseline,
+        "news_and_research": sections,
     }
 
-    # Extend timeout to handle larger responses without truncation.
-    ai_resp = requests.post(openai_url, json=body, headers=headers, timeout=300)
-    if ai_resp.status_code != 200:
-        return jsonify({"error": "OpenAI API request failed", "detail": ai_resp.text}), 502
-
+    # 14) Single synthesis call — Kimi K3 via OpenRouter.
     try:
-        result = ai_resp.json()
-        # The Responses API returns an "output" array holding reasoning items, tool
-        # calls, and the assistant message. Collect text from the message item(s).
-        text_parts = []
-        for item in result.get('output', []):
-            if isinstance(item, dict) and item.get('type') == 'message':
-                for part in item.get('content', []):
-                    if isinstance(part, dict) and part.get('type') == 'output_text':
-                        text_parts.append(part.get('text', ''))
-        report_text = "\n".join(tp for tp in text_parts if tp).strip()
-        if not report_text:
-            return jsonify({"error": "No text returned from OpenAI", "response": ai_resp.text[:800]}), 502
-        # For debugging/auditing, log the response status ("completed" vs "incomplete").
-        logging.info(f"OpenAI response status: {result.get('status')}, id: {result.get('id')}")
-        # Capture token usage from the Responses API usage object (if provided).
-        usage_meta = result.get('usage', {})
-        input_tokens = usage_meta.get('input_tokens')
-        output_tokens = usage_meta.get('output_tokens')
-    except Exception:
-        return jsonify({"error": "Unexpected response format from OpenAI", "response": ai_resp.text[:800]}), 502
+        result = report_mod.generate(openrouter_api_key, ctx, bundle, chart_set, registry)
+    except Exception as e:
+        logging.exception("Report generation failed")
+        detail = getattr(e, "body", None) or str(e)
+        return jsonify({"error": "Report model request failed", "detail": str(detail)[:800]}), 502
 
-    # 11) Markdown -> HTML body
-    if markdown:
-        report_html_body = markdown.markdown(report_text)
-    else:
-        report_html_body = "<br>\n".join(report_text.split("\n"))
+    report_text = result["text"]
+    usage = result["usage"]
 
-    report_created = f"{format_friendly_date(today)} {today.strftime('%I:%M %p')}"
-
-    token_html = (
-        f"<div class='token-info'><p>Input tokens: {input_tokens if input_tokens is not None else 'N/A'}</p>"
-        f"<p>Output tokens: {output_tokens if output_tokens is not None else 'N/A'}</p></div>"
+    # 15) Render.
+    research_usage = [
+        (r.get("usage") or {}) for r in research_raw.values() if isinstance(r, dict)
+    ]
+    research_in = sum(u.get("input_tokens") or 0 for u in research_usage)
+    research_out = sum(u.get("output_tokens") or 0 for u in research_usage)
+    sections_with_data = sum(
+        1 for s in sections.values()
+        if any(not b.get("no_data", True) for b in s["inputs"].values())
     )
 
-    html_content = f"""
-    <html>
-    <head>
-      <meta charset=\"utf-8\" />
-      <title>Matchup Report</title>
-      <style>
-        body {{ font-family: Arial, sans-serif; line-height: 1.45; }}
-        h1, h2, h3 {{ margin: 0.2em 0; }}
-        .hdr {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; background-color:#333; padding:20px; color:white; position:relative; z-index:1; }}
-        .hdr img {{ width:100px; height:100px; object-fit:contain; }}
-        .content {{ text-align:left; position:relative; z-index:1; }}
-      </style>
-    </head>
-    <body>
-      <div class=\"hdr\">
-        <img src=\"{home_logo}\" alt=\"{home_full} logo\">
-        <div style=\"text-align:center; flex-grow:1;\">
-            <h1>AFPLNA College Football Matchup Report</h1>
-            <h2>{home_full} vs {away_full} ({year})</h2>
-            <p style=\"margin:0;\">Report created on: {report_created}</p>
-        </div>
-        <img src=\"{away_logo}\" alt=\"{away_full} logo\">
-      </div>
-      <div class=\"content\">{report_html_body}</div>
-      {token_html}
-    </body>
-    </html>
-    """
+    report_created = f"{db.format_friendly_date(today)} {today.strftime('%I:%M %p')}"
+    meta_lines = [
+        f"Research: {config.OPENROUTER_RESEARCH_MODEL} via OpenRouter — "
+        f"{len(research.RESEARCH_JOBS)} live web searches, {sections_with_data}/{len(sections)} sections with findings "
+        f"({research_in} in / {research_out} out tokens).",
+        f"Report: {result['model']} via OpenRouter — "
+        f"{usage.get('input_tokens') or 'N/A'} input tokens / {usage.get('output_tokens') or 'N/A'} output tokens.",
+        f"Statistics: CollegeFootballData ({year} season). Visuals generated procedurally from those feeds.",
+        f"Sources cited: {len(registry)}. Generation time: {int(time.time() - started)}s.",
+    ]
 
-    # 12) HTML -> PDF
+    html_content = render.build_html(
+        home_full=home_full,
+        away_full=away_full,
+        year=year,
+        home_logo=home_meta.get("logo", ""),
+        away_logo=away_meta.get("logo", ""),
+        report_created=report_created,
+        report_markdown=report_text,
+        charts=chart_set,
+        registry=registry,
+        meta_lines=meta_lines,
+    )
+
     try:
-        import pdfkit
+        render.write_pdf(html_content, filepath)
     except ImportError:
         return jsonify({"error": "PDF generation library not installed on server."}), 500
-
-    pdfkit_config = pdfkit.configuration(wkhtmltopdf=WKHTMLTOPDF_PATH) if WKHTMLTOPDF_PATH else None
-    pdf_options = {
-        "enable-local-file-access": None,
-        "background": None,
-        # A missing/slow remote resource (e.g. a team-logo URL) makes wkhtmltopdf exit
-        # non-zero even though it writes a valid PDF; tell it to ignore load errors.
-        "load-error-handling": "ignore",
-        "load-media-error-handling": "ignore",
-    }
-    try:
-        pdfkit.from_string(
-            html_content,
-            filepath,
-            configuration=pdfkit_config,
-            options=pdf_options,
-        )
     except Exception as e:
-        # pdfkit raises whenever wkhtmltopdf returns a non-zero exit code, which it does for
-        # non-fatal warnings even after writing a perfectly good PDF. Only treat this as a
-        # real failure when no usable PDF actually landed on disk.
-        pdf_ok = os.path.exists(filepath) and os.path.getsize(filepath) > 1024
-        if pdf_ok:
-            try:
-                import fitz
-                _doc = fitz.open(filepath)
-                pdf_ok = _doc.page_count > 0
-                _doc.close()
-            except Exception:
-                pdf_ok = False
-        if not pdf_ok:
-            logging.error(f"PDF generation failed: {e}")
-            return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
-        logging.warning(f"wkhtmltopdf exited non-zero but produced a valid PDF; continuing: {e}")
+        logging.error(f"PDF generation failed: {e}")
+        return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
 
     # Stamp the AFPLNA watermark onto every page (post-process). A watermark problem must
     # never block report delivery, so failures here are logged and swallowed.
-    if watermark_path:
+    if os.path.exists(config.WATERMARK_PATH):
         try:
-            add_pdf_watermark(filepath, watermark_path)
+            render.add_pdf_watermark(filepath, config.WATERMARK_PATH)
         except Exception as e:
             logging.warning(f"Watermark step failed; delivering report without watermark: {e}")
+    else:
+        logging.warning(f"Watermark image not found at {config.WATERMARK_PATH}; skipping watermark.")
 
-    return jsonify({"message": "Report generated successfully", "filename": filename}), 200
+    logging.info(
+        f"Report {filename} generated in {int(time.time() - started)}s "
+        f"({len(report_text)} chars, {len(registry)} sources)."
+    )
+
+    return jsonify({
+        "message": "Report generated successfully",
+        "filename": filename,
+        "seconds": int(time.time() - started),
+        "sources": len(registry),
+        "sections_with_research": sections_with_data,
+        "projected_score": baseline.get("projected_score"),
+        "baseline_margin": baseline.get("consensus_margin"),
+    }), 200
 
 
 @app.route('/get-report', methods=['GET'])
 def get_report():
     api_key_param = _extract_api_key()
-    if SERVICE_API_KEY and api_key_param != SERVICE_API_KEY:
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
     home_short = request.args.get('home_team')
@@ -683,7 +454,7 @@ def get_report():
     if not home_short or not away_short:
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     files = glob.glob(pattern)
     if not files:
         return jsonify({"error": "Report not found. Please generate it first."}), 404
@@ -697,7 +468,7 @@ def get_report():
 @app.route('/has-report', methods=['GET'])
 def has_report():
     api_key_param = _extract_api_key()
-    if SERVICE_API_KEY and api_key_param != SERVICE_API_KEY:
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
     home_short = request.args.get('home_team')
@@ -705,10 +476,47 @@ def has_report():
     if not home_short or not away_short:
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    pattern = os.path.join(REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
     files = glob.glob(pattern)
-    logging.info(f"[has-report] REPORTS_DIR={REPORTS_DIR} pattern={pattern} matches={len(files)}")
+    logging.info(f"[has-report] REPORTS_DIR={config.REPORTS_DIR} pattern={pattern} matches={len(files)}")
     return jsonify({"exists": bool(files)}), 200
+
+
+@app.route('/health/llm', methods=['GET'])
+def health_llm():
+    """Confirm the OpenRouter key resolves and both models answer. Cheap smoke test."""
+    api_key_param = _extract_api_key()
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    import openrouter
+
+    key = db.resolve_openrouter_key()
+    if not key:
+        return jsonify({
+            "ok": False,
+            "error": "No OpenRouter key found",
+            "hint": "Add an 'openrouter' row to API_KEYS, or set OPENROUTER_API_KEY.",
+        }), 500
+
+    out = {"ok": True, "key_source": "resolved", "models": {}}
+    for role, model in (("research", config.OPENROUTER_RESEARCH_MODEL),
+                        ("report", config.OPENROUTER_REPORT_MODEL)):
+        try:
+            resp = openrouter.chat(
+                key, model,
+                [{"role": "user", "content": "Reply with the single word: ok"}],
+                max_tokens=16, timeout=60, retries=0,
+            )
+            out["models"][role] = {
+                "model": model,
+                "ok": True,
+                "reply": openrouter.extract_text(resp)[:40],
+            }
+        except Exception as e:
+            out["ok"] = False
+            out["models"][role] = {"model": model, "ok": False, "error": str(e)[:400]}
+    return jsonify(out), (200 if out["ok"] else 502)
 
 
 if __name__ == "__main__":
