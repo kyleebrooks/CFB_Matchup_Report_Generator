@@ -3,8 +3,7 @@ import json
 import logging
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import requests
@@ -13,14 +12,10 @@ from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
 
-import cfbd
-import charts as charts_mod
 import config
 import db
-import predict
-import render
-import report as report_mod
-import research
+import jobs
+import pipeline
 
 # ---------------------------
 # App & CORS
@@ -97,16 +92,6 @@ def _extract_api_key():
     # Fallbacks for older clients:
     body = request.get_json(silent=True) or {}
     return request.args.get("api_key") or body.get("api_key") or request.form.get("api_key")
-
-
-def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None) -> None:
-    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
-    for path in glob.glob(pattern):
-        if not keep_filename or os.path.basename(path) != keep_filename:
-            try:
-                os.remove(path)
-            except Exception as e:
-                logging.warning(f"Could not delete old report {path}: {e}")
 
 
 # JSON error handler for easier debugging
@@ -231,20 +216,22 @@ def index():
 
 @app.route('/generate-report', methods=['POST'])
 def generate_report():
-    started = time.time()
+    """Queue a report build and return immediately.
 
-    # Accept either JSON or form
+    Generation takes several minutes, which is far longer than a browser or proxy will
+    hold a connection open. The client gets 202 plus a job handle and polls
+    /report-status. Pass wait=true to block until the report is finished instead (handy
+    for curl and cron; the caller owns the timeout).
+    """
     if request.content_type and request.content_type.startswith("application/x-www-form-urlencoded"):
         data = request.form.to_dict(flat=True)
     else:
         data = request.get_json(force=True, silent=True) or {}
 
-    # 1) Auth
     user_api_key = _extract_api_key()
     if config.SERVICE_API_KEY and user_api_key != config.SERVICE_API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
-    # 2) Inputs
     home_full = data.get('home_full')
     away_full = data.get('away_full')
     home_short = data.get('home_short')
@@ -252,195 +239,69 @@ def generate_report():
     if not all([home_full, away_full, home_short, away_short]):
         return jsonify({"error": "Missing team name parameters"}), 400
 
-    # 3) Remove any existing report for this matchup before generating a new one
-    cleanup_old_reports(home_short, away_short)
-
-    today = datetime.now()
-    date_str = db.format_friendly_date(today)
-    filename = f"{home_short}_{away_short}_{date_str}.pdf"
-    filepath = os.path.join(config.REPORTS_DIR, filename)
-
-    # 4) API keys. OpenRouter is the sole LLM gateway; CFBD is the sole statistics source.
-    cfbd_api_key = db.resolve_cfbd_key()
-    openrouter_api_key = db.resolve_openrouter_key()
-    missing = [n for n, v in (("CFBD", cfbd_api_key), ("OpenRouter", openrouter_api_key)) if not v]
-    if missing:
-        return jsonify({
-            "error": "Missing required API keys",
-            "missing": missing,
-            "hint": "Add an 'openrouter' row to the API_KEYS table or set OPENROUTER_API_KEY.",
-        }), 500
-
-    # CFB seasons straddle the calendar year; January bowl games belong to the prior season.
     try:
-        year = int(data.get('year')) if data.get('year') else cfbd.season_year(today)
+        year = int(data.get('year')) if data.get('year') else None
     except (TypeError, ValueError):
-        year = cfbd.season_year(today)
+        year = None
 
-    ctx = research.build_context(
-        home_full, away_full, home_short, away_short, year, kickoff=data.get('kickoff')
-    )
-
-    # 5) CFBD statistics and the eight live-web research calls have no dependency on each
-    #    other, so run both stages concurrently — the report waits on the slower of the two,
-    #    not on their sum.
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        cfbd_future = pool.submit(cfbd.fetch_all, cfbd_api_key, year, home_short, away_short)
-        research_future = pool.submit(research.run_research, openrouter_api_key, ctx)
-
-        try:
-            cfbd_data = cfbd_future.result()
-        except Exception as e:
-            logging.exception("CFBD fetch failed")
-            return jsonify({"error": "CFBD data fetch failed", "detail": str(e)}), 502
-
-        try:
-            research_raw = research_future.result()
-        except Exception:
-            logging.exception("Research stage failed entirely")
-            research_raw = {}
-
-    stats = cfbd_data["stats"]
-
-    # 6) Team metadata drives the header logos and every chart's colors.
-    home_meta = cfbd.team_meta(cfbd_data["teams"], home_short)
-    away_meta = cfbd.team_meta(cfbd_data["teams"], away_short)
-
-    # 7) Season results, scoring rates, and the market line.
-    home_games = cfbd.normalize_games(cfbd_data["games"]["teamA"], home_short)
-    away_games = cfbd.normalize_games(cfbd_data["games"]["teamB"], away_short)
-    home_profile = cfbd.scoring_profile(home_games)
-    away_profile = cfbd.scoring_profile(away_games)
-    market = cfbd.find_matchup_line(cfbd_data["lines"], home_short, away_short)
-
-    # 8) National percentiles turn every advanced stat into "where does this rank".
-    advanced = stats.get("Advanced Team Stats") or {}
-    home_adv = (advanced.get("teamA") or [{}])[0] if advanced.get("teamA") else {}
-    away_adv = (advanced.get("teamB") or [{}])[0] if advanced.get("teamB") else {}
-    percentiles = cfbd.build_percentiles(cfbd_data["league"]["advanced"], home_adv, away_adv)
-
-    # 9) Rotowire, filtered to the two teams in this matchup only.
-    try:
-        rotowire = {
-            "home": db.fetch_rotowire_for_team(home_short, home_full),
-            "away": db.fetch_rotowire_for_team(away_short, away_full),
-        }
-    except Exception as e:
-        logging.warning(f"Rotowire lookup failed: {e}")
-        rotowire = {"home": [], "away": []}
-
-    # 10) Merge research + Rotowire into per-section buckets with deterministic [n] citations.
-    registry = research.seed_registry()
-    sections = research.assemble_sections(research_raw, rotowire, registry, ctx)
-
-    # 11) Quantitative anchor for the prediction.
-    baseline = predict.build_baseline(stats, home_profile, away_profile, market, home_short, away_short)
-
-    # 12) Visuals.
-    chart_set = charts_mod.build_all(
-        stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
-    )
-
-    # 13) Everything the report model is allowed to know.
-    bundle = {
-        "matchup": {
-            "home_team": home_full,
-            "home_short": home_short,
-            "home_conference": home_meta.get("conference"),
-            "away_team": away_full,
-            "away_short": away_short,
-            "away_conference": away_meta.get("conference"),
-            "season": year,
-            "kickoff": data.get("kickoff") or "",
-            "generated_at_utc": ctx["now_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
-        "statistics_cfbd": cfbd.prune_for_prompt(stats),
-        "national_percentiles": percentiles,
-        "season_results": {"home": home_games, "away": away_games},
-        "scoring_profiles": {"home": home_profile, "away": away_profile},
-        "betting_market": market,
-        "statistical_baseline": baseline,
-        "news_and_research": sections,
+    params = {
+        "home_full": home_full,
+        "away_full": away_full,
+        "home_short": home_short,
+        "away_short": away_short,
+        "year": year,
+        "kickoff": data.get('kickoff'),
     }
 
-    # 14) Single synthesis call — Kimi K3 via OpenRouter.
-    try:
-        result = report_mod.generate(openrouter_api_key, ctx, bundle, chart_set, registry)
-    except Exception as e:
-        logging.exception("Report generation failed")
-        detail = getattr(e, "body", None) or str(e)
-        return jsonify({"error": "Report model request failed", "detail": str(detail)[:800]}), 502
-
-    report_text = result["text"]
-    usage = result["usage"]
-
-    # 15) Render.
-    research_usage = [
-        (r.get("usage") or {}) for r in research_raw.values() if isinstance(r, dict)
-    ]
-    research_in = sum(u.get("input_tokens") or 0 for u in research_usage)
-    research_out = sum(u.get("output_tokens") or 0 for u in research_usage)
-    sections_with_data = sum(
-        1 for s in sections.values()
-        if any(not b.get("no_data", True) for b in s["inputs"].values())
-    )
-
-    report_created = f"{db.format_friendly_date(today)} {today.strftime('%I:%M %p')}"
-    meta_lines = [
-        f"Research: {config.OPENROUTER_RESEARCH_MODEL} via OpenRouter — "
-        f"{len(research.RESEARCH_JOBS)} live web searches, {sections_with_data}/{len(sections)} sections with findings "
-        f"({research_in} in / {research_out} out tokens).",
-        f"Report: {result['model']} via OpenRouter — "
-        f"{usage.get('input_tokens') or 'N/A'} input tokens / {usage.get('output_tokens') or 'N/A'} output tokens.",
-        f"Statistics: CollegeFootballData ({year} season). Visuals generated procedurally from those feeds.",
-        f"Sources cited: {len(registry)}. Generation time: {int(time.time() - started)}s.",
-    ]
-
-    html_content = render.build_html(
-        home_full=home_full,
-        away_full=away_full,
-        year=year,
-        home_logo=home_meta.get("logo", ""),
-        away_logo=away_meta.get("logo", ""),
-        report_created=report_created,
-        report_markdown=report_text,
-        charts=chart_set,
-        registry=registry,
-        meta_lines=meta_lines,
-    )
-
-    try:
-        render.write_pdf(html_content, filepath)
-    except ImportError:
-        return jsonify({"error": "PDF generation library not installed on server."}), 500
-    except Exception as e:
-        logging.error(f"PDF generation failed: {e}")
-        return jsonify({"error": "PDF generation failed", "detail": str(e)}), 500
-
-    # Stamp the AFPLNA watermark onto every page (post-process). A watermark problem must
-    # never block report delivery, so failures here are logged and swallowed.
-    if os.path.exists(config.WATERMARK_PATH):
+    wait = str(data.get('wait') or request.args.get('wait') or '').lower() in ('1', 'true', 'yes')
+    if wait:
         try:
-            render.add_pdf_watermark(filepath, config.WATERMARK_PATH)
-        except Exception as e:
-            logging.warning(f"Watermark step failed; delivering report without watermark: {e}")
-    else:
-        logging.warning(f"Watermark image not found at {config.WATERMARK_PATH}; skipping watermark.")
+            result = pipeline.generate(**params)
+        except pipeline.PipelineError as e:
+            return jsonify({"error": e.message, "detail": e.detail}), e.status
+        return jsonify({"message": "Report generated successfully", **result}), 200
 
-    logging.info(
-        f"Report {filename} generated in {int(time.time() - started)}s "
-        f"({len(report_text)} chars, {len(registry)} sources)."
-    )
+    job = jobs.manager.submit(params)
+    view = jobs.public_view(job)
+    view["message"] = "Report generation started. Poll /report-status for progress."
+    return jsonify(view), 202
 
-    return jsonify({
-        "message": "Report generated successfully",
-        "filename": filename,
-        "seconds": int(time.time() - started),
-        "sources": len(registry),
-        "sections_with_research": sections_with_data,
-        "projected_score": baseline.get("projected_score"),
-        "baseline_margin": baseline.get("consensus_margin"),
-    }), 200
+
+@app.route('/report-status', methods=['GET'])
+def report_status():
+    """Progress for the most recent build of a matchup.
+
+    state is one of: queued, running, done, error, or none when nothing has been
+    queued this process lifetime. `report_exists` reflects what is actually on disk,
+    so the frontend can offer a download even after a restart cleared the job table.
+    """
+    api_key_param = _extract_api_key()
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    home_short = request.args.get('home_team')
+    away_short = request.args.get('away_team')
+    if not home_short or not away_short:
+        return jsonify({"error": "Missing team name parameters"}), 400
+
+    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    exists = bool(glob.glob(pattern))
+
+    job = jobs.manager.get(home_short, away_short)
+    if not job:
+        return jsonify({
+            "state": "none",
+            "stage": "none",
+            "message": "Report is ready" if exists else "No report generated yet",
+            "percent": 100 if exists else 0,
+            "report_exists": exists,
+            "home_team": home_short,
+            "away_team": away_short,
+        }), 200
+
+    view = jobs.public_view(job)
+    view["report_exists"] = exists
+    return jsonify(view), 200
 
 
 @app.route('/get-report', methods=['GET'])

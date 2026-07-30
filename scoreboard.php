@@ -261,6 +261,17 @@ mysql_close($connection);
         .section-title { background: #003366; color: white; padding: 5px; margin-top: 20px; }
         .refresh { margin-bottom: 15px; }
         .team-logo { width: 24px; height: 24px; object-fit: contain; vertical-align: middle; margin-right: 5px; }
+        /* AI report progress UI */
+        .ai-progress { display: none; margin-top: 8px; max-width: 520px; }
+        .ai-progress.show { display: block; }
+        .ai-bar { height: 10px; background: #e3e6ea; border-radius: 5px; overflow: hidden; }
+        .ai-bar > span { display: block; height: 100%; width: 0%; background: #003366;
+                         transition: width .5s ease; }
+        .ai-progress.err .ai-bar > span { background: #c00; }
+        .ai-phase { font-size: 12px; color: #444; margin-top: 4px; }
+        .ai-phase .ai-elapsed { color: #777; }
+        .ai-detail { font-size: 11px; color: #c00; margin-top: 3px; word-break: break-word; }
+        .ai-controls button[disabled] { opacity: .55; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -373,122 +384,226 @@ mysql_close($connection);
 const API_BASE = "<?= $AFPLNA_API_BASE ?>";
 const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
 
+// Report generation is asynchronous: POST /generate-report returns 202 immediately and
+// the real progress comes from polling /report-status. Never hold the POST open — it
+// runs for minutes and any proxy in between will cut the connection first.
+const POLL_MS      = 4000;
+const MAX_WAIT_MS  = 15 * 60 * 1000;   // give up watching after 15 minutes
+
+function fmtElapsed(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return m + ':' + String(s).padStart(2, '0');
+}
+
 window.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.ai-controls').forEach(ctrl => {
     const $gen = ctrl.querySelector('.btn-generate');
     const $dl  = ctrl.querySelector('.btn-download');
     const $st  = ctrl.querySelector('.ai-status');
 
-    function setStatus(msg, isErr=false) {
+    // Progress UI is built here rather than in PHP so the markup lives in one place.
+    const $prog = document.createElement('div');
+    $prog.className = 'ai-progress';
+    $prog.innerHTML = '<div class="ai-bar"><span></span></div>'
+                    + '<div class="ai-phase"><span class="ai-phase-text"></span> '
+                    + '<span class="ai-elapsed"></span></div>'
+                    + '<div class="ai-detail"></div>';
+    ctrl.appendChild($prog);
+    const $bar    = $prog.querySelector('.ai-bar > span');
+    const $phase  = $prog.querySelector('.ai-phase-text');
+    const $elapsed= $prog.querySelector('.ai-elapsed');
+    const $detail = $prog.querySelector('.ai-detail');
+
+    const home_short = $gen.dataset.homeshort;
+    const away_short = $gen.dataset.awayshort;
+
+    let pollTimer = null;
+    let watchStarted = 0;
+
+    function setStatus(msg, isErr = false) {
       $st.textContent = msg;
       $st.style.color = isErr ? '#c00' : '#0a0';
       $st.style.backgroundColor = (!isErr && msg) ? '#cfc' : 'transparent';
       $st.style.padding = (!isErr && msg) ? '2px 4px' : '0';
     }
 
-    // Check if a report PDF exists on the server for this matchup
-    async function checkReportExists(showStatus = false) {
-      const home_short = $gen.dataset.homeshort;
-      const away_short = $gen.dataset.awayshort;
-      try {
-        const url = `${API_BASE}/has-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
-        const resp = await fetch(url, { cache: 'no-store' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const data = await resp.json();
-        const exists = data && data.exists === true;
-        if (exists) {
-          $dl.title = 'Download AI Report';
-          $gen.textContent = 'Regenerate AI Report';
-          if (showStatus) setStatus('Report is ready ✔');
-        } else {
-          $dl.title = 'Report not yet Generated.';
-          $gen.textContent = 'Generate AI Report';
-          if (showStatus) setStatus('Report not yet Generated.', true);
-        }
-        return exists;
-      } catch (err) {
-        console.error('Error checking report availability:', err);
-        if (showStatus) setStatus('Error checking report', true);
-        $dl.title = 'Report not yet Generated.';
-        return false;
+    function showProgress(percent, phase, elapsedSec, isErr = false, detail = '') {
+      $prog.classList.add('show');
+      $prog.classList.toggle('err', !!isErr);
+      $bar.style.width = Math.max(2, Math.min(100, percent || 0)) + '%';
+      $phase.textContent = phase || '';
+      $elapsed.textContent = elapsedSec != null ? '(' + fmtElapsed(elapsedSec) + ')' : '';
+      $detail.textContent = detail || '';
+    }
+
+    function hideProgress() {
+      $prog.classList.remove('show', 'err');
+      $detail.textContent = '';
+    }
+
+    function setBusy(busy) {
+      $gen.disabled = busy;
+      $gen.textContent = busy ? 'Generating…'
+                              : ($dl.dataset.ready === '1' ? 'Regenerate AI Report'
+                                                           : 'Generate AI Report');
+    }
+
+    async function fetchStatus() {
+      const url = `${API_BASE}/report-status?api_key=${encodeURIComponent(API_KEY)}`
+                + `&home_team=${encodeURIComponent(home_short)}`
+                + `&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.json();
+    }
+
+    // Single source of truth: render whatever the server says the job is doing.
+    function applyStatus(data) {
+      const exists = !!(data && data.report_exists);
+      $dl.dataset.ready = exists ? '1' : '0';
+      $dl.title = exists ? 'Download AI Report' : 'Report not yet Generated.';
+
+      const state = (data && data.state) || 'none';
+
+      if (state === 'queued' || state === 'running') {
+        setBusy(true);
+        setStatus('Generating the AI report — this takes a few minutes.');
+        showProgress(data.percent, data.message, data.elapsed_seconds);
+        return 'busy';
       }
+
+      setBusy(false);
+
+      if (state === 'error') {
+        setStatus(data.error || 'Report generation failed.', true);
+        showProgress(100, data.error || 'Failed', data.elapsed_seconds, true, data.detail || '');
+        return 'error';
+      }
+
+      if (state === 'done') {
+        const r = data.result || {};
+        let msg = 'Report is ready ✔';
+        if (r.seconds) msg += ` (${fmtElapsed(r.seconds)}, ${r.sources || 0} sources)`;
+        setStatus(msg);
+        hideProgress();
+        return 'done';
+      }
+
+      // state === 'none' — nothing queued in this server process
+      hideProgress();
+      if (exists) setStatus('Report is ready ✔');
+      else setStatus('Report not yet Generated.', true);
+      return exists ? 'done' : 'idle';
+    }
+
+    function stopPolling() {
+      if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    }
+
+    function startPolling() {
+      stopPolling();
+      watchStarted = watchStarted || Date.now();
+      const tick = async () => {
+        try {
+          const data = await fetchStatus();
+          const outcome = applyStatus(data);
+          if (outcome !== 'busy') { watchStarted = 0; return; }
+        } catch (err) {
+          console.error('Error polling report status:', err);
+          // A transient network blip must not abandon a job that is still running.
+        }
+        if (Date.now() - watchStarted > MAX_WAIT_MS) {
+          setBusy(false);
+          setStatus('Still generating — check back shortly or refresh the page.', true);
+          hideProgress();
+          watchStarted = 0;
+          return;
+        }
+        pollTimer = setTimeout(tick, POLL_MS);
+      };
+      pollTimer = setTimeout(tick, POLL_MS);
     }
 
     async function generateReport() {
-      // If a report already exists, confirm if user really wants to regenerate
-      const exists = await checkReportExists(false);
-      if (exists) {
+      if ($dl.dataset.ready === '1') {
         if (!confirm('A report is already available for this game. Do you want to generate a new updated report?')) {
           return;
         }
       }
-      // Prepare data from the buttons’ data attributes
-      const home_full  = $gen.dataset.homefull;
-      const away_full  = $gen.dataset.awayfull;
-      const home_short = $gen.dataset.homeshort;
-      const away_short = $gen.dataset.awayshort;
 
-      setStatus('The AI report is being generated. This can take a few minutes...', false);
-      $gen.disabled = true;
+      setBusy(true);
+      setStatus('Starting the AI report…');
+      showProgress(2, 'Queued', 0);
 
-      // Send POST request to start report generation
-      fetch(`${API_BASE}/generate-report`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          api_key: API_KEY,
-          home_full, away_full, home_short, away_short
-        })
-      })
-      .then(async resp => {
-        if (!resp.ok) {
-          // If server returned an error, display it
+      try {
+        const resp = await fetch(`${API_BASE}/generate-report`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            api_key: API_KEY,
+            home_full:  $gen.dataset.homefull,
+            away_full:  $gen.dataset.awayfull,
+            home_short: home_short,
+            away_short: away_short
+          })
+        });
+
+        // 202 Accepted is the normal path; the job now runs server-side.
+        if (!resp.ok && resp.status !== 202) {
           let errMsg = `Error starting report (HTTP ${resp.status})`;
           try {
             const errData = await resp.json();
             if (errData.error) errMsg = errData.error;
-          } catch {}
+          } catch (e) { /* non-JSON error body */ }
+          setBusy(false);
           setStatus(errMsg, true);
+          hideProgress();
+          return;
         }
-      })
-      .catch(err => {
-        console.error('Network error starting report generation:', err);
-        setStatus('Network error – could not start report.', true);
-      })
-      .finally(() => {
-        // Re-enable the Generate button after a brief delay
-        setTimeout(() => { $gen.disabled = false; }, 1000);
-      });
 
-      // Poll the report status until it's available, keeping the initial message
-      function pollForReport() {
-        checkReportExists(false).then(exists => {
-          if (exists) {
-            setStatus('Report is ready ✔');
-          } else {
-            setTimeout(pollForReport, 15000); // check again in 15s
-          }
-        });
+        const job = await resp.json().catch(() => ({}));
+        showProgress(job.percent || 2, job.message || 'Queued', 0);
+      } catch (err) {
+        console.error('Network error starting report generation:', err);
+        setBusy(false);
+        setStatus('Network error – could not start report.', true);
+        hideProgress();
+        return;
       }
-      setTimeout(pollForReport, 15000);
+
+      watchStarted = Date.now();
+      startPolling();
     }
 
     async function downloadReport() {
-      const home_short = $gen.dataset.homeshort;
-      const away_short = $gen.dataset.awayshort;
-      const ts = Date.now();  // cache-buster
-      const url = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}&home_team=${encodeURIComponent(home_short)}&away_team=${encodeURIComponent(away_short)}&_=${ts}`;
-      const exists = await checkReportExists(false);
-      if (exists) {
-        window.location.href = url;
+      if ($dl.dataset.ready !== '1') {
+        try { applyStatus(await fetchStatus()); } catch (e) { /* fall through */ }
+      }
+      if ($dl.dataset.ready === '1') {
+        window.location.href = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}`
+                             + `&home_team=${encodeURIComponent(home_short)}`
+                             + `&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
       } else {
         setStatus('A report is not available, please run the AI report generation for this matchup.', true);
       }
     }
 
-    // Initial check on page load for existing report
-    checkReportExists(true);
-    // Set up event listeners
+    // On load, adopt whatever the server is already doing — a build kicked off in
+    // another tab (or before a refresh) keeps showing live progress here.
+    (async () => {
+      try {
+        const data = await fetchStatus();
+        if (applyStatus(data) === 'busy') {
+          watchStarted = Date.now() - (data.elapsed_seconds || 0) * 1000;
+          startPolling();
+        }
+      } catch (err) {
+        console.error('Error checking report availability:', err);
+        setStatus('Error checking report', true);
+      }
+    })();
+
     $gen.addEventListener('click', generateReport);
     $dl.addEventListener('click', downloadReport);
   });

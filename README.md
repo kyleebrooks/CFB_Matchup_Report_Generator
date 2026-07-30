@@ -65,7 +65,9 @@ point at a URL that was hallucinated or dropped.
 
 | File | Responsibility |
 |---|---|
-| `app.py` | Flask routes, request orchestration, Rotowire scheduler |
+| `app.py` | Flask routes, auth, CORS, Rotowire scheduler |
+| `jobs.py` | Background job manager backing the async API |
+| `pipeline.py` | The full generation run, decoupled from Flask |
 | `config.py` | Every tunable, all env-overridable |
 | `db.py` | MySQL key store, SQLite Rotowire feed, team-name matching |
 | `cfbd.py` | CFBD fetching, normalization, percentiles, pruning |
@@ -141,16 +143,47 @@ report model receives this as an anchor it must state explicitly and then justif
 adjustment away from, based on injuries, roster news and matchup edges. Reports are
 graded on how close the final prediction lands to the real score.
 
-## Timing
+## Timing and the async job API
 
-Roughly 3–6 minutes per report. Gunicorn and Nginx timeouts must be at least 900s (see
-`setup_instructions.txt`); the frontend spinner needs a matching client-side timeout.
+A report takes roughly 3–6 minutes — far longer than a browser or proxy will hold a
+connection open. `POST /generate-report` therefore returns **202 immediately** with a job
+handle, and the client polls `GET /report-status` for staged progress.
+
+```
+POST /generate-report            -> 202 {"job_id":"…","state":"queued","percent":0}
+GET  /report-status?home_team=…  -> {"state":"running","percent":58,
+                                     "message":"Rendering charts","elapsed_seconds":94,
+                                     "report_exists":true}
+                                 -> {"state":"done","percent":100,
+                                     "result":{"filename":…,"seconds":…,"sources":…,
+                                               "projected_score":{…}}}
+                                 -> {"state":"error","error":…,"detail":…}
+```
+
+`state` is `queued`, `running`, `done`, `error`, or `none` (nothing queued this process
+lifetime). `report_exists` always reflects what is on disk, so the UI can offer a
+download even after a restart cleared the job table.
+
+Notes:
+- Posting twice for the same matchup while a build is in flight returns the **existing**
+  job rather than starting a second one.
+- The new PDF is built to a `.building` temp file and swapped in at the end, so the
+  previous report for that matchup stays downloadable for the whole rebuild.
+- Job state is in-process memory. This is correct **only** while Gunicorn runs
+  `--workers 1` (which it must anyway, or the Rotowire scheduler double-fires). Raising
+  the worker count means moving this to Redis or the database.
+- `POST /generate-report?wait=true` still runs synchronously and returns 200 with the
+  result — convenient for curl and cron, where the caller owns the timeout.
+
+Gunicorn and Nginx timeouts must still be at least 900s for the `wait=true` path (see
+`setup_instructions.txt`).
 
 ## Endpoints
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/generate-report` | POST | Build a report. Body: `home_full`, `away_full`, `home_short`, `away_short`, optional `year`, `kickoff` |
+| `/generate-report` | POST | Queue a report; 202 + job handle. Body: `home_full`, `away_full`, `home_short`, `away_short`, optional `year`, `kickoff`, `wait` |
+| `/report-status` | GET | Job state, stage, percent, elapsed, result or error |
 | `/get-report` | GET | Download the latest PDF for a matchup |
 | `/has-report` | GET | Whether a report exists |
 | `/health/llm` | GET | Resolve the OpenRouter key and ping both models |
