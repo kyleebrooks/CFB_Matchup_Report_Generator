@@ -390,6 +390,25 @@ const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
 const POLL_MS      = 4000;
 const MAX_WAIT_MS  = 15 * 60 * 1000;   // give up watching after 15 minutes
 
+// fetch() reports CORS, mixed-content and DNS failures identically, as an opaque
+// TypeError. Turn each into something that names the actual problem.
+function describeFetchError(err) {
+  if (err && err.status === 401) {
+    return 'API key rejected (HTTP 401). The key this page sends must match SERVICE_API_KEY '
+         + 'on the report server.';
+  }
+  if (err && err.status) return err.message;
+  if (err && err.name === 'TypeError') {
+    if (location.protocol === 'https:' && /^http:/i.test(API_BASE)) {
+      return 'Blocked as mixed content: this page is HTTPS but the API is plain HTTP ('
+           + API_BASE + '). Browsers refuse that. Put the API behind HTTPS.';
+    }
+    return 'Could not reach ' + API_BASE + ' — network, DNS or CORS. Open DevTools > Network '
+         + 'for the exact failure.';
+  }
+  return (err && err.message) ? err.message : String(err);
+}
+
 function fmtElapsed(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
   const m = Math.floor(sec / 60), s = sec % 60;
@@ -397,6 +416,18 @@ function fmtElapsed(sec) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
+  // Config problems are cheap to detect and expensive to guess at. Log once, up front.
+  if (!API_KEY) {
+    console.error('AFPLNA: API_KEY is empty. The cfbmatchupreport row in API_KEYS did not load, '
+                + 'so every request will come back 401.');
+  }
+  if (location.protocol === 'https:' && /^http:/i.test(API_BASE)) {
+    console.error('AFPLNA: page is HTTPS but API_BASE is HTTP (' + API_BASE
+                + '). The browser will block every request as mixed content.');
+  }
+  console.info('AFPLNA report client: API_BASE=' + API_BASE
+             + ' key=' + (API_KEY ? API_KEY.slice(0, 4) + '…(' + API_KEY.length + ' chars)' : 'MISSING'));
+
   document.querySelectorAll('.ai-controls').forEach(ctrl => {
     const $gen = ctrl.querySelector('.btn-generate');
     const $dl  = ctrl.querySelector('.btn-download');
@@ -454,7 +485,18 @@ window.addEventListener('DOMContentLoaded', () => {
                 + `&home_team=${encodeURIComponent(home_short)}`
                 + `&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
       const resp = await fetch(url, { cache: 'no-store' });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) {
+        let detail = '';
+        try {
+          const j = await resp.json();
+          detail = j.error || '';
+        } catch (e) {
+          detail = (await resp.text().catch(() => '')).slice(0, 120);
+        }
+        const err = new Error(`HTTP ${resp.status}${detail ? ': ' + detail : ''}`);
+        err.status = resp.status;
+        throw err;
+      }
       return resp.json();
     }
 
@@ -554,8 +596,16 @@ window.addEventListener('DOMContentLoaded', () => {
           let errMsg = `Error starting report (HTTP ${resp.status})`;
           try {
             const errData = await resp.json();
-            if (errData.error) errMsg = errData.error;
-          } catch (e) { /* non-JSON error body */ }
+            if (errData.error) errMsg = `${errData.error} (HTTP ${resp.status})`;
+            if (errData.detail) errMsg += ` — ${errData.detail}`;
+          } catch (e) {
+            const body = await resp.text().catch(() => '');
+            if (body) errMsg += `: ${body.slice(0, 160)}`;
+          }
+          if (resp.status === 401) {
+            errMsg = 'API key rejected (HTTP 401). The key this page sends must match '
+                   + 'SERVICE_API_KEY on the report server.';
+          }
           setBusy(false);
           setStatus(errMsg, true);
           hideProgress();
@@ -565,9 +615,9 @@ window.addEventListener('DOMContentLoaded', () => {
         const job = await resp.json().catch(() => ({}));
         showProgress(job.percent || 2, job.message || 'Queued', 0);
       } catch (err) {
-        console.error('Network error starting report generation:', err);
+        console.error('Failed to start report generation:', err);
         setBusy(false);
-        setStatus('Network error – could not start report.', true);
+        setStatus(describeFetchError(err), true);
         hideProgress();
         return;
       }
@@ -599,8 +649,8 @@ window.addEventListener('DOMContentLoaded', () => {
           startPolling();
         }
       } catch (err) {
-        console.error('Error checking report availability:', err);
-        setStatus('Error checking report', true);
+        console.error('Report status check failed:', err);
+        setStatus(describeFetchError(err), true);
       }
     })();
 
