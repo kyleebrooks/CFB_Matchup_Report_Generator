@@ -101,6 +101,14 @@ curl -sS "https://your-host/health/llm?api_key=$SERVICE_API_KEY" | jq
 
 Any legacy `openai` row in `API_KEYS` is unused and can be deleted.
 
+### When a report fails
+
+`GET /health?api_key=…` checks every dependency in one call and is the first thing to
+run. A rejected CFBD key is reported explicitly rather than being swallowed into a
+report full of empty statistics sections — CFBD answers a bad key with HTTP 401 and the
+body `{"message":"You must be logged in"}`, which surfaces as
+*"CollegeFootballData rejected the API key"*.
+
 ## Configuration
 
 All of `config.py` is env-overridable. The ones worth knowing:
@@ -186,7 +194,8 @@ Gunicorn and Nginx timeouts must still be at least 900s for the `wait=true` path
 | `/report-status` | GET | Job state, stage, percent, elapsed, result or error |
 | `/get-report` | GET | Download the latest PDF for a matchup |
 | `/has-report` | GET | Whether a report exists |
-| `/health/llm` | GET | Resolve the OpenRouter key and ping both models |
+| `/health` | GET | Check everything: CFBD key, OpenRouter key + both models, Rotowire DB, wkhtmltopdf, reports dir |
+| `/health/llm` | GET | OpenRouter only — resolve the key and ping both models |
 | `/ping` | GET | Liveness |
 
 ## Local Rotowire database

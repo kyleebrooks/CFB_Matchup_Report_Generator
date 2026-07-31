@@ -36,7 +36,13 @@ def pick(d, *keys, default=None):
     return default
 
 
-def _get(api_key: str, endpoint: str, params: dict, label: str):
+def _get(api_key: str, endpoint: str, params: dict, label: str, errors: list | None = None):
+    """GET one CFBD endpoint. Never raises — failures are recorded in `errors`.
+
+    Recording rather than raising matters: a single Patreon-tier endpoint 403ing should
+    not sink the whole report, but a 401 on *every* call means the key is bad and the
+    caller needs to say so instead of silently emitting a report full of empty sections.
+    """
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         resp = requests.get(
@@ -46,11 +52,17 @@ def _get(api_key: str, endpoint: str, params: dict, label: str):
             timeout=config.CFBD_TIMEOUT,
         )
         if resp.status_code != 200:
-            logging.warning(f"CFBD {label} HTTP {resp.status_code}: {resp.text[:200]}")
+            body = resp.text[:200]
+            logging.warning(f"CFBD {label} HTTP {resp.status_code}: {body}")
+            if errors is not None:
+                errors.append({"label": label, "endpoint": endpoint,
+                               "status": resp.status_code, "body": body})
             return []
         return resp.json()
     except Exception as e:
         logging.warning(f"CFBD {label} failed: {e}")
+        if errors is not None:
+            errors.append({"label": label, "endpoint": endpoint, "status": None, "body": str(e)[:200]})
         return []
 
 
@@ -89,9 +101,10 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
     jobs["lines::A"] = ("/lines", {"year": year, "team": home_short}, f"Betting Lines ({home_short})")
 
     results: dict[str, object] = {}
+    errors: list[dict] = []
     with ThreadPoolExecutor(max_workers=config.CFBD_MAX_WORKERS) as pool:
         futures = {
-            pool.submit(_get, api_key, ep, params, label): key
+            pool.submit(_get, api_key, ep, params, label, errors): key
             for key, (ep, params, label) in jobs.items()
         }
         for fut, key in futures.items():
@@ -115,7 +128,17 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
         "teamB": [t for t in talent_all if pick(t, "school", "team") == away_short],
     }
 
+    auth_failures = [e for e in errors if e["status"] in (401, 403)]
+    if auth_failures:
+        logging.error(
+            f"CFBD rejected {len(auth_failures)}/{len(jobs)} requests "
+            f"(e.g. HTTP {auth_failures[0]['status']}: {auth_failures[0]['body']})"
+        )
+
     return {
+        "errors": errors,
+        "auth_failures": auth_failures,
+        "total_requests": len(jobs),
         "stats": stats,
         "league": {
             "advanced": results.get("league::advanced") or [],
@@ -340,3 +363,13 @@ def prune_for_prompt(stats: dict) -> dict:
         "_note": f"Top {config.TOP_PLAYERS_PER_TEAM} players per team by absolute total PPA.",
     }
     return pruned
+
+
+def check_key(api_key: str, year: int) -> dict:
+    """One cheap authenticated call, to distinguish a bad key from an empty season."""
+    errors: list[dict] = []
+    data = _get(api_key, "/teams/fbs", {"year": year}, "key check", errors)
+    if errors:
+        e = errors[0]
+        return {"ok": False, "status": e["status"], "detail": e["body"]}
+    return {"ok": True, "teams": len(data) if isinstance(data, list) else 0}
