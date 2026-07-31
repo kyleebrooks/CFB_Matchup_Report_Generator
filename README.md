@@ -77,6 +77,8 @@ point at a URL that was hallucinated or dropped.
 | `charts.py` | The 8 procedural charts |
 | `report.py` | Final synthesis prompt and call |
 | `render.py` | HTML assembly, PDF, watermark |
+| `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
+| `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
 
 ## API keys
 
@@ -100,6 +102,25 @@ curl -sS "https://your-host/health/llm?api_key=$SERVICE_API_KEY" | jq
 ```
 
 Any legacy `openai` row in `API_KEYS` is unused and can be deleted.
+
+### The web-host proxy
+
+`scoreboard.php` and `report_proxy.php` run on the **web host** (GoDaddy), not the
+droplet. The site is HTTPS and the droplet is plain HTTP, so the browser cannot call the
+droplet directly — mixed content is blocked. `report_proxy.php` bridges that: the page
+calls it same-origin over HTTPS, and it forwards server-side over HTTP. It also keeps
+the service API key off the page and enforces the members-only session.
+
+Two failure modes look identical in the browser and are fixed in different places:
+
+- **Really logged out** — no session cookie was sent.
+- **Session not loaded** — the cookie arrived, but the proxy opened a *different*
+  session than the rest of the site. This happens when the proxy calls `session_start()`
+  cold while the site bootstraps through `common.inc` with a custom session name or
+  cookie path. The proxy now mirrors the site's bootstrap first.
+
+Its 401 body carries a `debug` block (`session_name`, `cookie_received`, `session_keys`)
+that tells the two apart, and the page logs it to the console.
 
 ### 502 Bad Gateway
 

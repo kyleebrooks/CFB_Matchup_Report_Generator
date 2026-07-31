@@ -131,14 +131,11 @@ if ($googleResult && $row = mysql_fetch_assoc($googleResult)) {
     mysql_free_result($googleResult);
 }
 
-// ** AFPLNA API Base URL and Key ** 
-$AFPLNA_API_BASE = 'http://143.198.20.72';  // DigitalOcean droplet base (HTTP)
-$AFPLNA_API_KEY  = '';
-$afplnaKeyResult = mysql_query("SELECT `KEY` FROM API_KEYS WHERE API_NAME='cfbmatchupreport' LIMIT 1", $connection);
-if ($afplnaKeyResult && $row = mysql_fetch_assoc($afplnaKeyResult)) {
-    $AFPLNA_API_KEY = trim($row['KEY']);
-    mysql_free_result($afplnaKeyResult);
-}
+// The matchup-report service is reached via report_proxy.php (same-origin, so it
+// works over HTTPS with no mixed content). The droplet URL and the
+// 'cfbmatchupreport' service key live server-side in that proxy and are
+// deliberately NOT read here — echoing the key into the page would hand it to
+// every visitor.
 
 // Fetch live FBS scoreboard data for the current AFPLNA week/year
 $url = "https://api.collegefootballdata.com/scoreboard?classification=fbs"
@@ -380,31 +377,29 @@ mysql_close($connection);
     ?>
 </div>
 <script>
-// Embed API base URL and key from PHP into JavaScript constants
-const API_BASE = "<?= $AFPLNA_API_BASE ?>";
-const API_KEY  = "<?= $AFPLNA_API_KEY ?>";
+// Report requests go through a same-origin proxy (report_proxy.php) so they work
+// over HTTPS with no mixed content, and so the service API key stays server-side.
+// The proxy also enforces the members-only session.
+const REPORT_PROXY = "report_proxy.php";
 
-// Report generation is asynchronous: POST /generate-report returns 202 immediately and
-// the real progress comes from polling /report-status. Never hold the POST open — it
-// runs for minutes and any proxy in between will cut the connection first.
-const POLL_MS      = 4000;
-const MAX_WAIT_MS  = 15 * 60 * 1000;   // give up watching after 15 minutes
+// Generation is asynchronous: POST returns 202 immediately and progress comes from
+// polling report-status. Never hold the POST open — it runs for minutes.
+const POLL_MS     = 4000;
+const MAX_WAIT_MS = 15 * 60 * 1000;
 
-// fetch() reports CORS, mixed-content and DNS failures identically, as an opaque
-// TypeError. Turn each into something that names the actual problem.
+// fetch() reports CORS, network and auth failures in ways that all look alike from
+// the catch block. Turn each into something that names the actual problem.
 function describeFetchError(err) {
   if (err && err.status === 401) {
-    return 'API key rejected (HTTP 401). The key this page sends must match SERVICE_API_KEY '
-         + 'on the report server.';
+    return 'Your login session was not recognised. Reload the page and sign in again '
+         + '(the report proxy requires a logged-in session).';
+  }
+  if (err && err.status === 502) {
+    return 'The report service is unreachable from the web server. ' + (err.detail || '');
   }
   if (err && err.status) return err.message;
   if (err && err.name === 'TypeError') {
-    if (location.protocol === 'https:' && /^http:/i.test(API_BASE)) {
-      return 'Blocked as mixed content: this page is HTTPS but the API is plain HTTP ('
-           + API_BASE + '). Browsers refuse that. Put the API behind HTTPS.';
-    }
-    return 'Could not reach ' + API_BASE + ' — network, DNS or CORS. Open DevTools > Network '
-         + 'for the exact failure.';
+    return 'Could not reach report_proxy.php — check it exists at the same path as this page.';
   }
   return (err && err.message) ? err.message : String(err);
 }
@@ -416,18 +411,6 @@ function fmtElapsed(sec) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  // Config problems are cheap to detect and expensive to guess at. Log once, up front.
-  if (!API_KEY) {
-    console.error('AFPLNA: API_KEY is empty. The cfbmatchupreport row in API_KEYS did not load, '
-                + 'so every request will come back 401.');
-  }
-  if (location.protocol === 'https:' && /^http:/i.test(API_BASE)) {
-    console.error('AFPLNA: page is HTTPS but API_BASE is HTTP (' + API_BASE
-                + '). The browser will block every request as mixed content.');
-  }
-  console.info('AFPLNA report client: API_BASE=' + API_BASE
-             + ' key=' + (API_KEY ? API_KEY.slice(0, 4) + '…(' + API_KEY.length + ' chars)' : 'MISSING'));
-
   document.querySelectorAll('.ai-controls').forEach(ctrl => {
     const $gen = ctrl.querySelector('.btn-generate');
     const $dl  = ctrl.querySelector('.btn-download');
@@ -441,10 +424,10 @@ window.addEventListener('DOMContentLoaded', () => {
                     + '<span class="ai-elapsed"></span></div>'
                     + '<div class="ai-detail"></div>';
     ctrl.appendChild($prog);
-    const $bar    = $prog.querySelector('.ai-bar > span');
-    const $phase  = $prog.querySelector('.ai-phase-text');
-    const $elapsed= $prog.querySelector('.ai-elapsed');
-    const $detail = $prog.querySelector('.ai-detail');
+    const $bar     = $prog.querySelector('.ai-bar > span');
+    const $phase   = $prog.querySelector('.ai-phase-text');
+    const $elapsed = $prog.querySelector('.ai-elapsed');
+    const $detail  = $prog.querySelector('.ai-detail');
 
     const home_short = $gen.dataset.homeshort;
     const away_short = $gen.dataset.awayshort;
@@ -480,25 +463,32 @@ window.addEventListener('DOMContentLoaded', () => {
                                                            : 'Generate AI Report');
     }
 
-    async function fetchStatus() {
-      const url = `${API_BASE}/report-status?api_key=${encodeURIComponent(API_KEY)}`
+    // Attach the HTTP status and the server's message to thrown errors, so the
+    // catch block has something to report beyond "it failed".
+    async function proxyGet(endpoint) {
+      const url = `${REPORT_PROXY}?endpoint=${endpoint}`
                 + `&home_team=${encodeURIComponent(home_short)}`
                 + `&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
       const resp = await fetch(url, { cache: 'no-store' });
       if (!resp.ok) {
-        let detail = '';
+        let msg = '', detail = '';
         try {
           const j = await resp.json();
-          detail = j.error || '';
+          msg = j.error || '';
+          detail = j.detail || '';
+          if (j.debug) console.error('report_proxy debug:', j.debug);
         } catch (e) {
-          detail = (await resp.text().catch(() => '')).slice(0, 120);
+          msg = (await resp.text().catch(() => '')).slice(0, 160);
         }
-        const err = new Error(`HTTP ${resp.status}${detail ? ': ' + detail : ''}`);
+        const err = new Error(`HTTP ${resp.status}${msg ? ': ' + msg : ''}`);
         err.status = resp.status;
+        err.detail = detail;
         throw err;
       }
       return resp.json();
     }
+
+    const fetchStatus = () => proxyGet('report-status');
 
     // Single source of truth: render whatever the server says the job is doing.
     function applyStatus(data) {
@@ -532,7 +522,6 @@ window.addEventListener('DOMContentLoaded', () => {
         return 'done';
       }
 
-      // state === 'none' — nothing queued in this server process
       hideProgress();
       if (exists) setStatus('Report is ready ✔');
       else setStatus('Report not yet Generated.', true);
@@ -548,12 +537,10 @@ window.addEventListener('DOMContentLoaded', () => {
       watchStarted = watchStarted || Date.now();
       const tick = async () => {
         try {
-          const data = await fetchStatus();
-          const outcome = applyStatus(data);
-          if (outcome !== 'busy') { watchStarted = 0; return; }
+          if (applyStatus(await fetchStatus()) !== 'busy') { watchStarted = 0; return; }
         } catch (err) {
           console.error('Error polling report status:', err);
-          // A transient network blip must not abandon a job that is still running.
+          // A transient blip must not abandon a job that is still running.
         }
         if (Date.now() - watchStarted > MAX_WAIT_MS) {
           setBusy(false);
@@ -579,11 +566,11 @@ window.addEventListener('DOMContentLoaded', () => {
       showProgress(2, 'Queued', 0);
 
       try {
-        const resp = await fetch(`${API_BASE}/generate-report`, {
+        const resp = await fetch(`${REPORT_PROXY}?endpoint=generate-report`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          // No api_key here — report_proxy.php injects it server-side.
           body: JSON.stringify({
-            api_key: API_KEY,
             home_full:  $gen.dataset.homefull,
             away_full:  $gen.dataset.awayfull,
             home_short: home_short,
@@ -591,29 +578,26 @@ window.addEventListener('DOMContentLoaded', () => {
           })
         });
 
+        const raw = await resp.text();
+        let data = null;
+        try { data = raw ? JSON.parse(raw) : null; } catch (e) { /* non-JSON body */ }
+
         // 202 Accepted is the normal path; the job now runs server-side.
-        if (!resp.ok && resp.status !== 202) {
-          let errMsg = `Error starting report (HTTP ${resp.status})`;
-          try {
-            const errData = await resp.json();
-            if (errData.error) errMsg = `${errData.error} (HTTP ${resp.status})`;
-            if (errData.detail) errMsg += ` — ${errData.detail}`;
-          } catch (e) {
-            const body = await resp.text().catch(() => '');
-            if (body) errMsg += `: ${body.slice(0, 160)}`;
-          }
+        if ((!resp.ok && resp.status !== 202) || (data && data.error)) {
+          if (data && data.debug) console.error('report_proxy debug:', data.debug);
+          let errMsg = (data && data.error) ? data.error : `Report service error (HTTP ${resp.status})`;
+          if (data && data.detail) errMsg += ' — ' + data.detail;
           if (resp.status === 401) {
-            errMsg = 'API key rejected (HTTP 401). The key this page sends must match '
-                   + 'SERVICE_API_KEY on the report server.';
+            errMsg = describeFetchError({ status: 401 });
           }
+          console.error('generate-report failed:', resp.status, raw);
           setBusy(false);
           setStatus(errMsg, true);
           hideProgress();
           return;
         }
 
-        const job = await resp.json().catch(() => ({}));
-        showProgress(job.percent || 2, job.message || 'Queued', 0);
+        showProgress((data && data.percent) || 2, (data && data.message) || 'Queued', 0);
       } catch (err) {
         console.error('Failed to start report generation:', err);
         setBusy(false);
@@ -631,7 +615,7 @@ window.addEventListener('DOMContentLoaded', () => {
         try { applyStatus(await fetchStatus()); } catch (e) { /* fall through */ }
       }
       if ($dl.dataset.ready === '1') {
-        window.location.href = `${API_BASE}/get-report?api_key=${encodeURIComponent(API_KEY)}`
+        window.location.href = `${REPORT_PROXY}?endpoint=get-report`
                              + `&home_team=${encodeURIComponent(home_short)}`
                              + `&away_team=${encodeURIComponent(away_short)}&_=${Date.now()}`;
       } else {
