@@ -125,15 +125,18 @@ class JobManager:
                 finished_at=time.time(),
             )
         except Exception as e:
-            logging.exception(f"Report job {key} crashed")
+            # An unexpected escape. Name the stage and the exception type — a bare
+            # str(e) from deep in the stack is close to useless when it reaches the UI.
+            stage = getattr(pipeline.generate, "current_stage", {}).get("label", "unknown stage")
+            logging.exception(f"Report job {key} crashed during: {stage}")
             self._set(
                 key,
                 state="error",
                 stage="error",
                 percent=100,
-                message="Report generation failed",
-                error="Report generation failed",
-                detail=str(e)[:500],
+                message=f"Report generation failed during: {stage}",
+                error=f"Report generation failed during: {stage}",
+                detail=f"{e.__class__.__name__}: {e}"[:500],
                 finished_at=time.time(),
             )
 

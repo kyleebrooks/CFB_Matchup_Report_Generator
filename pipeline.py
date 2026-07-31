@@ -59,11 +59,14 @@ def generate(
     """Build one matchup report end to end. Returns a result summary dict."""
     progress = progress or _noop
     started = time.time()
+    current = {"stage": "start", "label": "Starting up"}
 
     def step(key):
         pct, label = STAGES[key]
+        current["stage"], current["label"] = key, label
         progress(key, pct, label)
 
+    generate.current_stage = current  # read by the job manager when something escapes
     step("start")
 
     cfbd_api_key = db.resolve_cfbd_key()
@@ -104,6 +107,29 @@ def generate(
         except Exception:
             logging.exception("Research stage failed entirely")
             research_raw = {}
+
+    auth_failures = cfbd_data.get("auth_failures") or []
+    total_requests = cfbd_data.get("total_requests") or 0
+    if auth_failures and len(auth_failures) >= max(1, total_requests // 2):
+        first = auth_failures[0]
+        raise PipelineError(
+            "CollegeFootballData rejected the API key",
+            f"HTTP {first['status']} on {len(auth_failures)}/{total_requests} requests "
+            f"— {first['body']}. Failing endpoints: "
+            f"{', '.join(sorted({e['endpoint'] for e in auth_failures}))}. "
+            f"Run GET /health/cfbd to probe each endpoint individually.",
+            502,
+        )
+
+    cfbd_errors = cfbd_data.get("errors") or []
+    if cfbd_errors:
+        summary = {}
+        for e in cfbd_errors:
+            summary.setdefault(e["status"], []).append(e["endpoint"])
+        logging.warning(
+            f"CFBD: {len(cfbd_errors)}/{total_requests} requests failed — "
+            + "; ".join(f"HTTP {k}: {sorted(set(v))}" for k, v in summary.items())
+        )
 
     stats = cfbd_data["stats"]
 

@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
 
+import cfbd
 import config
 import db
 import jobs
@@ -341,6 +342,123 @@ def has_report():
     files = glob.glob(pattern)
     logging.info(f"[has-report] REPORTS_DIR={config.REPORTS_DIR} pattern={pattern} matches={len(files)}")
     return jsonify({"exists": bool(files)}), 200
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """One call that checks every external dependency. Start here when a report fails."""
+    api_key_param = _extract_api_key()
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    out = {"ok": True, "checks": {}}
+    year = cfbd.season_year(datetime.now())
+    out["season_year"] = year
+
+    # --- CFBD ------------------------------------------------------------
+    cfbd_key = db.resolve_cfbd_key()
+    if not cfbd_key:
+        out["ok"] = False
+        out["checks"]["cfbd"] = {
+            "ok": False,
+            "error": "No CFBD key found",
+            "hint": "Add a 'CFD' (or 'CFBD') row to API_KEYS, or set CFBD_API_KEY.",
+        }
+    else:
+        check = cfbd.check_key(cfbd_key, year)
+        check["key_prefix"] = cfbd_key[:6] + "..."
+        if not check["ok"]:
+            out["ok"] = False
+            check["hint"] = (
+                "CFBD rejected the key. Confirm it at collegefootballdata.com/key and "
+                "update the 'CFD' row in API_KEYS."
+            )
+        out["checks"]["cfbd"] = check
+
+    # --- OpenRouter ------------------------------------------------------
+    import openrouter
+
+    or_key = db.resolve_openrouter_key()
+    if not or_key:
+        out["ok"] = False
+        out["checks"]["openrouter"] = {
+            "ok": False,
+            "error": "No OpenRouter key found",
+            "hint": "Add an 'openrouter' row to API_KEYS, or set OPENROUTER_API_KEY.",
+        }
+    else:
+        models = {}
+        for role, model in (("research", config.OPENROUTER_RESEARCH_MODEL),
+                            ("report", config.OPENROUTER_REPORT_MODEL)):
+            try:
+                resp = openrouter.chat(
+                    or_key, model,
+                    [{"role": "user", "content": "Reply with the single word: ok"}],
+                    max_tokens=16, timeout=60, retries=0,
+                )
+                models[role] = {"model": model, "ok": True,
+                                "reply": openrouter.extract_text(resp)[:40]}
+            except Exception as e:
+                out["ok"] = False
+                models[role] = {"model": model, "ok": False, "error": str(e)[:400]}
+        out["checks"]["openrouter"] = {
+            "ok": all(m["ok"] for m in models.values()),
+            "key_prefix": or_key[:10] + "...",
+            "models": models,
+        }
+
+    # --- Local dependencies ----------------------------------------------
+    try:
+        conn = db.get_rotowire_db_connection()
+        rows = conn.execute("SELECT COUNT(*) FROM rotowire").fetchone()[0]
+        conn.close()
+        out["checks"]["rotowire_db"] = {"ok": True, "rows": rows, "path": config.ROTOWIRE_DB_PATH}
+    except Exception as e:
+        out["checks"]["rotowire_db"] = {"ok": False, "error": str(e)[:300]}
+
+    wk = config.WKHTMLTOPDF_PATH or "/usr/bin/wkhtmltopdf"
+    out["checks"]["wkhtmltopdf"] = {"ok": os.path.exists(wk), "path": wk}
+    if not out["checks"]["wkhtmltopdf"]["ok"]:
+        out["ok"] = False
+
+    out["checks"]["reports_dir"] = {
+        "ok": os.path.isdir(config.REPORTS_DIR) and os.access(config.REPORTS_DIR, os.W_OK),
+        "path": config.REPORTS_DIR,
+    }
+    out["checks"]["watermark"] = {"ok": os.path.exists(config.WATERMARK_PATH)}
+
+    return jsonify(out), (200 if out["ok"] else 502)
+
+
+@app.route('/health/cfbd', methods=['GET'])
+def health_cfbd():
+    """Probe every CFBD endpoint the report uses, one at a time.
+
+    Run this when reports fail with empty statistics. Because it is sequential it
+    distinguishes a key/tier rejection (that endpoint always 401/403s) from a rate
+    limit (fine here, fails under the report's concurrent burst).
+    """
+    api_key_param = _extract_api_key()
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    key = db.resolve_cfbd_key()
+    if not key:
+        return jsonify({
+            "ok": False,
+            "error": "No CFBD key found",
+            "hint": "Add a 'CFD' (or 'CFBD') row to API_KEYS, or set CFBD_API_KEY.",
+        }), 500
+
+    try:
+        year = int(request.args.get('year'))
+    except (TypeError, ValueError):
+        year = cfbd.season_year(datetime.now())
+
+    result = cfbd.probe(key, year, request.args.get('team') or 'Georgia')
+    result["key_prefix"] = key[:6] + "..."
+    result["key_length"] = len(key)
+    return jsonify(result), (200 if result["ok"] else 502)
 
 
 @app.route('/health/llm', methods=['GET'])
