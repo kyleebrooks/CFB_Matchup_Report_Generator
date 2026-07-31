@@ -177,8 +177,21 @@ def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry
 
     text = openrouter.extract_text(resp)
     if not text:
+        # Reasoning models spend max_tokens on thinking before emitting any content, so
+        # an empty reply is a budget problem, not a model failure. Say which one it is.
+        usage = openrouter.extract_usage(resp)
+        reason = openrouter.finish_reason(resp)
+        reasoning_tokens = usage.get("reasoning_tokens")
+        if reason == "length" or openrouter.has_reasoning(resp):
+            raise openrouter.OpenRouterError(
+                f"{config.OPENROUTER_REPORT_MODEL} used its entire token budget on reasoning "
+                f"and returned no report text (finish_reason={reason or 'unknown'}, "
+                f"reasoning_tokens={reasoning_tokens}, max_tokens={config.REPORT_MAX_TOKENS}). "
+                f"Raise REPORT_MAX_TOKENS or lower REPORT_EFFORT.",
+                body=json.dumps(usage),
+            )
         raise openrouter.OpenRouterError(
-            "Report model returned no text",
+            f"Report model returned no text (finish_reason={reason or 'unknown'})",
             body=json.dumps(resp)[:800],
         )
     return {

@@ -172,11 +172,30 @@ def extract_citations(resp: dict) -> list[dict]:
     return out
 
 
+def finish_reason(resp: dict) -> str:
+    for choice in resp.get("choices") or []:
+        fr = choice.get("finish_reason") or choice.get("native_finish_reason")
+        if fr:
+            return str(fr)
+    return ""
+
+
+def has_reasoning(resp: dict) -> bool:
+    """True when the model emitted reasoning tokens but no visible content."""
+    for choice in resp.get("choices") or []:
+        message = choice.get("message") or {}
+        if message.get("reasoning") or message.get("reasoning_details"):
+            return True
+    return False
+
+
 def extract_usage(resp: dict) -> dict:
     usage = resp.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
     return {
         "input_tokens": usage.get("prompt_tokens"),
         "output_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": details.get("reasoning_tokens"),
         "total_tokens": usage.get("total_tokens"),
         "cost": usage.get("cost"),
     }

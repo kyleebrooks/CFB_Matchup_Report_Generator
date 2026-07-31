@@ -115,6 +115,18 @@ takes the service down — the app starts, `/health` reports `charts.ok: false`,
 report generation fails with "Charting library missing on the server" instead of every
 endpoint returning 502.
 
+### Reasoning models and the token budget
+
+Kimi K3 is a reasoning model, and reasoning tokens count against `max_tokens`. Set the
+budget too low and the model spends all of it thinking, then returns **empty content**
+with `finish_reason: "length"` — which looks like a broken model but is a budget
+problem. `REPORT_MAX_TOKENS` defaults to 96000 to cover both the reasoning trace and
+the ~12k-token report, and an empty reply is reported as exactly that, with the
+reasoning-token count, rather than a generic failure.
+
+The same applies to health checks: probing a reasoning model with a tiny `max_tokens`
+returns an empty reply and looks like an outage. `/health` uses 2048.
+
 ### When a report fails
 
 `GET /health?api_key=…` checks every dependency in one call and is the first thing to
@@ -145,6 +157,8 @@ All of `config.py` is env-overridable. The ones worth knowing:
 | `OPENROUTER_SEARCH_ENGINE` | `native` | `native`, `exa`, or blank to let OpenRouter pick |
 | `OPENROUTER_SEARCH_MAX_RESULTS` | `10` | Exa billing is per result |
 | `RESEARCH_TIMEOUT` / `REPORT_TIMEOUT` | `240` / `420` | seconds |
+| `REPORT_MAX_TOKENS` | `96000` | must cover reasoning **and** the report — see below |
+| `REPORT_EFFORT` | `high` | lower this before lowering the token budget |
 | `HOME_FIELD_ADVANTAGE` | `2.4` | points added to every rating differential |
 | `MARGIN_STDDEV` | `13.5` | drives the win-probability curve |
 | `TOP_PLAYERS_PER_TEAM` | `18` | player-PPA pruning before the report prompt |

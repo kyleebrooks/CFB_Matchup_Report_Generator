@@ -188,6 +188,8 @@ DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 # OPENROUTER_SEARCH_MAX_RESULTS=10
 # RESEARCH_TIMEOUT=240
 # REPORT_TIMEOUT=420
+# REPORT_MAX_TOKENS=96000   # covers reasoning tokens AND the report; too low = empty output
+# REPORT_EFFORT=high        # low | medium | high
 EOF
 
 sudo chmod 600 /etc/afplna.env
