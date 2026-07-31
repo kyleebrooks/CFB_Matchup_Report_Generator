@@ -188,6 +188,8 @@ DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 # OPENROUTER_SEARCH_MAX_RESULTS=10
 # RESEARCH_TIMEOUT=240
 # REPORT_TIMEOUT=420
+# REPORT_MAX_TOKENS=96000   # covers reasoning tokens AND the report; too low = empty output
+# REPORT_EFFORT=high        # low | medium | high
 EOF
 
 sudo chmod 600 /etc/afplna.env
@@ -208,6 +210,9 @@ User=deploy
 Group=www-data
 WorkingDirectory=/opt/afplna
 EnvironmentFile=/etc/afplna.env
+# systemd does not set HOME, and matplotlib needs a writable cache dir. The app picks a
+# temp dir automatically, but setting this explicitly keeps the cache warm across restarts.
+Environment=MPLCONFIGDIR=/opt/afplna/.mplcache
 ExecStart=/opt/afplna/venv/bin/gunicorn "app:app" --bind 127.0.0.1:5000 --workers 1 --threads 8 --timeout 900 --graceful-timeout 900
 Restart=always
 RestartSec=3
@@ -216,6 +221,8 @@ TimeoutStartSec=60
 [Install]
 WantedBy=multi-user.target
 EOF
+
+sudo -u deploy mkdir -p /opt/afplna/.mplcache
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now afplna
@@ -348,6 +355,35 @@ API calls, so threads give concurrency without duplicating the scheduler.
 Optional: add a debug route to trigger the job manually (remove after testing).
 
 16) Logs & troubleshooting
+
+FIRST STOP: 502 Bad Gateway from Nginx
+
+502 means Gunicorn is not running — the app failed to START, so no request ever
+reached it. This is always an import-time or environment problem, never a bug in a
+route. Get the real error:
+
+    sudo systemctl status afplna --no-pager -l | head -30
+    sudo journalctl -u afplna -n 60 --no-pager -o cat
+
+    # reproduce the import directly - this prints the actual traceback
+    cd /opt/afplna && sudo -u deploy /opt/afplna/venv/bin/python -c "import app"
+
+Most common causes:
+  - Dependencies not reinstalled after a pull (matplotlib is the usual one):
+        source /opt/afplna/venv/bin/activate && pip install -r /opt/afplna/requirements.txt
+  - A .py file missing from /opt/afplna because rsync was skipped after git pull
+  - Port 5000 already held by an old process:  sudo fuser -k 5000/tcp
+
+Once it starts, confirm every dependency at once:
+
+    curl -sS "http://localhost/health?api_key=YOUR_SERVICE_API_KEY" | jq
+
+Debugging tip: do NOT pipe to jq while diagnosing. jq hides the response. A
+"parse error: Invalid numeric literal at line 1, column 10" just means jq was handed
+Flask's HTML 404 page. Use curl -i to see the status and raw body first:
+
+    curl -sS -i "http://localhost/health?api_key=YOUR_SERVICE_API_KEY"
+
 # Live app logs
 journalctl -fu afplna -o cat
 

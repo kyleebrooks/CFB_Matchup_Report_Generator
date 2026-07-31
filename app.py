@@ -391,13 +391,29 @@ def health():
         for role, model in (("research", config.OPENROUTER_RESEARCH_MODEL),
                             ("report", config.OPENROUTER_REPORT_MODEL)):
             try:
+                # 2048, not 16: a reasoning model spends tokens thinking before it
+                # writes anything, so a tiny cap yields an empty reply and a false alarm.
                 resp = openrouter.chat(
                     or_key, model,
                     [{"role": "user", "content": "Reply with the single word: ok"}],
-                    max_tokens=16, timeout=60, retries=0,
+                    max_tokens=2048, timeout=90, retries=0,
                 )
-                models[role] = {"model": model, "ok": True,
-                                "reply": openrouter.extract_text(resp)[:40]}
+                reply = openrouter.extract_text(resp)
+                usage = openrouter.extract_usage(resp)
+                entry = {
+                    "model": model,
+                    "ok": bool(reply),
+                    "reply": reply[:40],
+                    "finish_reason": openrouter.finish_reason(resp),
+                    "reasoning_tokens": usage.get("reasoning_tokens"),
+                }
+                if not reply:
+                    out["ok"] = False
+                    entry["error"] = (
+                        "Model returned no text. If finish_reason is 'length' the token "
+                        "budget went entirely to reasoning — raise REPORT_MAX_TOKENS."
+                    )
+                models[role] = entry
             except Exception as e:
                 out["ok"] = False
                 models[role] = {"model": model, "ok": False, "error": str(e)[:400]}
@@ -426,6 +442,16 @@ def health():
         "path": config.REPORTS_DIR,
     }
     out["checks"]["watermark"] = {"ok": os.path.exists(config.WATERMARK_PATH)}
+
+    import charts as charts_mod
+    out["checks"]["charts"] = {
+        "ok": charts_mod.CHARTS_AVAILABLE,
+        "mplconfigdir": os.environ.get("MPLCONFIGDIR"),
+    }
+    if not charts_mod.CHARTS_AVAILABLE:
+        out["ok"] = False
+        out["checks"]["charts"]["error"] = charts_mod.IMPORT_ERROR
+        out["checks"]["charts"]["hint"] = "pip install -r requirements.txt (matplotlib)"
 
     return jsonify(out), (200 if out["ok"] else 502)
 

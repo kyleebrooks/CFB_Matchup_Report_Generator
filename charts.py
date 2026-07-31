@@ -13,20 +13,53 @@ import base64
 import io
 import logging
 import math
-
-import matplotlib
-matplotlib.use("Agg")  # must precede pyplot; there is no display on the droplet
-
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.patches import Patch
+import os
+import tempfile
 
 import cfbd
 import config
 import predict
 
+# systemd units do not set HOME, so matplotlib's default cache path is unwritable under
+# the service account. Point it somewhere writable BEFORE importing matplotlib, or every
+# start pays a "created a temporary cache directory" penalty (or fails outright).
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    os.path.join(os.getenv("XDG_CACHE_HOME") or tempfile.gettempdir(), "afplna-mpl"),
+)
+try:
+    os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+except Exception:
+    pass
+
+# A missing charting library must not take the whole service down with it — /get-report,
+# /report-status and /health all have to keep working so the failure is diagnosable.
+CHARTS_AVAILABLE = True
+IMPORT_ERROR = ""
+try:
+    import matplotlib
+    matplotlib.use("Agg")  # must precede pyplot; there is no display on the droplet
+
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.patches import Patch
+except Exception as _e:  # pragma: no cover - exercised only on a broken install
+    CHARTS_AVAILABLE = False
+    IMPORT_ERROR = f"{_e.__class__.__name__}: {_e}"
+    logging.error(
+        f"matplotlib unavailable ({IMPORT_ERROR}). Report charts are disabled; "
+        f"run: pip install -r requirements.txt"
+    )
+    plt = None
+    np = None
+    Patch = None
+
 FIG_W = 9.5
 FIG_H = 4.6
+
+
+class ChartsUnavailable(RuntimeError):
+    """Raised when matplotlib could not be imported, so no chart can be produced."""
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +622,11 @@ CHART_SPECS = [
 
 def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, away_label) -> list[dict]:
     """Render all eight charts in fixed order. Failures become styled placeholders."""
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt"
+        )
     home_c, away_c = resolve_colors(home_meta, away_meta)
 
     builders = {

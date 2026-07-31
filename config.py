@@ -62,7 +62,10 @@ RESEARCH_MAX_TOKENS = int(os.getenv('RESEARCH_MAX_TOKENS', '8000'))
 RESEARCH_EFFORT = os.getenv('RESEARCH_EFFORT', 'medium')
 
 REPORT_TIMEOUT = int(os.getenv('REPORT_TIMEOUT', '420'))
-REPORT_MAX_TOKENS = int(os.getenv('REPORT_MAX_TOKENS', '32000'))
+# Reasoning models bill thinking against max_tokens, so this has to cover BOTH the
+# reasoning trace and the ~12k-token report. Too low and the model thinks until the
+# budget is gone and returns empty content.
+REPORT_MAX_TOKENS = int(os.getenv('REPORT_MAX_TOKENS', '96000'))
 REPORT_EFFORT = os.getenv('REPORT_EFFORT', 'high')
 
 # ---------------------------------------------------------------------------

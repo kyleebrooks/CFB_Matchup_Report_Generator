@@ -164,9 +164,12 @@ def generate(
 
     # --- Stage 3: visuals ----------------------------------------------------
     step("charts")
-    chart_set = charts_mod.build_all(
-        stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
-    )
+    try:
+        chart_set = charts_mod.build_all(
+            stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
+        )
+    except charts_mod.ChartsUnavailable as e:
+        raise PipelineError("Charting library missing on the server", str(e), 500)
 
     bundle = {
         "matchup": {
@@ -195,7 +198,13 @@ def generate(
         result = report_mod.generate(openrouter_api_key, ctx, bundle, chart_set, registry)
     except Exception as e:
         logging.exception("Report generation failed")
-        raise PipelineError("Report model request failed", str(getattr(e, "body", None) or e)[:500], 502)
+        # The exception message is the actionable part; the upstream body is supporting
+        # evidence. Showing only the body (as this did) surfaced raw usage JSON to the UI.
+        detail = str(e)
+        body = getattr(e, "body", None)
+        if body and str(body) not in detail:
+            detail = f"{detail} | upstream: {body}"
+        raise PipelineError("Report model request failed", detail[:500], 502)
 
     usage = result["usage"]
 
