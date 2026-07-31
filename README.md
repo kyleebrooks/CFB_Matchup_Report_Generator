@@ -101,6 +101,20 @@ curl -sS "https://your-host/health/llm?api_key=$SERVICE_API_KEY" | jq
 
 Any legacy `openai` row in `API_KEYS` is unused and can be deleted.
 
+### 502 Bad Gateway
+
+Nginx returns 502 when Gunicorn is not running, i.e. the app failed at **import** time.
+No route was involved. Reproduce it directly for the real traceback:
+
+```bash
+cd /opt/afplna && sudo -u deploy /opt/afplna/venv/bin/python -c "import app"
+```
+
+Usually dependencies were not reinstalled after a pull. A missing matplotlib no longer
+takes the service down — the app starts, `/health` reports `charts.ok: false`, and
+report generation fails with "Charting library missing on the server" instead of every
+endpoint returning 502.
+
 ### When a report fails
 
 `GET /health?api_key=…` checks every dependency in one call and is the first thing to

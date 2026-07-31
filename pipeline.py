@@ -164,9 +164,12 @@ def generate(
 
     # --- Stage 3: visuals ----------------------------------------------------
     step("charts")
-    chart_set = charts_mod.build_all(
-        stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
-    )
+    try:
+        chart_set = charts_mod.build_all(
+            stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
+        )
+    except charts_mod.ChartsUnavailable as e:
+        raise PipelineError("Charting library missing on the server", str(e), 500)
 
     bundle = {
         "matchup": {

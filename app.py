@@ -427,6 +427,16 @@ def health():
     }
     out["checks"]["watermark"] = {"ok": os.path.exists(config.WATERMARK_PATH)}
 
+    import charts as charts_mod
+    out["checks"]["charts"] = {
+        "ok": charts_mod.CHARTS_AVAILABLE,
+        "mplconfigdir": os.environ.get("MPLCONFIGDIR"),
+    }
+    if not charts_mod.CHARTS_AVAILABLE:
+        out["ok"] = False
+        out["checks"]["charts"]["error"] = charts_mod.IMPORT_ERROR
+        out["checks"]["charts"]["hint"] = "pip install -r requirements.txt (matplotlib)"
+
     return jsonify(out), (200 if out["ok"] else 502)
 
 
