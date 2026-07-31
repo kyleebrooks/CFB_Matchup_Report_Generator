@@ -6,6 +6,7 @@ camelCase/snake_case drift, and pruned before they reach the report model.
 """
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -26,6 +27,9 @@ PER_TEAM_ENDPOINTS = [
 ]
 
 
+CFBD_RETRIES = 2
+
+
 def pick(d, *keys, default=None):
     """Read the first present key. CFBD mixes camelCase and snake_case across versions."""
     if not isinstance(d, dict):
@@ -44,26 +48,47 @@ def _get(api_key: str, endpoint: str, params: dict, label: str, errors: list | N
     caller needs to say so instead of silently emitting a report full of empty sections.
     """
     headers = {"Authorization": f"Bearer {api_key}"}
-    try:
-        resp = requests.get(
-            config.CFBD_BASE_URL + endpoint,
-            headers=headers,
-            params=params,
-            timeout=config.CFBD_TIMEOUT,
-        )
-        if resp.status_code != 200:
-            body = resp.text[:200]
-            logging.warning(f"CFBD {label} HTTP {resp.status_code}: {body}")
-            if errors is not None:
-                errors.append({"label": label, "endpoint": endpoint,
-                               "status": resp.status_code, "body": body})
-            return []
-        return resp.json()
-    except Exception as e:
-        logging.warning(f"CFBD {label} failed: {e}")
-        if errors is not None:
-            errors.append({"label": label, "endpoint": endpoint, "status": None, "body": str(e)[:200]})
-        return []
+    last = {"status": None, "body": ""}
+
+    for attempt in range(CFBD_RETRIES + 1):
+        try:
+            resp = requests.get(
+                config.CFBD_BASE_URL + endpoint,
+                headers=headers,
+                params=params,
+                timeout=config.CFBD_TIMEOUT,
+            )
+        except Exception as e:
+            last = {"status": None, "body": str(e)[:200]}
+            logging.warning(f"CFBD {label} transport error: {e}")
+            if attempt < CFBD_RETRIES:
+                time.sleep(2 ** attempt)
+                continue
+            break
+
+        if resp.status_code == 200:
+            try:
+                return resp.json()
+            except ValueError:
+                last = {"status": 200, "body": f"non-JSON response: {resp.text[:150]}"}
+                logging.warning(f"CFBD {label} returned non-JSON")
+                break
+
+        last = {"status": resp.status_code, "body": resp.text[:200]}
+        # 429 is a burst problem, not a credentials problem — back off and retry.
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < CFBD_RETRIES:
+            wait = 2 ** attempt
+            logging.warning(f"CFBD {label} HTTP {resp.status_code}; retrying in {wait}s")
+            time.sleep(wait)
+            continue
+
+        logging.warning(f"CFBD {label} HTTP {resp.status_code}: {last['body']}")
+        break
+
+    if errors is not None:
+        errors.append({"label": label, "endpoint": endpoint,
+                       "status": last["status"], "body": last["body"]})
+    return []
 
 
 def _first(rows):
@@ -373,3 +398,44 @@ def check_key(api_key: str, year: int) -> dict:
         e = errors[0]
         return {"ok": False, "status": e["status"], "detail": e["body"]}
     return {"ok": True, "teams": len(data) if isinstance(data, list) else 0}
+
+
+def probe(api_key: str, year: int, team: str = "Georgia") -> dict:
+    """Hit every endpoint the pipeline uses, one at a time, and report each result.
+
+    Sequential on purpose: the report path fires these concurrently, so probing them
+    serially separates "this endpoint rejects my key / tier" from "I got rate limited".
+    """
+    checks = []
+    probes = [(ep, {"year": year, "team": team}, label) for ep, label in PER_TEAM_ENDPOINTS]
+    probes += [
+        ("/teams/fbs", {"year": year}, "FBS Teams"),
+        ("/talent", {"year": year}, "Team Talent (league-wide)"),
+        ("/stats/season/advanced", {"year": year}, "Advanced Stats (league-wide)"),
+        ("/ratings/sp", {"year": year}, "SP Ratings (league-wide)"),
+        ("/games", {"year": year, "team": team}, "Games (NEW)"),
+        ("/lines", {"year": year, "team": team}, "Betting Lines (NEW)"),
+    ]
+
+    for endpoint, params, label in probes:
+        errors: list[dict] = []
+        data = _get(api_key, endpoint, params, label, errors)
+        if errors:
+            e = errors[0]
+            checks.append({"endpoint": endpoint, "label": label, "ok": False,
+                           "status": e["status"], "body": e["body"]})
+        else:
+            checks.append({"endpoint": endpoint, "label": label, "ok": True,
+                           "status": 200, "rows": len(data) if isinstance(data, list) else "object"})
+        time.sleep(0.15)  # stay well clear of the rate limiter while probing
+
+    failed = [c for c in checks if not c["ok"]]
+    return {
+        "ok": not failed,
+        "year": year,
+        "team": team,
+        "passed": len(checks) - len(failed),
+        "total": len(checks),
+        "failed_endpoints": [c["endpoint"] for c in failed],
+        "checks": checks,
+    }

@@ -115,9 +115,20 @@ def generate(
         raise PipelineError(
             "CollegeFootballData rejected the API key",
             f"HTTP {first['status']} on {len(auth_failures)}/{total_requests} requests "
-            f"— {first['body']}. Check the 'CFD' row in the API_KEYS table "
-            f"(or CFBD_API_KEY) and confirm the key at collegefootballdata.com/key.",
+            f"— {first['body']}. Failing endpoints: "
+            f"{', '.join(sorted({e['endpoint'] for e in auth_failures}))}. "
+            f"Run GET /health/cfbd to probe each endpoint individually.",
             502,
+        )
+
+    cfbd_errors = cfbd_data.get("errors") or []
+    if cfbd_errors:
+        summary = {}
+        for e in cfbd_errors:
+            summary.setdefault(e["status"], []).append(e["endpoint"])
+        logging.warning(
+            f"CFBD: {len(cfbd_errors)}/{total_requests} requests failed — "
+            + "; ".join(f"HTTP {k}: {sorted(set(v))}" for k, v in summary.items())
         )
 
     stats = cfbd_data["stats"]

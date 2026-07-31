@@ -107,7 +107,18 @@ Any legacy `openai` row in `API_KEYS` is unused and can be deleted.
 run. A rejected CFBD key is reported explicitly rather than being swallowed into a
 report full of empty statistics sections — CFBD answers a bad key with HTTP 401 and the
 body `{"message":"You must be logged in"}`, which surfaces as
-*"CollegeFootballData rejected the API key"*.
+*"CollegeFootballData rejected the API key"*, naming the failing endpoints.
+
+`GET /health/cfbd?api_key=…` probes each CFBD endpoint **sequentially**, one request at
+a time. That separates two failures that look identical in the logs:
+
+- **Key or tier rejection** — that endpoint 401/403s even when probed alone. `/lines`
+  is the usual suspect; betting lines are gated behind a paid CFBD tier, and a single
+  gated endpoint degrades gracefully rather than failing the report.
+- **Rate limiting** — the endpoint passes when probed alone but fails during a report.
+  The report fires ~25 requests at once where the pre-rewrite code made 20 sequentially,
+  so 429s are now retried with backoff and concurrency is capped at
+  `CFBD_MAX_WORKERS` (default 4).
 
 ## Configuration
 
@@ -123,6 +134,7 @@ All of `config.py` is env-overridable. The ones worth knowing:
 | `HOME_FIELD_ADVANTAGE` | `2.4` | points added to every rating differential |
 | `MARGIN_STDDEV` | `13.5` | drives the win-probability curve |
 | `TOP_PLAYERS_PER_TEAM` | `18` | player-PPA pruning before the report prompt |
+| `CFBD_MAX_WORKERS` | `4` | concurrent CFBD requests; raise carefully, CFBD rate-limits |
 | `ROTOWIRE_DB_PATH` | `./rotowire.db` | local SQLite feed |
 
 ## Visuals
@@ -195,6 +207,7 @@ Gunicorn and Nginx timeouts must still be at least 900s for the `wait=true` path
 | `/get-report` | GET | Download the latest PDF for a matchup |
 | `/has-report` | GET | Whether a report exists |
 | `/health` | GET | Check everything: CFBD key, OpenRouter key + both models, Rotowire DB, wkhtmltopdf, reports dir |
+| `/health/cfbd` | GET | Probe every CFBD endpoint individually (optional `year`, `team`) |
 | `/health/llm` | GET | OpenRouter only — resolve the key and ping both models |
 | `/ping` | GET | Liveness |
 

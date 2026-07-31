@@ -33,7 +33,8 @@ WATERMARK_PATH = os.path.join(BASE_DIR, 'AFPLNA_LOGO.png')
 # ---------------------------------------------------------------------------
 CFBD_BASE_URL = os.getenv('CFBD_BASE_URL', 'https://api.collegefootballdata.com')
 CFBD_TIMEOUT = int(os.getenv('CFBD_TIMEOUT', '30'))
-CFBD_MAX_WORKERS = int(os.getenv('CFBD_MAX_WORKERS', '8'))
+# Kept modest on purpose: CFBD rate-limits, and the report fires ~25 requests.
+CFBD_MAX_WORKERS = int(os.getenv('CFBD_MAX_WORKERS', '4'))
 
 # ---------------------------------------------------------------------------
 # OpenRouter — the single gateway for every LLM call in this service

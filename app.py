@@ -430,6 +430,37 @@ def health():
     return jsonify(out), (200 if out["ok"] else 502)
 
 
+@app.route('/health/cfbd', methods=['GET'])
+def health_cfbd():
+    """Probe every CFBD endpoint the report uses, one at a time.
+
+    Run this when reports fail with empty statistics. Because it is sequential it
+    distinguishes a key/tier rejection (that endpoint always 401/403s) from a rate
+    limit (fine here, fails under the report's concurrent burst).
+    """
+    api_key_param = _extract_api_key()
+    if config.SERVICE_API_KEY and api_key_param != config.SERVICE_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    key = db.resolve_cfbd_key()
+    if not key:
+        return jsonify({
+            "ok": False,
+            "error": "No CFBD key found",
+            "hint": "Add a 'CFD' (or 'CFBD') row to API_KEYS, or set CFBD_API_KEY.",
+        }), 500
+
+    try:
+        year = int(request.args.get('year'))
+    except (TypeError, ValueError):
+        year = cfbd.season_year(datetime.now())
+
+    result = cfbd.probe(key, year, request.args.get('team') or 'Georgia')
+    result["key_prefix"] = key[:6] + "..."
+    result["key_length"] = len(key)
+    return jsonify(result), (200 if result["ok"] else 502)
+
+
 @app.route('/health/llm', methods=['GET'])
 def health_llm():
     """Confirm the OpenRouter key resolves and both models answer. Cheap smoke test."""
