@@ -183,7 +183,7 @@ def _curses_main(stdscr):
         nonlocal scroll
         stdscr.erase()
         height, width = stdscr.getmaxyx()
-        body_h = height - 4
+        body_h = height - 5
 
         tabs = '  '.join(f"[{i + 1}]{n}" for i, n in enumerate(SCREENS))
         stdscr.addnstr(0, 0, f" AFPLNA Admin Console   {tabs}", width - 1,
@@ -198,9 +198,15 @@ def _curses_main(stdscr):
                 pass
 
         msg, msg_style = flash
+        # Two footer rows: what THIS screen can do, then the global keys. The
+        # per-screen bar lives here rather than in the body so a long list can never
+        # scroll it out of sight.
+        keys = ui.KEY_BAR.get(screen, '')
         footer = msg or "  [1-8] screen   [r] refresh   [?] help   [q] quit"
         try:
-            stdscr.addnstr(height - 2, 0, '=' * (width - 1), width - 1, STYLES[ui.DIM])
+            stdscr.addnstr(height - 3, 0, '=' * (width - 1), width - 1, STYLES[ui.DIM])
+            stdscr.addnstr(height - 2, 0, f"  {keys}".ljust(width - 1), width - 1,
+                           STYLES[ui.WARN])
             stdscr.addnstr(height - 1, 0, footer.ljust(width - 1), width - 1,
                            STYLES.get(msg_style, 0))
         except Exception:
@@ -306,12 +312,23 @@ def _curses_main(stdscr):
         return ui.HELP
 
     def selected_account():
+        """The account the next action applies to.
+
+        In the detail view that is the account on screen, not whatever the list
+        cursor happens to sit on — otherwise the actions would silently target a
+        different row than the one being read.
+        """
         rows = state.get('accounts') or []
+        if detail_of is not None:
+            shown = next((a for a in rows if a['id'] == detail_of), None)
+            if shown:
+                return shown
         return rows[selected] if 0 <= selected < len(rows) else None
 
     # -- account actions --------------------------------------------------
     def act_new_account():
-        nonlocal flash
+        nonlocal flash, detail_of
+        detail_of = None          # a new account is not the one being detailed
         name = prompt('Account name')
         if not name:
             return
@@ -427,7 +444,7 @@ def _curses_main(stdscr):
         refresh(f"  {label} -> {'yes' if new_value else 'no'}", ui.OK)
 
     def act_delete_account():
-        nonlocal flash, selected
+        nonlocal flash, selected, detail_of
         account = selected_account()
         if not account:
             return
@@ -444,6 +461,7 @@ def _curses_main(stdscr):
             flash = (f"  Delete failed: {e}", ui.ERR)
             return
         selected = max(0, selected - 1)
+        detail_of = None          # the detailed account no longer exists
         refresh(f"  Account {account['id']} deleted"
                 f"{' with its usage history' if keep else '; usage history kept'}.", ui.OK)
 
@@ -665,26 +683,28 @@ def _curses_main(stdscr):
             continue
 
         if screen == 'Accounts':
+            # The actions stay live in the detail view too. Gating them on the list
+            # view turned "press ENTER on a row" into a dead end where every key did
+            # nothing, with no hint that ESC was the way out.
             if ch in (10, 13, curses.KEY_ENTER):
                 account = selected_account()
                 detail_of = None if detail_of is not None else (account or {}).get('id')
-            elif detail_of is None:
-                if ch == ord('n'):
-                    act_new_account()
-                elif ch == ord('k'):
-                    act_rotate()
-                elif ch == ord('e'):
-                    act_edit_reports()
-                elif ch == ord('s'):
-                    act_account_setting()
-                elif ch == ord('t'):
-                    act_toggle('active', 'Active')
-                elif ch == ord('m'):
-                    act_toggle('is_admin', 'Admin')
-                elif ch == ord('w'):
-                    act_clear_watermark()
-                elif ch == ord('D'):
-                    act_delete_account()
+            elif ch == ord('n'):
+                act_new_account()
+            elif ch == ord('k'):
+                act_rotate()
+            elif ch == ord('e'):
+                act_edit_reports()
+            elif ch == ord('s'):
+                act_account_setting()
+            elif ch == ord('t'):
+                act_toggle('active', 'Active')
+            elif ch == ord('m'):
+                act_toggle('is_admin', 'Admin')
+            elif ch == ord('w'):
+                act_clear_watermark()
+            elif ch == ord('D'):
+                act_delete_account()
         elif screen == 'Browser':
             if ch in (10, 13, curses.KEY_ENTER):
                 act_open_table()

@@ -27,6 +27,24 @@ def rule(width: int = 78, char: str = '-') -> tuple:
     return _line(char * width, DIM)
 
 
+# Compact per-screen key reminders. These are painted into the footer by the curses
+# layer, so unlike a hint inside the body they can never scroll out of view — an
+# action nobody can see is an action that does not exist.
+KEY_BAR = {
+    'Dashboard': '[2] accounts  [3] settings  [4] database  [5] health  [6] browser  '
+                 '[7] reports  [8] examples',
+    'Accounts':  '[n]ew  [e]dit types  [s]etting  [k]ey  [t]oggle  [m]admin  [w]mark  '
+                 '[D]elete  ENTER detail',
+    'Settings':  'ENTER change the value   [x] clear the override (back to the env default)',
+    'Database':  '[a] apply the proposed repairs (additive only — nothing is dropped)',
+    'Health':    '[r] run the live health checks (makes real API calls)',
+    'Browser':   '[b] switch database   ENTER open table   [n]/[p] page   ESC back',
+    'Reports':   'up/down select   ENTER every section and how it is produced   ESC back',
+    'Examples':  '[a] pick an account   [d] administrator calls   [w] write to a file',
+    'Help':      '[1-8] back to a screen   [q] quit',
+}
+
+
 # ---------------------------------------------------------------------------
 # Service inspection
 # ---------------------------------------------------------------------------
@@ -149,8 +167,17 @@ def render_accounts(state: dict) -> list[tuple]:
     if accounts_list is None:
         out.append(_line('  Could not load accounts (database unreachable).', ERR))
         return out
+
+    # These hints used to live only on the empty-list branch, so they vanished the
+    # moment the first account existed and the screen looked read-only from then on.
+    out.append(_line('  [n] new account   [e] report types   [s] account setting   '
+                     '[k] new API key', WARN))
+    out.append(_line('  [t] on/off   [m] admin   [w] watermark   [D] delete   '
+                     'ENTER account detail', WARN))
+    out.append(_line())
+
     if not accounts_list:
-        out.append(_line('  No accounts yet. Press [n] to create one.', DIM))
+        out.append(_line('  No accounts yet — press [n] to create one.', DIM))
         return out
 
     usage_rows = state.get('usage') or {}
@@ -181,6 +208,10 @@ def render_account_detail(account: dict, settings_rows: list[dict],
     out = [
         _line(f"ACCOUNT {account['id']} — {account['account_name']}", TITLE),
         rule(),
+        _line('  ESC or ENTER back to the list.  Every account key still works here:', WARN),
+        _line('  [e] report types   [s] setting   [k] new API key   [t] on/off   '
+              '[D] delete', WARN),
+        _line(),
         _line(f"  Key prefix     : {account['api_key_prefix']}..."),
         _line(f"  Contact        : {account.get('contact_email') or '-'}"),
         _line(f"  Active         : {'yes' if account['active'] else 'no'}",
@@ -393,6 +424,7 @@ def render_global_settings(state: dict) -> list[tuple]:
     out = [
         _line('SERVICE-WIDE SETTINGS', TITLE),
         rule(),
+        _line('  up/down select   ENTER change the value   [x] clear the override', WARN),
         _line('  These apply to every account that has not overridden them.', DIM),
         _line('  Changes are live — no service restart needed.', DIM),
         _line(),
@@ -537,7 +569,8 @@ HELP = [
     _line('    e        edit report types    s      edit a setting'),
     _line('    t        toggle active        m      toggle admin'),
     _line('    w        clear watermark      D      DELETE account (permanent)'),
-    _line('    Account detail shows call counts and recent request history.'),
+    _line('    Account detail shows call counts and recent request history, and every'),
+    _line('    key above still works while you are in it. ESC or ENTER returns.'),
     _line(),
     _line('  SETTINGS SCREEN', HEADER),
     _line('    up/down  select               ENTER  change value'),
