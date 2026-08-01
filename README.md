@@ -135,6 +135,22 @@ Eight screens:
 | 7 | Reports | Every report's sections and how each one is produced |
 | 8 | Examples | Copy-pasteable API calls, generated per account |
 
+Every screen paints its own keys in the footer, above the global bar, so the available
+actions are never more than a glance away and can never scroll out of view. `?` opens
+the full key map. On the Accounts screen:
+
+| Key | Action | | Key | Action |
+|---|---|---|---|---|
+| `n` | new account | | `t` | activate / deactivate |
+| `e` | edit report entitlements | | `m` | toggle admin |
+| `s` | edit a per-account setting | | `w` | clear the custom watermark |
+| `k` | issue a new API key | | `D` | delete permanently |
+| `ENTER` | account detail | | `ESC` | back to the list |
+
+The account keys work in the detail view as well as the list, so opening an account is
+never a dead end. In any input, the suggested value is replaced by the first key you
+type; `^U` clears the line and `ESC` cancels.
+
 **Usage tracking** — one row per API report request in `report_usage`, written when the
 job is queued and closed out when it finishes. The account list shows lifetime and
 30-day call counts; account detail adds completions, failures and recent request
