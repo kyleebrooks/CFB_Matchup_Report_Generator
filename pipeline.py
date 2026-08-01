@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import accounts
 import cfbd
 import charts as charts_mod
 import config
@@ -65,7 +66,7 @@ def generate(
     stamped image for accounts that uploaded their own.
     """
     progress = progress or _noop
-    settings = settings or config.default_settings()
+    settings = settings or accounts.effective_settings(None)
     started = time.time()
     current = {"stage": "start", "label": "Starting up"}
 

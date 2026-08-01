@@ -36,6 +36,32 @@ Prerequisites
 
 15) Scheduler notes
 
+15b) Admin console
+
+A terminal UI for the report service, over SSH:
+
+    cd /opt/afplna && ./venv/bin/python admin_tui.py
+
+Optional shortcut so it can be run as one word from anywhere:
+
+    sudo tee /usr/local/bin/afplna-admin >/dev/null <<'EOF'
+    #!/usr/bin/env bash
+    cd /opt/afplna && exec ./venv/bin/python admin_tui.py "$@"
+    EOF
+    sudo chmod +x /usr/local/bin/afplna-admin
+
+    afplna-admin            # full-screen console
+    afplna-admin audit      # non-interactive schema audit
+    afplna-admin --help     # all subcommands
+
+Screens: Dashboard, Accounts, Settings, Database, Health. Press ? for the key map.
+
+Run the database audit once after deploying: it creates report_accounts and
+report_service_settings if they do not exist, and reports any API_KEYS rows the
+service needs. Repairs are additive only - it never drops or rewrites anything.
+
+    afplna-admin audit --apply
+
 16) Logs & troubleshooting
 
 17) Updating deployments
@@ -359,6 +385,32 @@ to --workers 1 --threads 8 for exactly this reason: report generation is I/O-bou
 API calls, so threads give concurrency without duplicating the scheduler.
 
 Optional: add a debug route to trigger the job manually (remove after testing).
+
+15b) Admin console
+
+A terminal UI for the report service, over SSH:
+
+    cd /opt/afplna && ./venv/bin/python admin_tui.py
+
+Optional shortcut so it can be run as one word from anywhere:
+
+    sudo tee /usr/local/bin/afplna-admin >/dev/null <<'EOF'
+    #!/usr/bin/env bash
+    cd /opt/afplna && exec ./venv/bin/python admin_tui.py "$@"
+    EOF
+    sudo chmod +x /usr/local/bin/afplna-admin
+
+    afplna-admin            # full-screen console
+    afplna-admin audit      # non-interactive schema audit
+    afplna-admin --help     # all subcommands
+
+Screens: Dashboard, Accounts, Settings, Database, Health. Press ? for the key map.
+
+Run the database audit once after deploying: it creates report_accounts and
+report_service_settings if they do not exist, and reports any API_KEYS rows the
+service needs. Repairs are additive only - it never drops or rewrites anything.
+
+    afplna-admin audit --apply
 
 16) Logs & troubleshooting
 
