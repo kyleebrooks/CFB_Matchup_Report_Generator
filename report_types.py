@@ -57,6 +57,7 @@ def _run_matchup(params: dict, progress) -> dict:
         kickoff=params.get('kickoff'),
         settings=params.get('settings'),
         watermark=params.get('watermark'),
+        report_dir=params.get('report_dir'),
         progress=progress,
     )
 
@@ -81,6 +82,7 @@ def _run_team(params: dict, progress) -> dict:
         year=params.get('year'),
         settings=params.get('settings'),
         watermark=params.get('watermark'),
+        report_dir=params.get('report_dir'),
         progress=progress,
     )
 

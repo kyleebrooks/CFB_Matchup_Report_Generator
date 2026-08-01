@@ -304,9 +304,14 @@ def generate(
     year: int | None = None,
     settings: dict | None = None,
     watermark: str | None = None,
+    report_dir: str | None = None,
     progress=None,
 ) -> dict:
-    """Build one single-team report end to end."""
+    """Build one single-team report end to end.
+
+    `report_dir` scopes the output to one account's directory; without it two accounts
+    requesting the same team on the same day overwrite each other's PDF.
+    """
     progress = progress or (lambda *a: None)
     settings = settings or accounts.effective_settings(None)
     started = time.time()
@@ -331,8 +336,10 @@ def generate(
         year = cfbd.season_year(today)
 
     safe = "".join(ch for ch in team_short if ch.isalnum() or ch in " -_").strip() or "team"
+    out_dir = report_dir or config.REPORTS_DIR
+    os.makedirs(out_dir, exist_ok=True)
     filename = f"team_{safe}_{db.format_friendly_date(today)}.pdf"
-    filepath = os.path.join(config.REPORTS_DIR, filename)
+    filepath = os.path.join(out_dir, filename)
     tmp_path = filepath + ".building"
 
     ctx = {
