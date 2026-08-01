@@ -11,7 +11,7 @@ the two are synthesized into one report.
 POST             │ Stage 1 — run concurrently                 │
 /generate-report │                                            │
                  │  CFBD (12 endpoints, parallel)             │  statistics only
-                 │  Rotowire (local SQLite, filtered by team) │  injury feed
+                 │  Injury feed (local SQLite, by team)       │  stored history
                  │  8 × DeepSeek V4 Flash calls (parallel)    │  live web + citations
                  └────────────────────────────────────────────┘
                                      │
@@ -48,16 +48,18 @@ Statistics are never researched by an LLM — CFBD is the only source for number
 
 ### Multi-input sections
 
-A section can have more than one input. Injuries, for example, carry both a
-`live_web_research` bucket and a `rotowire_feed` bucket. Buckets stay separate all the
-way through to the report, and the model is required to label them separately in the
-prose rather than blending them.
+A section can have more than one input. Injuries carry both a `live_web_research`
+bucket — a search run at report time — and a `rotowire_feed` bucket, which is the stored
+history collected for that team over recent days. Buckets stay separate all the way
+through to the report, and the model is required to label them separately rather than
+blending them.
 
 ### Citations
 
 Every URL retrieved during research is registered once and assigned a stable index.
-`[1]` is always CollegeFootballData and `[2]` is always Rotowire. The report model is
-handed the pre-assigned markers and told to reuse them verbatim; the SOURCES list at the
+`[1]` is always CollegeFootballData and `[2]` is the injury feed; a stored item that
+carries its own article URL earns its own marker instead. The report model is handed the
+pre-assigned markers and told to reuse them verbatim; the SOURCES list at the
 end of the PDF is rendered by `render.py`, not by the model, so a citation can never
 point at a URL that was hallucinated or dropped.
 
@@ -65,11 +67,11 @@ point at a URL that was hallucinated or dropped.
 
 | File | Responsibility |
 |---|---|
-| `app.py` | Flask routes, auth, CORS, Rotowire scheduler |
+| `app.py` | Flask routes, auth, CORS |
 | `jobs.py` | Background job manager backing the async API |
 | `pipeline.py` | The full generation run, decoupled from Flask |
 | `config.py` | Every tunable, all env-overridable |
-| `db.py` | MySQL key store, SQLite Rotowire feed, team-name matching |
+| `db.py` | MySQL key store, SQLite injury feed, team-name matching |
 | `cfbd.py` | CFBD fetching, normalization, percentiles, pruning |
 | `openrouter.py` | OpenRouter client, web-search plugin, lenient JSON parsing |
 | `research.py` | The 8 research jobs, prompts, source registry, bucket assembly |
@@ -82,7 +84,7 @@ point at a URL that was hallucinated or dropped.
 | `report_types.py` | Registry of report types — add a type here and the API picks it up |
 | `team_report.py` | Single-team season report pipeline |
 | `admin_tui.py` | SSH admin console (curses UI + CLI subcommands) |
-| `rotowire.py` | Scheduled Bright Data scrape, run history, freshness diagnostics |
+| `injuries.py` | Injury collection, TTL cache, per-team coverage, freshness diagnostics |
 | `admin_console.py` | Console screens as pure render functions — testable headlessly |
 | `schema.py` | Declarative DB schema: audit, report gaps, repair additively |
 | `envfile.py` | Loads the service environment when running outside systemd |
@@ -158,20 +160,19 @@ job is queued and closed out when it finishes. The account list shows lifetime a
 history. Accounts also see their own numbers at `GET /v1/account/usage`. Every usage
 write is best-effort — accounting never fails a customer's report.
 
-**Rotowire feed** — `admin_tui.py rotowire` reports the age of the newest row, whether
-the `bright` key exists, the next scheduled fire times, recent run outcomes, and a
-verdict; `--run` triggers a collection now and prints exactly what Bright Data
-returned. Every scheduled run records its outcome in `rotowire_runs`, and `/health`
-checks the *age* of the feed rather than just its row count — a table whose newest row
-was a year old used to report `ok`.
+**Injury feed** — `admin_tui.py injuries` reports the age of the newest item, per-team
+coverage and cache age, and a verdict. `--team "Georgia Bulldogs"` collects one team
+now; `--sweep` collects every FBS team after stating the cost. `/health` checks the
+*age* of the feed rather than just its row count — a table whose newest row was a year
+old used to report `ok`.
 
-**Browser** — walks the MySQL tables and the Rotowire SQLite side by side. Strictly
+**Browser** — walks the MySQL tables and the feed SQLite side by side. Strictly
 read-only: table names are validated against the live catalog before use, and key,
 hash and password columns render as `<redacted>`.
 
 **Report catalog** — assembled from the live definitions, so it cannot drift from what
 the service actually does. Each section is labelled with its source: live web research,
-research plus the Rotowire feed, CFBD statistics, or synthesis.
+research plus the stored injury feed, CFBD statistics, or synthesis.
 
 **Examples** — built from the account's real entitlements, so an unentitled report type
 never appears. Keys are never embedded; examples reference `$KEY`.
@@ -344,7 +345,8 @@ All of `config.py` is env-overridable. The ones worth knowing:
 | `MARGIN_STDDEV` | `13.5` | drives the win-probability curve |
 | `TOP_PLAYERS_PER_TEAM` | `18` | player-PPA pruning before the report prompt |
 | `CFBD_MAX_WORKERS` | `4` | concurrent CFBD requests; raise carefully, CFBD rate-limits |
-| `ROTOWIRE_DB_PATH` | `./rotowire.db` | local SQLite feed |
+| `ROTOWIRE_DB_PATH` | `./rotowire.db` | local SQLite injury feed |
+| `INJURY_FEED_TTL_HOURS` | `6` | how long a team's injuries stay cached before a report re-collects |
 
 ## Visuals
 
@@ -399,7 +401,7 @@ Notes:
 - The new PDF is built to a `.building` temp file and swapped in at the end, so the
   previous report for that matchup stays downloadable for the whole rebuild.
 - Job state is in-process memory. This is correct **only** while Gunicorn runs
-  `--workers 1` (which it must anyway, or the Rotowire scheduler double-fires). Raising
+  `--workers 1`. Raising
   the worker count means moving this to Redis or the database.
 - `POST /generate-report?wait=true` still runs synchronously and returns 200 with the
   result — convenient for curl and cron, where the caller owns the timeout.
@@ -415,15 +417,16 @@ Gunicorn and Nginx timeouts must still be at least 900s for the `wait=true` path
 | `/report-status` | GET | Job state, stage, percent, elapsed, result or error |
 | `/get-report` | GET | Download the latest PDF for a matchup |
 | `/has-report` | GET | Whether a report exists |
-| `/health` | GET | Check everything: CFBD key, OpenRouter key + both models, Rotowire DB, wkhtmltopdf, reports dir |
+| `/health` | GET | Check everything: CFBD key, OpenRouter key + both models, injury-feed freshness, wkhtmltopdf, reports dir |
 | `/health/cfbd` | GET | Probe every CFBD endpoint individually (optional `year`, `team`) |
 | `/health/llm` | GET | OpenRouter only — resolve the key and ping both models |
 | `/ping` | GET | Liveness |
 
-## Local Rotowire database
+## Injury feed database
 
-The application writes Rotowire articles to a local SQLite database. By default the file
-`rotowire.db` is created in the project root. To place it elsewhere:
+Collected injury items are written to a local SQLite database. By default the file
+`rotowire.db` is created in the project root — the name is kept because that is what is
+deployed. To place it elsewhere:
 
 ```bash
 export ROTOWIRE_DB_PATH=/var/cfb/rotowire.db

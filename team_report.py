@@ -17,6 +17,7 @@ import cfbd
 import charts as charts_mod
 import config
 import db
+import injuries
 import render
 import report as report_mod
 import research
@@ -52,7 +53,8 @@ SECTIONS = [
      "and out, suspensions, eligibility rulings, position switches."),
     ("Injury Report", "injuries",
      "Medical items only, with status and expected return where reported. This section has "
-     "TWO inputs — live web research and the Rotowire feed — and they must be presented as "
+     "TWO inputs — a live web search run just now, and the stored injury feed built up for "
+     "this team over recent days — and they must be presented as "
      "clearly labeled separate groups."),
     ("What the Media Is Saying", "media",
      "National and local coverage, analyst takes, rankings movement, and betting-market "
@@ -165,7 +167,7 @@ Topic label for your own reference: {topic}."""
 
 
 def _assemble(raw: dict, rotowire: list, registry, ctx: dict, settings: dict) -> dict:
-    """Merge research output and the Rotowire feed into per-section buckets."""
+    """Merge research output and the stored injury feed into per-section buckets."""
     model = settings["research_model"]
 
     def bucket(key: str) -> dict:
@@ -191,7 +193,9 @@ def _assemble(raw: dict, rotowire: list, registry, ctx: dict, settings: dict) ->
         }
 
     for item in rotowire:
-        idx = registry.add(item.get("source_url", ""), "Rotowire College Football News", "Rotowire")
+        idx = registry.add(item.get("source_url", ""),
+                           item.get("headline") or "College football injury feed",
+                           item.get("source_name") or "Injury feed")
         item["citation"] = f"[{idx}]" if idx else "[2]"
 
     return {
@@ -205,7 +209,8 @@ def _assemble(raw: dict, rotowire: list, registry, ctx: dict, settings: dict) ->
                           "inputs": {
                               "live_web_research": bucket("injuries"),
                               "rotowire_feed": {
-                                  "source": "Rotowire injury/news feed (scraped twice daily)",
+                                  "source": ("Stored injury feed — items collected for this "
+                                             "team and kept in the local database"),
                                   "window_days": config.ROTOWIRE_WINDOW_DAYS,
                                   "no_data": not rotowire,
                                   "items": rotowire,
@@ -264,7 +269,7 @@ FORMATTING
   H/A, Result, Score) followed by prose on each game, then a separate list for upcoming
   opponents.
 - When a section has more than one input bucket, keep them visibly separate with a bolded
-  sub-label (e.g. "**Live web research:**" and "**Rotowire feed:**"). Never blend two
+  sub-label (e.g. "**Live web research:**" and "**Injury feed:**"). Never blend two
   sources into one undifferentiated list.
 - If a section's data is empty or marked no_data, keep the heading and write ONE sentence
   saying no data was available. Nothing else — no speculation, no filler, no apology.
@@ -272,7 +277,7 @@ FORMATTING
 =========================== SOURCING ===========================
 Citation markers are PRE-ASSIGNED. Cite with the exact bracketed marker from the list
 below, placed inline right after the claim it supports. Use [1] for anything drawn from
-the CollegeFootballData statistics and [2] for the Rotowire feed. NEVER invent a marker
+the CollegeFootballData statistics and [2] for the injury feed. NEVER invent a marker
 that is not on the list, and never write a bare URL. Do NOT write a SOURCES section — one
 is appended automatically. Do not mention URLs, retrieval problems or search coverage.
 Do not use any fact that is not present in the data below.
@@ -378,10 +383,14 @@ def generate(
     adv_rows = stats.get("Advanced Team Stats") or []
     percentiles = cfbd.build_percentiles(data["league"]["advanced"], adv_rows[0] if adv_rows else {}, {})
 
+    # Persist what the report's own injury call already found, then read the feed back
+    # — refreshing only if no lookup for this team has run inside the TTL.
+    injuries.record_findings(team_short, team_full,
+                             (raw.get("injuries") or {}).get("findings") or [])
     try:
-        rotowire = db.fetch_rotowire_for_team(team_short, team_full)
+        rotowire = injuries.ensure_fresh(team_short, team_full, settings)
     except Exception as e:
-        logging.warning(f"Rotowire lookup failed: {e}")
+        logging.warning(f"Injury feed lookup failed: {e}")
         rotowire = []
 
     registry = research.seed_registry()

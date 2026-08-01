@@ -122,15 +122,15 @@ def render_dashboard(state: dict) -> list[tuple]:
     if roto:
         stale = roto.get('days_stale')
         if roto.get('error') or stale is None:
-            out.append(_line(f"  Rotowire feed  : NO DATED ROWS — "
+            out.append(_line(f"  Injury feed    : NO DATED ROWS — "
                              f"{roto.get('error') or 'nothing parseable'}", ERR))
         elif stale > config.ROTOWIRE_STALE_DAYS:
-            out.append(_line(f"  Rotowire feed  : STALE — newest row is {stale} days old "
+            out.append(_line(f"  Injury feed    : STALE — newest item is {stale} days old "
                              f"({roto['newest_text']})", ERR))
-            out.append(_line("                   The scrape runs twice daily; run "
-                             "'admin_tui.py rotowire'", WARN))
+            out.append(_line("                   Collected as reports run; check with "
+                             "'admin_tui.py injuries'", WARN))
         else:
-            out.append(_line(f"  Rotowire feed  : current — {roto['rows']:,} rows, newest "
+            out.append(_line(f"  Injury feed    : current — {roto['rows']:,} rows, newest "
                              f"{roto['newest_text']}", OK))
 
     schema_report = state.get('schema') or {}
@@ -430,70 +430,75 @@ def render_examples(state: dict) -> list[tuple]:
 
 
 # ---------------------------------------------------------------------------
-# Rotowire feed
+# Injury feed
 # ---------------------------------------------------------------------------
-def render_rotowire(report: dict) -> list[tuple]:
+def render_feed(report: dict) -> list[tuple]:
     st = report.get('status') or {}
+    cov = report.get('coverage') or {}
     out = [
-        _line('ROTOWIRE FEED', TITLE),
+        _line('INJURY FEED', TITLE),
         rule(),
+        _line('  Collected on demand by the report pipeline. No scraper, no scheduler.', DIM),
+        _line(),
     ]
 
     stale = st.get('days_stale')
     if st.get('error'):
         out.append(_line(f"  {st['error']}", ERR))
     elif stale is None:
-        out.append(_line('  Freshness      : UNKNOWN — no row has a parseable date', ERR))
+        out.append(_line('  Newest item   : UNKNOWN — nothing in the feed has a usable date',
+                         ERR))
     else:
         fresh = stale <= config.ROTOWIRE_STALE_DAYS
-        out.append(_line(f"  Newest row     : {st['newest_text']}  ({stale} days old)",
+        out.append(_line(f"  Newest item   : {st['newest_text']}  ({stale} days old)",
                          OK if fresh else ERR))
 
-    out.append(_line(f"  Rows           : {st.get('rows', 0):,}"))
-    out.append(_line(f"  Oldest row     : {st.get('oldest_date') or '-'}", DIM))
-    out.append(_line(f"  Database       : {st.get('path')}", DIM))
-    if st.get('modified'):
-        out.append(_line(f"  File modified  : {st['modified']}", DIM))
+    out.append(_line(f"  Rows          : {st.get('rows', 0):,}  "
+                     f"({st.get('collected', 0):,} collected, {st.get('legacy', 0):,} legacy)"))
+    out.append(_line(f"  Teams covered : {cov.get('teams', 0)}  "
+                     f"({cov.get('fresh', 0)} fresh, {cov.get('stale', 0)} stale, "
+                     f"{cov.get('failed', 0)} failed)"))
+    out.append(_line(f"  Cache TTL     : {report.get('ttl_hours')} hours", DIM))
+    out.append(_line(f"  Database      : {st.get('path')}", DIM))
     if st.get('unparseable'):
-        out.append(_line(f"  Undated rows   : {st['unparseable']:,}", WARN))
-    if st.get('mismatched_format'):
-        out.append(_line(f"  Rows the report query cannot match: "
-                         f"{st['mismatched_format']:,}", ERR))
+        out.append(_line(f"  Undated rows  : {st['unparseable']:,}", WARN))
+    if st.get('legacy_unmatched'):
+        out.append(_line(f"  Legacy rows reports cannot see: {st['legacy_unmatched']:,}", WARN))
 
-    key = report.get('bright_key')
-    out.append(_line(f"  Bright Data key: "
+    key = report.get('openrouter_key')
+    out.append(_line(f"  OpenRouter key: "
                      f"{'present' if key else ('MISSING from API_KEYS' if key is False else 'unknown')}",
                      OK if key else ERR))
 
-    if report.get('schedule'):
-        out.append(_line())
-        out.append(_line('  SCHEDULE', HEADER))
-        for job in report['schedule']:
-            out.append(_line(f"    {job['hour']:02d}:00 {job['timezone']:<20} "
-                             f"next {job['next_run'] or '-'}"))
-
     out.append(_line())
-    out.append(_line('  RECENT SCRAPE RUNS', HEADER))
-    runs = report.get('runs') or []
-    if not runs:
-        out.append(_line('    No runs recorded yet.', DIM))
+    out.append(_line('  TEAM COVERAGE', HEADER))
+    rows = cov.get('rows') or []
+    if not rows:
+        out.append(_line('    No team collected yet. Generate a report, or run '
+                         "'admin_tui.py injuries --team \"Georgia\"'.", DIM))
     else:
-        out.append(_line(f"    {'STARTED':<20} {'STAGE':<10} {'NEW':>5} {'DUP':>5} "
-                         f"{'SECS':>6}  RESULT", DIM))
-        for r in runs:
-            style = OK if r['ok'] else ERR
-            out.append(_line(f"    {str(r['started_at'])[:19]:<20} {(r['stage'] or '-')[:9]:<10} "
-                             f"{r['inserted'] or 0:>5} {r['duplicates'] or 0:>5} "
-                             f"{r['seconds'] or 0:>6}  "
-                             f"{'ok' if r['ok'] else (r['error'] or 'failed')[:40]}", style))
+        out.append(_line(f"    {'TEAM':<30} {'AGE':>8} {'ITEMS':>6} {'NEW':>5}  STATE", DIM))
+        for r in rows:
+            age = r.get('age_hours')
+            age_text = '-' if age is None else f'{age:.1f}h'
+            if not r['ok']:
+                state, style = (r.get('error') or 'failed')[:34], ERR
+            elif age is not None and age < (report.get('ttl_hours') or 6):
+                state, style = 'fresh', OK
+            else:
+                state, style = 'stale — refreshes on next report', DIM
+            out.append(_line(f"    {(r['team_name'] or r['team_key'])[:29]:<30} "
+                             f"{age_text:>8} {r.get('items') or 0:>6} "
+                             f"{r.get('inserted') or 0:>5}  {state}", style))
 
     if st.get('recent'):
         out.append(_line())
         out.append(_line('  MOST RECENT DATES IN THE FEED', HEADER))
         for row in st['recent'][:10]:
-            flag = '' if row['matches_report_query'] else '   <- report query cannot match this'
-            out.append(_line(f"    {row['date_text']:<24} {row['rows']:>5} rows{flag}",
-                             NORMAL if row['matches_report_query'] else ERR))
+            tag = '' if row['readable'] else '   <- reports cannot see this row'
+            out.append(_line(f"    {row['date_text']:<24} {row['rows']:>5} rows"
+                             f"{'  collected' if row['collected'] else '  legacy':<12}{tag}",
+                             NORMAL if row['readable'] else ERR))
 
     out.append(_line())
     out.append(_line('  VERDICT', HEADER))
@@ -502,30 +507,30 @@ def render_rotowire(report: dict) -> list[tuple]:
     return out
 
 
-def render_scrape_result(result: dict) -> list[tuple]:
-    ok = result.get('ok')
+def render_collect_result(results: list[dict]) -> list[tuple]:
+    ok = [r for r in results if r.get('ok') and not r.get('skipped')]
+    skipped = [r for r in results if r.get('skipped')]
+    failed = [r for r in results if not r.get('ok')]
+    items = sum(r.get('items') or 0 for r in results)
+    new = sum(r.get('inserted') or 0 for r in results)
+
     out = [
-        _line('ROTOWIRE SCRAPE RUN', TITLE),
+        _line('INJURY COLLECTION', TITLE),
         rule(),
-        _line(f"  Result   : {'SUCCESS' if ok else 'FAILED'}", OK if ok else ERR),
-        _line(f"  Stage    : {result.get('stage')}"),
-        _line(f"  Collector: {result.get('collector')}", DIM),
-        _line(f"  Seconds  : {result.get('seconds')}", DIM),
+        _line(f"  Collected : {len(ok)} team(s)", OK if ok else DIM),
+        _line(f"  Skipped   : {len(skipped)} still within the cache TTL", DIM),
+        _line(f"  Failed    : {len(failed)}", ERR if failed else DIM),
+        _line(f"  Items     : {items} found, {new} new to the feed"),
     ]
-    if result.get('http_status'):
-        out.append(_line(f"  HTTP     : {result['http_status']}"))
-    if ok:
-        out.append(_line(f"  Fetched  : {result.get('fetched')}"))
-        out.append(_line(f"  Inserted : {result.get('inserted')}", OK))
-        out.append(_line(f"  Duplicate: {result.get('duplicates')}", DIM))
-    if result.get('error'):
+    if len(results) == 1 and results[0].get('notes'):
         out.append(_line())
-        out.append(_line(f"  {result['error']}", ERR))
-    if result.get('detail'):
+        out.append(_line('  COVERAGE NOTE', HEADER))
+        out.append(_line(f"    {results[0]['notes'][:150]}", DIM))
+    if failed:
         out.append(_line())
-        out.append(_line('  WHAT THE VENDOR ACTUALLY RETURNED', HEADER))
-        for chunk in str(result['detail']).splitlines()[:20]:
-            out.append(_line(f"    {chunk[:150]}", DIM))
+        out.append(_line('  FAILURES', HEADER))
+        for r in failed[:15]:
+            out.append(_line(f"    {r['team'][:34]:<36} {str(r.get('error'))[:80]}", ERR))
     return out
 
 

@@ -15,6 +15,7 @@ import cfbd
 import charts as charts_mod
 import config
 import db
+import injuries
 import predict
 import render
 import report as report_mod
@@ -158,13 +159,18 @@ def generate(
     away_adv = (advanced.get("teamB") or [{}])[0] if advanced.get("teamB") else {}
     percentiles = cfbd.build_percentiles(cfbd_data["league"]["advanced"], home_adv, away_adv)
 
+    # The injury research calls above already found this team's injuries, so persisting
+    # them into the feed costs nothing — the feed fills in as reports are generated.
+    for scope, short, full in (("home", home_short, home_full),
+                               ("away", away_short, away_full)):
+        bucket = research_raw.get(f"{scope}_injuries") or {}
+        injuries.record_findings(short, full, bucket.get("findings") or [])
+
     try:
-        rotowire = {
-            "home": db.fetch_rotowire_for_team(home_short, home_full),
-            "away": db.fetch_rotowire_for_team(away_short, away_full),
-        }
+        rotowire = injuries.ensure_fresh_pair(home_short, home_full,
+                                              away_short, away_full, settings)
     except Exception as e:
-        logging.warning(f"Rotowire lookup failed: {e}")
+        logging.warning(f"Injury feed lookup failed: {e}")
         rotowire = {"home": [], "away": []}
 
     registry = research.seed_registry()

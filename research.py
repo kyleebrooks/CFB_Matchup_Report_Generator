@@ -319,7 +319,8 @@ def seed_registry() -> SourceRegistry:
     """Statistics and the injury feed are always cited, so they always get [1] and [2]."""
     registry = SourceRegistry()
     registry.add("https://collegefootballdata.com", "College Football Data API", "CollegeFootballData")
-    registry.add("https://www.rotowire.com/cfb/news.php", "Rotowire College Football News", "Rotowire")
+    registry.add("https://www.rotowire.com/cfootball/news.php",
+                 "College football injury feed", "Injury feed")
     return registry
 
 
@@ -478,11 +479,16 @@ def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, 
         }
 
     def _roto(items: list[dict]) -> dict:
+        # Each stored item carries the publisher and URL it was actually collected from,
+        # so cite that rather than attributing everything to one aggregator.
         for it in items:
-            idx = registry.add(it.get("source_url", ""), "Rotowire College Football News", "Rotowire")
+            idx = registry.add(it.get("source_url", ""),
+                               it.get("headline") or "College football injury feed",
+                               it.get("source_name") or "Injury feed")
             it["citation"] = f"[{idx}]" if idx else "[2]"
         return {
-            "source": "Rotowire injury/news feed (scraped twice daily, local database)",
+            "source": ("Stored injury feed — items collected for this team over the last "
+                       f"{config.ROTOWIRE_WINDOW_DAYS} days and kept in the local database"),
             "window_days": config.ROTOWIRE_WINDOW_DAYS,
             "no_data": not items,
             "items": items,

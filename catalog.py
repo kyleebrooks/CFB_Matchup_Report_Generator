@@ -15,7 +15,7 @@ import team_report
 
 # How each section gets its content.
 LIVE_WEB = 'live web research (one dedicated search call)'
-LIVE_WEB_PLUS_FEED = 'live web research + the Rotowire feed (two labelled buckets)'
+LIVE_WEB_PLUS_FEED = 'live web search + the stored injury feed (two labelled buckets)'
 CFBD = 'CollegeFootballData statistics only — no LLM research'
 SYNTHESIS = 'synthesised by the report model from everything else; no search of its own'
 COMPUTED = 'computed in Python, then handed to the report model as an anchor'
@@ -93,7 +93,7 @@ def describe(report_type: str) -> dict:
         data_sources = [
             'CollegeFootballData — ratings, advanced stats, PPA, talent, returning '
             'production, schedule, betting lines (25 requests)',
-            'Rotowire injury feed — local SQLite, filtered to the two teams',
+            'Injury feed — local SQLite, collected on demand, filtered to the two teams',
             f'Live web research — {research_count} parallel calls, one per news section',
             'Computed baseline — SP+/FPI/Elo blended with the market line',
         ]
@@ -104,7 +104,7 @@ def describe(report_type: str) -> dict:
         data_sources = [
             'CollegeFootballData — ratings, advanced stats, PPA, talent, full schedule, '
             'records (15 requests)',
-            'Rotowire injury feed — local SQLite, filtered to this team',
+            'Injury feed — local SQLite, collected on demand, filtered to this team',
             f'Live web research — {research_count} parallel calls, one per news section',
         ]
     else:
