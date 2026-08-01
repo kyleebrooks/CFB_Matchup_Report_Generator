@@ -75,6 +75,42 @@ SPEC: dict[str, dict] = {
         },
         'indexes': {},
     },
+    'report_usage': {
+        'owner': 'service',
+        'purpose': 'One row per API report request — per-account call tracking',
+        'create': """
+            CREATE TABLE IF NOT EXISTS report_usage (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                account_id   INT          NOT NULL,
+                report_type  VARCHAR(40)  DEFAULT NULL,
+                subject      VARCHAR(190) DEFAULT NULL,
+                job_id       VARCHAR(32)  DEFAULT NULL,
+                state        VARCHAR(16)  DEFAULT NULL,
+                seconds      INT          DEFAULT NULL,
+                sources      INT          DEFAULT NULL,
+                error        VARCHAR(255) DEFAULT NULL,
+                created_at   DATETIME     NOT NULL,
+                completed_at DATETIME     DEFAULT NULL,
+                KEY idx_usage_account (account_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'id':           'INT AUTO_INCREMENT PRIMARY KEY',
+            'account_id':   'INT NOT NULL',
+            'report_type':  'VARCHAR(40) DEFAULT NULL',
+            'subject':      'VARCHAR(190) DEFAULT NULL',
+            'job_id':       'VARCHAR(32) DEFAULT NULL',
+            'state':        'VARCHAR(16) DEFAULT NULL',
+            'seconds':      'INT DEFAULT NULL',
+            'sources':      'INT DEFAULT NULL',
+            'error':        'VARCHAR(255) DEFAULT NULL',
+            'created_at':   'DATETIME NOT NULL',
+            'completed_at': 'DATETIME DEFAULT NULL',
+        },
+        'indexes': {
+            'idx_usage_account': 'ADD KEY idx_usage_account (account_id, created_at)',
+        },
+    },
     'API_KEYS': {
         'owner': 'pre-existing',
         'purpose': 'Shared provider key store (predates this service — audited, never altered)',

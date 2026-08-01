@@ -85,6 +85,10 @@ point at a URL that was hallucinated or dropped.
 | `admin_console.py` | Console screens as pure render functions — testable headlessly |
 | `schema.py` | Declarative DB schema: audit, report gaps, repair additively |
 | `envfile.py` | Loads the service environment when running outside systemd |
+| `usage.py` | Per-account API call tracking |
+| `dbbrowse.py` | Read-only browser for both databases |
+| `catalog.py` | What each report contains and how each section is produced |
+| `examples.py` | Copy-pasteable API examples, generated per account |
 | `settings_store.py` | Service-wide setting overrides, live from the database |
 | `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
 | `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
@@ -118,10 +122,35 @@ ssh deploy@your-droplet
 cd /opt/afplna && ./venv/bin/python admin_tui.py
 ```
 
-Five screens: **Dashboard** (service, database, accounts, effective settings, paths),
-**Accounts** (create, rotate keys, entitlements, per-account settings, activate,
-watermark), **Settings** (service-wide overrides, live), **Database** (schema audit and
-additive repair), **Health** (runs the same checks as `GET /health`, in-process).
+Eight screens:
+
+| # | Screen | What it does |
+|---|---|---|
+| 1 | Dashboard | Service, database, accounts, effective settings, paths |
+| 2 | Accounts | Create, delete, rotate keys, entitlements, per-account settings, activate, watermark, call counts |
+| 3 | Settings | Service-wide overrides, live |
+| 4 | Database | Schema audit and additive repair |
+| 5 | Health | Same checks as `GET /health`, in-process |
+| 6 | Browser | Read-only walk through both databases |
+| 7 | Reports | Every report's sections and how each one is produced |
+| 8 | Examples | Copy-pasteable API calls, generated per account |
+
+**Usage tracking** — one row per API report request in `report_usage`, written when the
+job is queued and closed out when it finishes. The account list shows lifetime and
+30-day call counts; account detail adds completions, failures and recent request
+history. Accounts also see their own numbers at `GET /v1/account/usage`. Every usage
+write is best-effort — accounting never fails a customer's report.
+
+**Browser** — walks the MySQL tables and the Rotowire SQLite side by side. Strictly
+read-only: table names are validated against the live catalog before use, and key,
+hash and password columns render as `<redacted>`.
+
+**Report catalog** — assembled from the live definitions, so it cannot drift from what
+the service actually does. Each section is labelled with its source: live web research,
+research plus the Rotowire feed, CFBD statistics, or synthesis.
+
+**Examples** — built from the account's real entitlements, so an unentitled report type
+never appears. Keys are never embedded; examples reference `$KEY`.
 
 ### Running it from a shell
 
