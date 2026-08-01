@@ -153,25 +153,31 @@ def render_accounts(state: dict) -> list[tuple]:
         out.append(_line('  No accounts yet. Press [n] to create one.', DIM))
         return out
 
-    out.append(_line(f"  {'ID':<4} {'NAME':<26} {'KEY':<14} {'ST':<4} {'REPORTS':<18} WM",
-                     HEADER))
+    usage_rows = state.get('usage') or {}
+    out.append(_line(f"  {'ID':<4} {'NAME':<24} {'KEY':<13} {'ST':<4} {'REPORTS':<16} "
+                     f"{'WM':<3} {'CALLS':>6} {'30D':>5}", HEADER))
     for i, a in enumerate(accounts_list):
         flag = 'ON ' if a['active'] else 'off'
         if a['is_admin']:
             flag += '*'
         reports = ','.join(a['allowed_reports'] or []) or '-'
         wm = 'yes' if a.get('watermark_file') else '-'
-        text = (f"  {a['id']:<4} {a['account_name'][:25]:<26} {a['api_key_prefix'][:13]:<14} "
-                f"{flag:<4} {reports[:17]:<18} {wm}")
+        stats = usage_rows.get(a['id']) or {}
+        text = (f"  {a['id']:<4} {a['account_name'][:23]:<24} {a['api_key_prefix'][:12]:<13} "
+                f"{flag:<4} {reports[:15]:<16} {wm:<3} "
+                f"{stats.get('total', 0):>6} {stats.get('last_30d', 0):>5}")
         out.append(_line(text, SEL if i == selected else
                          (NORMAL if a['active'] else DIM)))
 
     out.append(_line())
-    out.append(_line('  * = admin account', DIM))
+    out.append(_line('  * = admin account   CALLS = report requests all time   30D = last 30 days',
+                     DIM))
     return out
 
 
-def render_account_detail(account: dict, settings_rows: list[dict]) -> list[tuple]:
+def render_account_detail(account: dict, settings_rows: list[dict],
+                          usage_summary: dict | None = None,
+                          history: list[dict] | None = None) -> list[tuple]:
     out = [
         _line(f"ACCOUNT {account['id']} — {account['account_name']}", TITLE),
         rule(),
@@ -195,6 +201,185 @@ def render_account_detail(account: dict, settings_rows: list[dict]) -> list[tupl
             out.append(_line(f"  * {key:<22} {str(overrides[key]):<30} (account override)", WARN))
         else:
             out.append(_line(f"    {key:<22} {str(row['value']):<30} (from {row['source']})", DIM))
+
+    stats = usage_summary or {}
+    out.append(_line())
+    out.append(_line('  API USAGE', HEADER))
+    last = stats.get('last_used')
+    out.append(_line(f"    Total requests   : {stats.get('total', 0)}"))
+    out.append(_line(f"    Completed        : {stats.get('done', 0)}", OK))
+    out.append(_line(f"    Failed           : {stats.get('error', 0)}",
+                     ERR if stats.get('error') else DIM))
+    out.append(_line(f"    In progress      : {stats.get('running', 0)}", DIM))
+    out.append(_line(f"    Last 30 days     : {stats.get('last_30d', 0)}"))
+    out.append(_line(f"    Last used        : "
+                     f"{last.strftime('%Y-%m-%d %H:%M UTC') if hasattr(last, 'strftime') else (last or 'never')}"))
+    for rtype, count in sorted((stats.get('by_type') or {}).items()):
+        out.append(_line(f"    {rtype:<16} : {count}", DIM))
+
+    if history:
+        out.append(_line())
+        out.append(_line('  RECENT REQUESTS', HEADER))
+        out.append(_line(f"    {'WHEN':<18} {'TYPE':<9} {'SUBJECT':<26} {'STATE':<8} SECS", DIM))
+        for h in history[:12]:
+            when = h['created_at']
+            when = when.strftime('%Y-%m-%d %H:%M') if hasattr(when, 'strftime') else str(when)[:16]
+            style = OK if h['state'] == 'done' else (ERR if h['state'] == 'error' else DIM)
+            out.append(_line(f"    {when:<18} {(h['report_type'] or '-')[:8]:<9} "
+                             f"{(h['subject'] or '-')[:25]:<26} {(h['state'] or '-')[:7]:<8} "
+                             f"{h['seconds'] or '-'}", style))
+            if h['state'] == 'error' and h.get('error'):
+                out.append(_line(f"      {str(h['error'])[:70]}", ERR))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Database browser
+# ---------------------------------------------------------------------------
+def render_browser(state: dict) -> list[tuple]:
+    listing = state.get('browse_tables') or {}
+    page = state.get('browse_page')
+    selected = state.get('selected', 0)
+
+    out = [
+        _line(f"DATABASE BROWSER — {listing.get('label', '?')}", TITLE),
+        rule(),
+    ]
+    if listing.get('error'):
+        out.append(_line(f"  {listing['error']}", ERR))
+        return out
+
+    if page:
+        return out + _render_browse_page(page)
+
+    out.append(_line('  [b] switch database   ENTER open table   read-only', DIM))
+    out.append(_line())
+    out.append(_line(f"  {'TABLE':<34} {'ROWS':>10}  COLS", HEADER))
+    for i, t in enumerate(listing.get('tables') or []):
+        rows = '?' if t['rows'] is None else f"{t['rows']:,}"
+        out.append(_line(f"  {t['name'][:33]:<34} {rows:>10}  {t['columns']}",
+                         SEL if i == selected else NORMAL))
+    if not listing.get('tables'):
+        out.append(_line('  (no tables)', DIM))
+    return out
+
+
+def _render_browse_page(page: dict) -> list[tuple]:
+    out = []
+    if page.get('error'):
+        return [_line(f"  {page['error']}", ERR)]
+
+    total = page.get('total') or 0
+    start = page['offset'] + 1 if total else 0
+    end = min(page['offset'] + page['limit'], total)
+    out.append(_line(f"  Table: {page['table']}    rows {start}-{end} of {total:,}", HEADER))
+    out.append(_line('  [n] next page   [p] previous   ESC back to the table list', DIM))
+    out.append(_line())
+
+    columns = page.get('columns') or []
+    # Wide tables are unreadable side by side, so switch to one record per block.
+    if len(columns) > 6:
+        for idx, row in enumerate(page.get('rows') or []):
+            out.append(_line(f"  --- row {page['offset'] + idx + 1} ---", HEADER))
+            for col, value in zip(columns, row):
+                text = '' if value is None else str(value).replace('\n', ' ')
+                out.append(_line(f"    {col[:22]:<24} {text[:96]}"))
+            out.append(_line())
+    else:
+        widths = [max(10, min(28, len(c) + 2)) for c in columns]
+        head = '  ' + ''.join(c[:w - 1].ljust(w) for c, w in zip(columns, widths))
+        out.append(_line(head, HEADER))
+        for row in page.get('rows') or []:
+            cells = []
+            for value, w in zip(row, widths):
+                text = '' if value is None else str(value).replace('\n', ' ')
+                cells.append(text[:w - 1].ljust(w))
+            out.append(_line('  ' + ''.join(cells)))
+    if not page.get('rows'):
+        out.append(_line('  (no rows on this page)', DIM))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Report catalog
+# ---------------------------------------------------------------------------
+def render_catalog(state: dict) -> list[tuple]:
+    reports = state.get('catalog') or []
+    selected = state.get('selected', 0)
+
+    out = [
+        _line('REPORT CATALOG', TITLE),
+        rule(),
+        _line('  up/down select   ENTER show every section and how it is produced', DIM),
+        _line(),
+    ]
+    for i, r in enumerate(reports):
+        out.append(_line(f"  {r['report_type']:<12} {r['title'][:44]:<46} "
+                         f"{len(r['sections'])} sections, {len(r['charts'])} charts",
+                         SEL if i == selected else NORMAL))
+    out.append(_line())
+    import catalog as catalog_mod
+    for note in catalog_mod.PIPELINE_NOTES:
+        out.append(_line(f"  {note}", DIM))
+    return out
+
+
+def render_catalog_detail(report: dict) -> list[tuple]:
+    out = [
+        _line(f"{report['title'].upper()}  ({report['report_type']})", TITLE),
+        rule(),
+        _line(f"  {report['description']}", DIM),
+        _line(),
+        _line(f"  Required params : {', '.join(report['required_params'])}"),
+        _line(f"  Optional params : {', '.join(report['optional_params']) or '-'}"),
+        _line(f"  Research calls  : {report['research_calls']} "
+              f"(parallel, one per news section)"),
+        _line(f"  Research model  : {report['research_model']}"),
+        _line(f"  Report model    : {report['report_model']}"),
+        _line(f"  Search engine   : {report['search_engine']} "
+              f"({report['search_max_results']} results per call)"),
+        _line(),
+        _line('  DATA SOURCES', HEADER),
+    ]
+    for src in report['data_sources']:
+        out.append(_line(f"    - {src}"))
+
+    out.append(_line())
+    out.append(_line(f"  SECTIONS, IN ORDER ({len(report['sections'])})", HEADER))
+    for i, sec in enumerate(report['sections'], start=1):
+        out.append(_line(f"    {i:>2}. {sec['title']}", NORMAL))
+        window = f" (last {sec['window_days']} days)" if sec.get('window_days') else ''
+        out.append(_line(f"        source: {sec['source']}{window}", DIM))
+
+    out.append(_line())
+    out.append(_line(f"  CHARTS ({len(report['charts'])})", HEADER))
+    for c in report['charts']:
+        out.append(_line(f"    - {c['title']}"))
+        out.append(_line(f"        {c['caption'][:88]}", DIM))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# API examples
+# ---------------------------------------------------------------------------
+def render_examples(state: dict) -> list[tuple]:
+    blocks = state.get('examples') or []
+    target = state.get('examples_for') or 'all accounts'
+
+    out = [
+        _line(f"API EXAMPLES — {target}", TITLE),
+        rule(),
+        _line('  [a] pick an account   [d] administrator calls   [w] write to a file', DIM),
+        _line('  Copy any block straight into a terminal. Keys are never included.', DIM),
+        _line(),
+    ]
+    for block in blocks:
+        out.append(_line(f"  {block['title']}", HEADER))
+        if block.get('note'):
+            out.append(_line(f"    {block['note'][:92]}", DIM))
+        for line in block['lines']:
+            out.append(_line(f"    {line}"))
+        out.append(_line())
     return out
 
 
@@ -342,7 +527,7 @@ HELP = [
     rule(),
     _line(),
     _line('  GLOBAL KEYS', HEADER),
-    _line('    1..5     switch screen        q      quit'),
+    _line('    1..8     switch screen        q      quit'),
     _line('    r        refresh this screen  ?      this help'),
     _line('    ESC      back / close'),
     _line(),
@@ -351,7 +536,8 @@ HELP = [
     _line('    n        new account          k      rotate API key'),
     _line('    e        edit report types    s      edit a setting'),
     _line('    t        toggle active        m      toggle admin'),
-    _line('    w        clear watermark'),
+    _line('    w        clear watermark      D      DELETE account (permanent)'),
+    _line('    Account detail shows call counts and recent request history.'),
     _line(),
     _line('  SETTINGS SCREEN', HEADER),
     _line('    up/down  select               ENTER  change value'),
@@ -360,9 +546,24 @@ HELP = [
     _line('  DATABASE SCREEN', HEADER),
     _line('    a        apply proposed repairs (additive: CREATE TABLE / ADD COLUMN)'),
     _line(),
+    _line('  BROWSER SCREEN (6)', HEADER),
+    _line('    b        switch MySQL <-> Rotowire SQLite'),
+    _line('    ENTER    open table    n/p  next/previous page    ESC  back'),
+    _line('    Read-only. Key and password columns are redacted.'),
+    _line(),
+    _line('  REPORTS SCREEN (7)', HEADER),
+    _line('    ENTER    every section of that report and how each one is produced'),
+    _line(),
+    _line('  EXAMPLES SCREEN (8)', HEADER),
+    _line('    a        build examples for one account   d  administrator calls'),
+    _line('    w        write the examples to a file'),
+    _line(),
     _line('  NOTES', HEADER),
     _line('    API keys are stored as hashes. A new key is shown ONCE, at creation'),
     _line('    or rotation, and cannot be recovered afterwards — only rotated again.'),
+    _line(),
+    _line('    In any input, a suggested value is replaced by the first key you type;'),
+    _line('    ^U clears the line, ESC cancels.'),
     _line(),
     _line('    Service-wide and per-account settings take effect immediately.'),
     _line('    Environment-only settings need an /etc/afplna.env edit and a restart.'),

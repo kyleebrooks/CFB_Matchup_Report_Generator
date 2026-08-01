@@ -138,6 +138,20 @@ Jobs your account has run during the current service lifetime (in-memory; cleare
 
 `settings` = your overrides. `effective_settings` = service defaults with your overrides applied — this is what actually runs.
 
+### `GET /v1/account/usage`
+Call counts and recent history for this key.
+
+```json
+{"account_id":1,"total_requests":42,"completed":39,"failed":2,"in_progress":1,
+ "last_30_days":18,"last_used":"2026-08-01T14:22:09",
+ "by_report_type":{"team":30,"matchup":12},
+ "recent":[{"report_type":"team","subject":"Georgia","state":"done",
+            "seconds":214,"sources":23,"created_at":"2026-08-01T14:18:35"}]}
+```
+
+`state` is `queued`, `done`, `error`, or `duplicate` — the last meaning a build for that
+subject was already running, so the request was counted but no second build started.
+
 ### `PATCH /v1/account/settings`
 Only the keys you send change. Send a key as `null` to drop the override and fall back to the default.
 

@@ -94,7 +94,11 @@ class JobManager:
             self._sweep()
             existing = self._jobs.get(key) if key else None
             if existing and existing["state"] in ("queued", "running"):
-                return dict(existing)
+                snapshot = dict(existing)
+                # The caller needs to know no new build started, so it can account for
+                # the request without double-counting the work.
+                snapshot["deduplicated"] = True
+                return snapshot
 
             job = {
                 "job_id": uuid.uuid4().hex[:12],

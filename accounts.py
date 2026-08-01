@@ -280,6 +280,41 @@ def merge_settings(account_id: int, patch: dict) -> dict:
     return update(account_id, settings=merged)
 
 
+def delete(account_id: int, purge_usage: bool = False) -> dict:
+    """Permanently remove an account.
+
+    The REST API only deactivates, which preserves history; the admin console can
+    delete outright. Usage rows are kept by default so billing history survives an
+    account being removed — pass purge_usage=True to drop them too.
+    """
+    account = get(account_id)
+    if not account:
+        raise AccountError("Account not found", 404)
+
+    if account.get('watermark_file'):
+        path = os.path.join(config.WATERMARKS_DIR, account['watermark_file'])
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError as e:
+                logging.warning(f"Could not delete watermark {path}: {e}")
+
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if purge_usage:
+                try:
+                    cur.execute("DELETE FROM report_usage WHERE account_id=%s", (account_id,))
+                except Exception as e:
+                    logging.warning(f"Could not purge usage rows: {e}")
+            cur.execute(f"DELETE FROM {TABLE} WHERE id=%s", (account_id,))
+    finally:
+        conn.close()
+
+    logging.info(f"Deleted API account {account_id} ({account['account_name']})")
+    return account
+
+
 def rotate_key(account_id: int) -> tuple[dict, str]:
     """Issue a new key for an account, invalidating the old one immediately."""
     ensure_schema()

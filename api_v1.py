@@ -16,6 +16,7 @@ import accounts
 import config
 import jobs
 import report_types
+import usage
 
 bp = Blueprint('api_v1', __name__, url_prefix='/v1')
 
@@ -138,17 +139,41 @@ def create_report():
     params['settings'] = accounts.effective_settings(account)
     params['watermark'] = accounts.watermark_path(account)
 
+    subject = spec['subject'](params)
+
+    # Record the request BEFORE submitting: submit() starts the worker immediately, so
+    # anything assigned afterwards can be read by the running job before it exists.
+    usage_row = usage.record_request(account['id'], report_type, subject, '')
+
+    # Wrap the builder so every request is accounted for, start and finish, without the
+    # report pipelines needing to know anything about billing.
+    def tracked(job_params, progress, _spec=spec, _row=usage_row):
+        try:
+            result = _spec['run'](job_params, progress)
+        except Exception as e:
+            usage.mark_complete(_row, 'error', error=f"{e.__class__.__name__}: {e}")
+            raise
+        usage.mark_complete(_row, 'done', seconds=result.get('seconds'),
+                            sources=result.get('sources'))
+        return result
+
     job = jobs.manager.submit(
         params,
-        runner=spec['run'],
+        runner=tracked,
         # Namespaced by account so two customers requesting the same team do not collide.
         key=f"acct{account['id']}:{spec['dedup_key'](params)}",
         meta={
             'account_id': account['id'],
             'report_type': report_type,
-            'subject': spec['subject'](params),
+            'subject': subject,
         },
     )
+    usage.attach_job(usage_row, job['job_id'])
+    if job.get('deduplicated'):
+        # A build for this subject was already running, so `tracked` never runs and
+        # would never close this row out. Still counts as a call, just not as work.
+        usage.mark_complete(usage_row, 'duplicate')
+
     view = jobs.public_view(job)
     view['message'] = 'Report generation started. Poll /v1/reports/{job_id} for progress.'
     return jsonify(view), 202
@@ -219,6 +244,33 @@ def list_reports():
 @require_account
 def get_account():
     return jsonify(accounts.public_view(request.account)), 200
+
+
+@bp.route('/account/usage', methods=['GET'])
+@require_account
+def account_usage():
+    """This account's API call counts and recent request history."""
+    account_id = request.account['id']
+    summary = usage.summary_by_account().get(account_id) or {
+        'total': 0, 'done': 0, 'error': 0, 'running': 0,
+        'last_30d': 0, 'last_used': None, 'by_type': {},
+    }
+    last_used = summary.get('last_used')
+    return jsonify({
+        'account_id': account_id,
+        'total_requests': summary['total'],
+        'completed': summary['done'],
+        'failed': summary['error'],
+        'in_progress': summary['running'],
+        'last_30_days': summary['last_30d'],
+        'last_used': last_used.isoformat() if hasattr(last_used, 'isoformat') else last_used,
+        'by_report_type': summary['by_type'],
+        'recent': [
+            {**r, 'created_at': (r['created_at'].isoformat()
+                                 if hasattr(r['created_at'], 'isoformat') else r['created_at'])}
+            for r in usage.recent(account_id, limit=25)
+        ],
+    }), 200
 
 
 @bp.route('/account/settings', methods=['PATCH', 'POST'])
