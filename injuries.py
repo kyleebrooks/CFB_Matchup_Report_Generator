@@ -490,6 +490,129 @@ def coverage(limit: int = 25) -> dict:
     return out
 
 
+def purge(scope: str = 'legacy', older_than: int | None = None,
+          dry_run: bool = True, backup: bool = True) -> dict:
+    """Delete feed rows. Defaults to a dry run, and backs the file up before writing.
+
+    scope='legacy' removes only rows written before the collector existed — the ones
+    with no news_date, which is exactly the old Bright Data scrape output. 'all' removes
+    everything. `older_than` further restricts either scope to rows older than N days.
+
+    Deleting rows without clearing the matching feed_refresh entry would leave a team
+    marked fresh with nothing behind it, so no report would re-collect it. Any team left
+    with no rows therefore loses its cache entry too.
+    """
+    import os
+    import shutil
+    import sqlite3
+
+    out = {'scope': scope, 'older_than': older_than, 'dry_run': dry_run,
+           'matched': 0, 'deleted': 0, 'total_before': 0, 'total_after': 0,
+           'teams_uncached': 0, 'backup': None, 'error': None, 'sample': []}
+
+    if scope not in ('legacy', 'all'):
+        out['error'] = "scope must be 'legacy' or 'all'"
+        return out
+
+    where, params = [], []
+    if scope == 'legacy':
+        where.append('news_date IS NULL')
+    if older_than is not None:
+        cutoff = (datetime.now() - timedelta(days=int(older_than))).date().isoformat()
+        # Legacy rows have no news_date to compare, so fall back to parsing date_text
+        # in Python for those rather than guessing in SQL.
+        where.append('(news_date IS NULL OR news_date < ?)')
+        params.append(cutoff)
+    clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+
+    conn = _connect()
+    try:
+        out['total_before'] = conn.execute(f'SELECT COUNT(*) FROM {TABLE}').fetchone()[0]
+        rows = conn.execute(
+            f'SELECT id, team_name, player_name, headline, date_text, news_date '
+            f'FROM {TABLE}{clause}', params).fetchall() or []
+
+        # Apply the age filter to legacy rows here, where date_text can be parsed.
+        doomed = []
+        for r in rows:
+            if older_than is not None and r['news_date'] is None:
+                parsed = parse_date_text(r['date_text'])
+                if parsed and parsed >= (datetime.now() - timedelta(days=int(older_than))).date():
+                    continue
+            doomed.append(r)
+
+        out['matched'] = len(doomed)
+        out['sample'] = [
+            {'team': r['team_name'], 'player': r['player_name'],
+             'headline': (r['headline'] or '')[:50], 'date': r['date_text'],
+             'collected': r['news_date'] is not None}
+            for r in doomed[:10]
+        ]
+
+        if dry_run or not doomed:
+            out['total_after'] = out['total_before']
+            return out
+
+        if backup:
+            stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            path = f"{config.ROTOWIRE_DB_PATH}.backup-{stamp}"
+            try:
+                target = sqlite3.connect(path)
+                try:
+                    conn.backup(target)      # consistent snapshot, safe with readers
+                finally:
+                    target.close()
+                out['backup'] = path
+                out['backup_bytes'] = os.path.getsize(path)
+            except Exception as e:
+                out['error'] = (f"Backup failed ({e}); nothing was deleted. "
+                                f"Pass backup=False to delete without one.")
+                out['total_after'] = out['total_before']
+                return out
+
+        ids = [r['id'] for r in doomed]
+        with conn:
+            for chunk in (ids[i:i + 500] for i in range(0, len(ids), 500)):
+                conn.execute(
+                    f"DELETE FROM {TABLE} WHERE id IN ({','.join('?' * len(chunk))})",
+                    chunk)
+            # Drop cache entries for teams that no longer have any rows.
+            stale_keys = []
+            for entry in conn.execute(
+                    f'SELECT team_key, team_name FROM {REFRESH_TABLE}').fetchall() or []:
+                remaining = conn.execute(
+                    f'SELECT 1 FROM {TABLE} WHERE team_name=? LIMIT 1',
+                    (entry['team_name'],)).fetchone()
+                if not remaining:
+                    stale_keys.append(entry['team_key'])
+            for key in stale_keys:
+                conn.execute(f'DELETE FROM {REFRESH_TABLE} WHERE team_key=?', (key,))
+            out['teams_uncached'] = len(stale_keys)
+
+        out['deleted'] = len(ids)
+        out['total_after'] = conn.execute(f'SELECT COUNT(*) FROM {TABLE}').fetchone()[0]
+    except Exception as e:
+        out['error'] = f'{e.__class__.__name__}: {e}'
+        return out
+    finally:
+        conn.close()
+
+    # VACUUM cannot run inside a transaction, so it gets its own connection.
+    try:
+        vac = db.get_rotowire_db_connection()
+        try:
+            vac.isolation_level = None
+            vac.execute('VACUUM')
+        finally:
+            vac.close()
+    except Exception as e:
+        logging.warning(f"VACUUM after purge failed (rows are gone regardless): {e}")
+
+    logging.info(f"Purged {out['deleted']} feed rows (scope={scope}); "
+                 f"backup at {out['backup']}")
+    return out
+
+
 def status(sample_days: int = 14) -> dict:
     """Freshness of the stored feed. SQLite only — safe on every dashboard paint."""
     import os
