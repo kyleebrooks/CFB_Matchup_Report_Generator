@@ -659,3 +659,182 @@ def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, aw
             "available": available,
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Single-team report visuals
+# ---------------------------------------------------------------------------
+def chart_team_results(games, team_label, color, alt_color):
+    """Scoring margin by game — the season's shape at a glance."""
+    played = [g for g in (games or [])
+              if g.get("completed") and g.get("points_for") is not None
+              and g.get("points_against") is not None]
+    if not played:
+        return None
+
+    _apply_style()
+    labels, margins = [], []
+    for g in played:
+        prefix = "vs" if g.get("home") else "@"
+        labels.append(f'{prefix} {(g.get("opponent") or "?")[:14]}')
+        margins.append(g["points_for"] - g["points_against"])
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    x = np.arange(len(labels))
+    # Wins in team color, losses muted — the win/loss split is the point of the chart.
+    colors = [color if m > 0 else alt_color for m in margins]
+    bars = ax.bar(x, margins, color=colors, width=0.62, zorder=3)
+    ax.bar_label(bars, labels=[f"{m:+d}" for m in margins], padding=3,
+                 fontsize=8, color=config.CHART_TEXT)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
+    ax.axhline(0, color=config.CHART_TEXT, linewidth=1.1)
+    ax.set_ylabel("scoring margin")
+    wins = sum(1 for m in margins if m > 0)
+    ax.set_title(f"{team_label} — Margin by Game ({wins}-{len(margins) - wins})",
+                 fontsize=13, pad=14)
+    _grid(ax)
+    fig.tight_layout()
+    return _encode(fig)
+
+
+def chart_team_radar(percentiles, team_label, color):
+    """Single-team efficiency profile against the FBS field."""
+    labels, values = [], []
+    for label, data in (percentiles or {}).items():
+        if data.get("home") is None:
+            continue
+        labels.append(label.replace("Off. ", "O: ").replace("Def. ", "D: "))
+        values.append(data["home"])
+    if len(labels) < 3:
+        return None
+
+    _apply_style()
+    angles = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]
+    series = values + values[:1]
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 1.4), subplot_kw={"polar": True})
+    ax.plot(angles, series, color=color, linewidth=2, label=team_label)
+    ax.fill(angles, series, color=color, alpha=0.20)
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylim(0, 100)
+    ax.set_yticks([20, 40, 60, 80, 100])
+    ax.set_yticklabels(["20th", "40th", "60th", "80th", "100th"], fontsize=7,
+                       color=config.CHART_MUTED)
+    ax.set_rlabel_position(180 / max(len(labels), 1))
+    ax.grid(color=config.CHART_GRID)
+    ax.spines["polar"].set_color(config.CHART_GRID)
+    fig.suptitle(f"{team_label} — Efficiency Percentile (outer ring is better)",
+                 fontsize=13, fontweight="bold", color=config.CHART_TEXT, y=0.99)
+    fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+    return _encode(fig)
+
+
+def chart_team_form(ppa_rows, team_label, color, alt_color):
+    """Per-game offensive and defensive PPA — trending up or falling apart."""
+    off_weeks, off_vals = _ppa_series(ppa_rows, "offense")
+    def_weeks, def_vals = _ppa_series(ppa_rows, "defense")
+    if not off_weeks and not def_weeks:
+        return None
+
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    if off_weeks:
+        ax.plot(off_weeks, off_vals, marker="o", markersize=5, linewidth=2,
+                color=color, label="Offense (higher is better)")
+    if def_weeks:
+        ax.plot(def_weeks, def_vals, marker="s", markersize=5, linewidth=2,
+                color=alt_color, linestyle="--", label="Defense allowed (lower is better)")
+    ax.axhline(0, color=config.CHART_MUTED, linewidth=0.8)
+    ax.set_xlabel("week")
+    ax.set_ylabel("PPA per game")
+    ax.legend(loc="best")
+    ax.set_title(f"{team_label} — Predicted Points Added by Week", fontsize=13, pad=14)
+    _grid(ax)
+    fig.tight_layout()
+    return _encode(fig)
+
+
+def chart_team_players(player_rows, team_label, color):
+    """Who is actually producing, ranked by season total PPA."""
+    players = _top_players(player_rows, limit=12)
+    if not players:
+        return None
+
+    _apply_style()
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.8))
+    names = [p[0] for p in players][::-1]
+    vals = [p[1] for p in players][::-1]
+    y = np.arange(len(names))
+    ax.barh(y, vals, color=color, height=0.66, zorder=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names, fontsize=8)
+    ax.set_xlabel("total PPA")
+    span = abs(max(vals, key=abs)) if vals else 1
+    for yi, v in zip(y, vals):
+        ax.text(v + span * 0.02, yi, f"{v:.1f}", va="center", fontsize=8,
+                color=config.CHART_TEXT)
+    ax.set_title(f"{team_label} — Top Individual Impact (season total PPA)",
+                 fontsize=13, pad=14)
+    _grid(ax, axis="x")
+    fig.tight_layout()
+    return _encode(fig)
+
+
+TEAM_CHART_SPECS = [
+    ("team_results", "Season Results",
+     "Scoring margin for every completed game. Wins are in the team's color, losses in "
+     "the contrast color, so blowouts and near-misses are separable at a glance."),
+    ("team_radar", "Efficiency Profile",
+     "Every advanced metric converted to a national percentile against all FBS teams, so "
+     "the outer ring is always better regardless of which way the raw stat runs."),
+    ("team_form", "Form Trend",
+     "Week-by-week predicted points added on both sides of the ball. This is where a team "
+     "trending up or sliding shows through, which season averages hide."),
+    ("team_players", "Top Individual Impact",
+     "The players who have actually moved the needle this season. Cross-reference against "
+     "the injury and roster sections."),
+]
+
+
+def build_team_charts(stats, percentiles, team_meta, team_label, games) -> list[dict]:
+    """Render the four single-team charts. Failures become styled placeholders."""
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt"
+        )
+
+    color = (_norm_hex(team_meta.get("color")) if _hex_ok(team_meta.get("color"))
+             else config.CHART_FALLBACK_HOME)
+    alt = (_norm_hex(team_meta.get("alt_color")) if _hex_ok(team_meta.get("alt_color"))
+           else config.CHART_FALLBACK_AWAY)
+    # A team whose two official colors are near-identical (or black on black) needs a
+    # readable contrast for the loss bars and the defensive line.
+    if _distance(color, alt) < 70:
+        alt = config.CHART_FALLBACK_AWAY if _distance(color, config.CHART_FALLBACK_AWAY) >= 70 \
+            else config.CHART_MUTED
+
+    builders = {
+        "team_results": lambda: chart_team_results(games, team_label, color, alt),
+        "team_radar": lambda: chart_team_radar(percentiles, team_label, color),
+        "team_form": lambda: chart_team_form(stats.get("Team PPA"), team_label, color, alt),
+        "team_players": lambda: chart_team_players(stats.get("Player PPA"), team_label, color),
+    }
+
+    out: list[dict] = []
+    for key, title, caption in TEAM_CHART_SPECS:
+        img, available = None, True
+        try:
+            img = builders[key]()
+        except Exception as e:
+            logging.warning(f"Team chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "No data available from CollegeFootballData for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out

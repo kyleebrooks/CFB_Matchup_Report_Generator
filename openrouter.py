@@ -33,18 +33,23 @@ def _headers(api_key: str) -> dict:
     }
 
 
-def web_search_plugin(max_results: int | None = None, search_prompt: str | None = None) -> list[dict]:
-    """Build the OpenRouter web-search plugin block.
+def web_search_plugin(
+    settings: dict | None = None,
+    search_prompt: str | None = None,
+) -> list[dict]:
+    """Build the OpenRouter web-search plugin block for a resolved settings dict.
 
-    engine="native" uses the upstream provider's own live browsing (OpenAI's web_search
-    for the Luna calls); anything else falls back to OpenRouter's Exa-backed search.
-    Either way the citations come back normalized as url_citation annotations.
+    engine="native" uses the upstream provider's own live browsing, which only exists
+    for OpenAI/Anthropic/Google/xAI models — DeepSeek has none, so it must use "exa".
+    Either engine returns citations normalized as url_citation annotations.
     """
+    settings = settings or config.default_settings()
     plugin: dict = {
         "id": "web",
-        "max_results": max_results or config.OPENROUTER_SEARCH_MAX_RESULTS,
+        "max_results": int(settings.get("search_max_results")
+                           or config.OPENROUTER_SEARCH_MAX_RESULTS),
     }
-    engine = (config.OPENROUTER_SEARCH_ENGINE or "").strip().lower()
+    engine = str(settings.get("search_engine") or "").strip().lower()
     if engine in ("native", "exa"):
         plugin["engine"] = engine
     if search_prompt:

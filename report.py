@@ -155,23 +155,30 @@ your anchor, not as gospel:
 """
 
 
-def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry) -> dict:
-    """Call the report model once and return {text, usage, model}."""
-    prompt = build_prompt(ctx, bundle, charts, registry)
+def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry,
+             settings: dict | None = None, prompt: str | None = None,
+             system_prompt: str | None = None) -> dict:
+    """Call the report model once and return {text, usage, model}.
+
+    `prompt`/`system_prompt` let other report types reuse this transport and error
+    handling with their own instructions.
+    """
+    settings = settings or config.default_settings()
+    model = settings["report_model"]
+    prompt = prompt or build_prompt(ctx, bundle, charts, registry)
     logging.info(
-        f"Report prompt built: {len(prompt)} chars, "
-        f"{len(registry)} sources, model={config.OPENROUTER_REPORT_MODEL}"
+        f"Report prompt built: {len(prompt)} chars, {len(registry)} sources, model={model}"
     )
 
     resp = openrouter.chat(
         api_key,
-        config.OPENROUTER_REPORT_MODEL,
+        model,
         [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        effort=config.REPORT_EFFORT,
-        max_tokens=config.REPORT_MAX_TOKENS,
+        effort=settings["report_effort"],
+        max_tokens=settings["report_max_tokens"],
         timeout=config.REPORT_TIMEOUT,
     )
 
@@ -184,10 +191,10 @@ def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry
         reasoning_tokens = usage.get("reasoning_tokens")
         if reason == "length" or openrouter.has_reasoning(resp):
             raise openrouter.OpenRouterError(
-                f"{config.OPENROUTER_REPORT_MODEL} used its entire token budget on reasoning "
-                f"and returned no report text (finish_reason={reason or 'unknown'}, "
-                f"reasoning_tokens={reasoning_tokens}, max_tokens={config.REPORT_MAX_TOKENS}). "
-                f"Raise REPORT_MAX_TOKENS or lower REPORT_EFFORT.",
+                f"{model} used its entire token budget on reasoning and returned no report "
+                f"text (finish_reason={reason or 'unknown'}, reasoning_tokens={reasoning_tokens}, "
+                f"max_tokens={settings['report_max_tokens']}). Raise report_max_tokens or "
+                f"lower report_effort.",
                 body=json.dumps(usage),
             )
         raise openrouter.OpenRouterError(
@@ -197,6 +204,6 @@ def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry
     return {
         "text": text,
         "usage": openrouter.extract_usage(resp),
-        "model": resp.get("model") or config.OPENROUTER_REPORT_MODEL,
+        "model": resp.get("model") or model,
         "prompt_chars": len(prompt),
     }

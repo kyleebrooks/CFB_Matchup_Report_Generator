@@ -41,16 +41,22 @@ CFBD_MAX_WORKERS = int(os.getenv('CFBD_MAX_WORKERS', '4'))
 # ---------------------------------------------------------------------------
 OPENROUTER_BASE_URL = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1')
 
-# Stage 1: eight parallel live-web research calls.
-OPENROUTER_RESEARCH_MODEL = os.getenv('OPENROUTER_RESEARCH_MODEL', 'openai/gpt-5.6-luna')
+# Stage 1: parallel live-web research calls.
+OPENROUTER_RESEARCH_MODEL = os.getenv('OPENROUTER_RESEARCH_MODEL', 'deepseek/deepseek-v4-flash')
 # Stage 2: one synthesis call that writes the finished report.
 OPENROUTER_REPORT_MODEL = os.getenv('OPENROUTER_REPORT_MODEL', 'moonshotai/kimi-k3')
 
 # Web search plugin. "native" routes OpenAI/Anthropic/Google/xAI models to the
 # provider's own live browsing; "exa" forces OpenRouter's Exa-backed search; ""
 # lets OpenRouter pick (native where supported, Exa otherwise).
-OPENROUTER_SEARCH_ENGINE = os.getenv('OPENROUTER_SEARCH_ENGINE', 'native')
-OPENROUTER_SEARCH_MAX_RESULTS = int(os.getenv('OPENROUTER_SEARCH_MAX_RESULTS', '10'))
+#
+# DeepSeek has NO native web search, so the research model must go through Exa.
+# Leaving this on "native" with a DeepSeek model would silently lose the browsing
+# the whole report depends on.
+OPENROUTER_SEARCH_ENGINE = os.getenv('OPENROUTER_SEARCH_ENGINE', 'exa')
+# Exa bills per result ($4/1000). Five results still yield 2-4k characters of extract
+# each, which is ample per topic; accounts can raise this individually.
+OPENROUTER_SEARCH_MAX_RESULTS = int(os.getenv('OPENROUTER_SEARCH_MAX_RESULTS', '5'))
 
 # Sent as HTTP-Referer / X-Title so the calls are attributable in the OpenRouter dashboard.
 OPENROUTER_REFERER = os.getenv('OPENROUTER_REFERER', 'https://afplnapicks.com')
@@ -87,6 +93,51 @@ HOME_FIELD_ADVANTAGE = float(os.getenv('HOME_FIELD_ADVANTAGE', '2.4'))
 MARGIN_STDDEV = float(os.getenv('MARGIN_STDDEV', '13.5'))
 # Elo points per point of scoring margin (standard CFB conversion).
 ELO_POINTS_PER_MARGIN = float(os.getenv('ELO_POINTS_PER_MARGIN', '25.0'))
+
+# ---------------------------------------------------------------------------
+# Multi-tenant API (CFBReports.com and other consumers)
+# ---------------------------------------------------------------------------
+# Bootstrap admin key. Whoever holds this can mint accounts, so it lives in the env
+# file (chmod 600) rather than the database.
+ADMIN_API_KEY = os.getenv('ADMIN_API_KEY')
+
+# Per-account watermark uploads.
+WATERMARKS_DIR = os.getenv('WATERMARKS_DIR', os.path.join(BASE_DIR, 'watermarks'))
+MAX_WATERMARK_BYTES = int(os.getenv('MAX_WATERMARK_BYTES', str(5 * 1024 * 1024)))
+ALLOWED_WATERMARK_TYPES = ('image/png', 'image/jpeg', 'image/webp')
+
+# Settings an account is allowed to override. Anything else in a PATCH is rejected
+# rather than silently ignored.
+ACCOUNT_SETTING_KEYS = (
+    'research_model',
+    'report_model',
+    'search_engine',
+    'search_max_results',
+    'research_effort',
+    'report_effort',
+    'research_max_tokens',
+    'report_max_tokens',
+)
+
+# Optional guard rail: comma-separated allowlist of model ids accounts may select.
+# Empty means any OpenRouter model is permitted.
+_allow = os.getenv('ALLOWED_ACCOUNT_MODELS', '').strip()
+ALLOWED_ACCOUNT_MODELS = tuple(m.strip() for m in _allow.split(',') if m.strip())
+
+
+def default_settings() -> dict:
+    """Service-wide defaults. Account overrides are layered on top of this."""
+    return {
+        'research_model': OPENROUTER_RESEARCH_MODEL,
+        'report_model': OPENROUTER_REPORT_MODEL,
+        'search_engine': OPENROUTER_SEARCH_ENGINE,
+        'search_max_results': OPENROUTER_SEARCH_MAX_RESULTS,
+        'research_effort': RESEARCH_EFFORT,
+        'report_effort': REPORT_EFFORT,
+        'research_max_tokens': RESEARCH_MAX_TOKENS,
+        'report_max_tokens': REPORT_MAX_TOKENS,
+    }
+
 
 # ---------------------------------------------------------------------------
 # House chart style — identical on every report

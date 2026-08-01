@@ -12,7 +12,7 @@ POST             │ Stage 1 — run concurrently                 │
 /generate-report │                                            │
                  │  CFBD (12 endpoints, parallel)             │  statistics only
                  │  Rotowire (local SQLite, filtered by team) │  injury feed
-                 │  8 × GPT-5.6 Luna research calls (parallel)│  live web + citations
+                 │  8 × DeepSeek V4 Flash calls (parallel)    │  live web + citations
                  └────────────────────────────────────────────┘
                                      │
                  ┌───────────────────▼────────────────────────┐
@@ -77,6 +77,42 @@ point at a URL that was hallucinated or dropped.
 | `charts.py` | The 8 procedural charts |
 | `report.py` | Final synthesis prompt and call |
 | `render.py` | HTML assembly, PDF, watermark |
+| `accounts.py` | Multi-tenant accounts, entitlements, per-account settings, watermarks |
+| `api_v1.py` | The `/v1` REST API (reports, account self-service, admin) |
+| `report_types.py` | Registry of report types — add a type here and the API picks it up |
+| `team_report.py` | Single-team season report pipeline |
+| `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
+| `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
+
+## Two APIs
+
+| API | Base | Auth | Consumers |
+|---|---|---|---|
+| Legacy | `/` | single `SERVICE_API_KEY` | afplnapicks.com scoreboard |
+| Multi-tenant | `/v1` | per-account key | CFBReports.com and other customers |
+
+The legacy endpoints are unchanged. `/v1` adds per-account entitlements (which report
+types a key may request), per-account model and search settings, per-account watermark
+uploads, and admin endpoints for minting accounts. Full reference: **[API.md](API.md)**.
+
+Report types live in `report_types.py`. Adding one means adding a registry entry and the
+module that builds it — the API surface, entitlements, job handling and PDF delivery all
+key off that table.
+
+| Type | Sections |
+|---|---|
+| `matchup` | 20 sections, 8 charts, projected final score |
+| `team` | Overall outlook, game-by-game schedule, practice, roster, injuries, media, coaches; 4 charts |
+
+## Search engine and the research model
+
+The research model defaults to **DeepSeek V4 Flash**, which has **no native web search**.
+`OPENROUTER_SEARCH_ENGINE` therefore defaults to `exa` — OpenRouter's Exa-backed engine,
+which works for any model. Setting it to `native` with a DeepSeek model would silently
+lose the browsing the whole report depends on.
+
+Exa bills per result (~$4/1,000), so `search_max_results` is the main cost lever; it
+defaults to 5 and is overridable per account.
 
 ## API keys
 
@@ -100,6 +136,25 @@ curl -sS "https://your-host/health/llm?api_key=$SERVICE_API_KEY" | jq
 ```
 
 Any legacy `openai` row in `API_KEYS` is unused and can be deleted.
+
+### The web-host proxy
+
+`scoreboard.php` and `report_proxy.php` run on the **web host** (GoDaddy), not the
+droplet. The site is HTTPS and the droplet is plain HTTP, so the browser cannot call the
+droplet directly — mixed content is blocked. `report_proxy.php` bridges that: the page
+calls it same-origin over HTTPS, and it forwards server-side over HTTP. It also keeps
+the service API key off the page and enforces the members-only session.
+
+Two failure modes look identical in the browser and are fixed in different places:
+
+- **Really logged out** — no session cookie was sent.
+- **Session not loaded** — the cookie arrived, but the proxy opened a *different*
+  session than the rest of the site. This happens when the proxy calls `session_start()`
+  cold while the site bootstraps through `common.inc` with a custom session name or
+  cookie path. The proxy now mirrors the site's bootstrap first.
+
+Its 401 body carries a `debug` block (`session_name`, `cookie_received`, `session_keys`)
+that tells the two apart, and the page logs it to the console.
 
 ### 502 Bad Gateway
 

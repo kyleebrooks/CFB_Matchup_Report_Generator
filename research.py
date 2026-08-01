@@ -326,26 +326,28 @@ def seed_registry() -> SourceRegistry:
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
-def _run_one(api_key: str, job: dict, ctx: dict) -> dict:
+def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -> dict:
     """Execute a single research call. Never raises — a failure degrades to no_data."""
-    prompt = _build_prompt(job, ctx)
+    settings = settings or config.default_settings()
+    prompt = job.get("prompt") or _build_prompt(job, ctx)
     try:
         resp = openrouter.chat(
             api_key,
-            config.OPENROUTER_RESEARCH_MODEL,
+            settings["research_model"],
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             plugins=openrouter.web_search_plugin(
+                settings,
                 search_prompt=(
                     "Live web results retrieved just now. Prefer the most recently published "
                     "items and read the full page content before citing it:"
-                )
+                ),
             ),
             response_format=RESEARCH_SCHEMA,
-            effort=config.RESEARCH_EFFORT,
-            max_tokens=config.RESEARCH_MAX_TOKENS,
+            effort=settings["research_effort"],
+            max_tokens=settings["research_max_tokens"],
             timeout=config.RESEARCH_TIMEOUT,
         )
     except Exception as e:
@@ -404,11 +406,16 @@ def _run_one(api_key: str, job: dict, ctx: dict) -> dict:
     return result
 
 
-def run_research(api_key: str, ctx: dict) -> dict:
-    """Run all eight research jobs concurrently. Returns {job_key: bucket}."""
+def run_research(api_key: str, ctx: dict, settings: dict | None = None,
+                 jobs: list[dict] | None = None) -> dict:
+    """Run every research job concurrently. Returns {job_key: bucket}.
+
+    `jobs` defaults to the matchup set; other report types pass their own list.
+    """
+    jobs = jobs if jobs is not None else RESEARCH_JOBS
     out: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=config.RESEARCH_MAX_WORKERS) as pool:
-        futures = {pool.submit(_run_one, api_key, job, ctx): job for job in RESEARCH_JOBS}
+        futures = {pool.submit(_run_one, api_key, job, ctx, settings): job for job in jobs}
         for fut in as_completed(futures):
             job = futures[fut]
             try:
@@ -437,12 +444,15 @@ def build_context(home_full, away_full, home_short, away_short, year, kickoff=No
 # ---------------------------------------------------------------------------
 # Bucket assembly — one section can have several independently-sourced inputs
 # ---------------------------------------------------------------------------
-def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, ctx: dict) -> dict:
+def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, ctx: dict,
+                      settings: dict | None = None) -> dict:
     """Merge research output and Rotowire into per-section, per-source buckets.
 
     Every finding gets a citation index from the shared registry so the report model can
     cite it as [n] and our renderer can print the matching SOURCES entry.
     """
+    research_model = (settings or config.default_settings())["research_model"]
+
     def _bucket(job_key: str) -> dict:
         raw = research.get(job_key) or {}
         items = []
@@ -458,7 +468,7 @@ def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, 
             if idx:
                 extra.append({"citation": f"[{idx}]", "title": c.get("title", ""), "url": c.get("url", "")})
         return {
-            "source": f"Live web research (GPT-5.6 Luna, {config.OPENROUTER_RESEARCH_MODEL})",
+            "source": f"Live web research ({research_model})",
             "retrieved_at_utc": raw.get("as_of_utc") or ctx["now_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),
             "no_data": raw.get("no_data", True),
             "notes": raw.get("notes", ""),

@@ -54,10 +54,18 @@ def generate(
     away_short: str,
     year: int | None = None,
     kickoff: str | None = None,
+    settings: dict | None = None,
+    watermark: str | None = None,
     progress=None,
 ) -> dict:
-    """Build one matchup report end to end. Returns a result summary dict."""
+    """Build one matchup report end to end. Returns a result summary dict.
+
+    `settings` carries the resolved per-account model/search choices; omitted for the
+    legacy AFPLNA flow, which uses the service defaults. `watermark` overrides the
+    stamped image for accounts that uploaded their own.
+    """
     progress = progress or _noop
+    settings = settings or config.default_settings()
     started = time.time()
     current = {"stage": "start", "label": "Starting up"}
 
@@ -94,7 +102,7 @@ def generate(
     step("gather")
     with ThreadPoolExecutor(max_workers=2) as pool:
         cfbd_future = pool.submit(cfbd.fetch_all, cfbd_api_key, year, home_short, away_short)
-        research_future = pool.submit(research.run_research, openrouter_api_key, ctx)
+        research_future = pool.submit(research.run_research, openrouter_api_key, ctx, settings)
 
         try:
             cfbd_data = cfbd_future.result()
@@ -159,7 +167,7 @@ def generate(
         rotowire = {"home": [], "away": []}
 
     registry = research.seed_registry()
-    sections = research.assemble_sections(research_raw, rotowire, registry, ctx)
+    sections = research.assemble_sections(research_raw, rotowire, registry, ctx, settings)
     baseline = predict.build_baseline(stats, home_profile, away_profile, market, home_short, away_short)
 
     # --- Stage 3: visuals ----------------------------------------------------
@@ -195,7 +203,7 @@ def generate(
     # --- Stage 4: synthesis --------------------------------------------------
     step("write")
     try:
-        result = report_mod.generate(openrouter_api_key, ctx, bundle, chart_set, registry)
+        result = report_mod.generate(openrouter_api_key, ctx, bundle, chart_set, registry, settings)
     except Exception as e:
         logging.exception("Report generation failed")
         # The exception message is the actionable part; the upstream body is supporting
@@ -219,7 +227,7 @@ def generate(
     )
 
     meta_lines = [
-        f"Research: {config.OPENROUTER_RESEARCH_MODEL} via OpenRouter — "
+        f"Research: {settings['research_model']} via OpenRouter — "
         f"{len(research.RESEARCH_JOBS)} live web searches, "
         f"{sections_with_data}/{len(sections)} sections with findings "
         f"({research_in} in / {research_out} out tokens).",
@@ -252,13 +260,14 @@ def generate(
         logging.error(f"PDF generation failed: {e}")
         raise PipelineError("PDF generation failed", str(e), 500)
 
-    if os.path.exists(config.WATERMARK_PATH):
+    stamp = watermark or config.WATERMARK_PATH
+    if os.path.exists(stamp):
         try:
-            render.add_pdf_watermark(tmp_path, config.WATERMARK_PATH)
+            render.add_pdf_watermark(tmp_path, stamp)
         except Exception as e:
             logging.warning(f"Watermark step failed; delivering report without watermark: {e}")
     else:
-        logging.warning(f"Watermark image not found at {config.WATERMARK_PATH}; skipping watermark.")
+        logging.warning(f"Watermark image not found at {stamp}; skipping watermark.")
 
     # Swap in the finished file, then retire any older report for this matchup.
     os.replace(tmp_path, filepath)
