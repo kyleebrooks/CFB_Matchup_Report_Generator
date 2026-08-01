@@ -123,6 +123,15 @@ def get_rotowire_db_connection():
             )
             """
         )
+        # The scrape's duplicate check compares every column, which was a full table
+        # scan per incoming row. Additive and cheap; nothing depends on it being there.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rotowire_lookup "
+            "ON rotowire (player_name, headline)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_rotowire_date ON rotowire (date_text)"
+        )
     return conn
 
 

@@ -1,12 +1,10 @@
 import glob
-import json
 import logging
 import os
 import time
 from datetime import datetime
 from urllib.parse import urlsplit
 
-import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, request, send_file, jsonify
@@ -18,6 +16,7 @@ import config
 import db
 import jobs
 import pipeline
+import rotowire
 
 # ---------------------------
 # App & CORS
@@ -117,93 +116,38 @@ def handle_any_error(e):
 # ---------------------------
 # Scheduler: Rotowire scrape via Bright Data
 # ---------------------------
-sched = BackgroundScheduler(timezone="America/New_York")
+sched = BackgroundScheduler(timezone=config.SCHEDULER_TIMEZONE)
 
 
-@sched.scheduled_job(CronTrigger(hour=9, minute=0))
-@sched.scheduled_job(CronTrigger(hour=18, minute=0))
 def scheduled_rotowire_job():
-    conn = None
-    try:
-        logging.info("Starting scheduled Rotowire scrape job...")
-        bright_key = db.get_api_key('bright')
-        if not bright_key:
-            logging.error("Bright Data API key not found. Rotowire scrape aborted.")
-            return
+    """Run the Bright Data collection and record the outcome.
 
-        # Trigger Bright Data collector for Rotowire
-        collector_id = 'c_meewnv1y2gctpr239v'  # original
-        trigger_url = f"https://api.brightdata.com/dca/trigger?queue_next=1&collector={collector_id}"
-        headers = {"Authorization": f"Bearer {bright_key}", "Content-Type": "application/json"}
-        trig = requests.post(trigger_url, json=[{}], headers=headers, timeout=30)
-        if trig.status_code != 200:
-            logging.error(f"Failed to trigger Rotowire scrape. Status: {trig.status_code}, Response: {trig.text}")
-            return
-        data = trig.json()
-        collection_id = data.get('collection_id')
-        if not collection_id:
-            logging.error("No collection_id returned from Bright Data trigger.")
-            return
+    The body used to live here and swallowed every failure into a log line. It now
+    lives in rotowire.py, returns a structured result, and writes that result to the
+    rotowire_runs table — so 'why is the feed stale' is answerable after the fact
+    instead of needing someone to have been reading the journal at the time.
+    """
+    result = rotowire.run_and_record()
+    if not result['ok']:
+        logging.error(
+            f"Rotowire scrape failed at '{result['stage']}': {result['error']} "
+            f"({result.get('detail') or 'no detail'})"
+        )
 
-        dataset_url = f"https://api.brightdata.com/dca/dataset?id={collection_id}"
-        bright_headers = {"Authorization": f"Bearer {bright_key}"}
 
-        deadline = time.time() + 720
-        rotowire_data = None
-        while time.time() < deadline:
-            resp = requests.get(dataset_url, headers=bright_headers, timeout=15)
-            if resp.status_code == 200 and resp.text.strip():
-                try:
-                    rotowire_data = resp.json()
-                except ValueError:
-                    lines = resp.text.strip().splitlines()
-                    rotowire_data = [json.loads(line) for line in lines if line.strip()]
-                if rotowire_data:
-                    break
-            time.sleep(1)
-        if not rotowire_data:
-            logging.error("Rotowire data not ready or empty.")
-            return
-
-        # Insert rows into local SQLite DB
-        conn = db.get_rotowire_db_connection()
-        inserted = 0
-        cur = conn.cursor()
-        for entry in rotowire_data:
-            player_name = (entry.get('player_name') or '').strip()
-            headline = (entry.get('headline') or '').strip()
-            team_name = (entry.get('team_name') or '').strip()
-            date_text = (entry.get('date_text') or '').strip()
-            news_text = (entry.get('news_text') or '').strip()
-            source_name = (entry.get('source_name') or '').strip()
-            position = (entry.get('position') or '').strip()
-            analysis_text = (entry.get('analysis_text') or '').strip()
-
-            cur.execute(
-                "SELECT 1 FROM rotowire WHERE player_name=? AND headline=? AND team_name=? "
-                "AND date_text=? AND news_text=? AND source_name=? AND position=? AND analysis_text=? LIMIT 1",
-                (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
-            )
-            if cur.fetchone():
-                continue
-            cur.execute(
-                "INSERT INTO rotowire (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (player_name, headline, team_name, date_text, news_text, source_name, position, analysis_text)
-            )
-            inserted += 1
-        conn.commit()
-        cur.close()
-        logging.info(f"Rotowire scrape completed. Inserted {inserted} new records.")
-    except Exception:
-        logging.exception("Error during Rotowire scheduled job")
-    finally:
-        try:
-            if conn:
-                conn.close()
-        except Exception:
-            pass
-
+# A bare CronTrigger takes the SYSTEM timezone, not the scheduler's — on the droplet
+# that is UTC, so these were firing at 05:00/14:00 ET, not the 09:00/18:00 the docs
+# claim. The timezone has to be given to the trigger itself.
+for _hour in rotowire.SCRAPE_HOURS:
+    sched.add_job(
+        scheduled_rotowire_job,
+        CronTrigger(hour=_hour, minute=0, timezone=config.SCHEDULER_TIMEZONE),
+        id=f"rotowire-{_hour:02d}",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
 
 sched.start()
 
@@ -430,11 +374,34 @@ def health():
         }
 
     # --- Local dependencies ----------------------------------------------
+    # A row count alone called this healthy while the newest row aged past a year.
+    # Freshness is the only thing that distinguishes a working feed from a dead one.
     try:
-        conn = db.get_rotowire_db_connection()
-        rows = conn.execute("SELECT COUNT(*) FROM rotowire").fetchone()[0]
-        conn.close()
-        out["checks"]["rotowire_db"] = {"ok": True, "rows": rows, "path": config.ROTOWIRE_DB_PATH}
+        st = rotowire.status()
+        stale = st["days_stale"]
+        fresh = stale is not None and stale <= config.ROTOWIRE_STALE_DAYS
+        check = {
+            "ok": not st.get("error"),
+            "fresh": fresh,
+            "rows": st["rows"],
+            "newest_row": st["newest_text"],
+            "days_stale": stale,
+            "path": st["path"],
+        }
+        if st.get("error"):
+            check["error"] = st["error"][:300]
+        elif not fresh:
+            out["ok"] = False
+            check["error"] = (
+                f"The newest Rotowire row is {stale if stale is not None else 'un-dated'} "
+                f"days old; the scrape runs twice a day. Run "
+                f"'admin_tui.py rotowire' on the droplet for the cause."
+            )
+        runs = rotowire.recent_runs(1)
+        if runs:
+            check["last_run"] = {k: runs[0][k] for k in
+                                 ("started_at", "ok", "stage", "inserted", "error")}
+        out["checks"]["rotowire_db"] = check
     except Exception as e:
         out["checks"]["rotowire_db"] = {"ok": False, "error": str(e)[:300]}
 

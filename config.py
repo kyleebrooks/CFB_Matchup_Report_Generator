@@ -83,6 +83,12 @@ ROSTER_WINDOW_DAYS = int(os.getenv('ROSTER_WINDOW_DAYS', '14'))
 PRACTICE_WINDOW_DAYS = int(os.getenv('PRACTICE_WINDOW_DAYS', '7'))
 MEDIA_WINDOW_DAYS = int(os.getenv('MEDIA_WINDOW_DAYS', '14'))
 ROTOWIRE_WINDOW_DAYS = int(os.getenv('ROTOWIRE_WINDOW_DAYS', '7'))
+# How old the newest Rotowire row may get before the feed is called stale. The scrape
+# runs twice a day, so anything past a few days means it has been failing.
+ROTOWIRE_STALE_DAYS = int(os.getenv('ROTOWIRE_STALE_DAYS', '3'))
+# Timezone for the scheduled scrape. A bare CronTrigger silently uses the *system*
+# timezone rather than the scheduler's, so this has to be passed to the trigger itself.
+SCHEDULER_TIMEZONE = os.getenv('SCHEDULER_TIMEZONE', 'America/New_York')
 
 # How many players per team survive pruning before the stats blob goes to the report model.
 TOP_PLAYERS_PER_TEAM = int(os.getenv('TOP_PLAYERS_PER_TEAM', '18'))
