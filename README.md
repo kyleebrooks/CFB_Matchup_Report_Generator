@@ -81,6 +81,10 @@ point at a URL that was hallucinated or dropped.
 | `api_v1.py` | The `/v1` REST API (reports, account self-service, admin) |
 | `report_types.py` | Registry of report types — add a type here and the API picks it up |
 | `team_report.py` | Single-team season report pipeline |
+| `admin_tui.py` | SSH admin console (curses UI + CLI subcommands) |
+| `admin_console.py` | Console screens as pure render functions — testable headlessly |
+| `schema.py` | Declarative DB schema: audit, report gaps, repair additively |
+| `settings_store.py` | Service-wide setting overrides, live from the database |
 | `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
 | `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
 
@@ -103,6 +107,55 @@ key off that table.
 |---|---|
 | `matchup` | 20 sections, 8 charts, projected final score |
 | `team` | Overall outlook, game-by-game schedule, practice, roster, injuries, media, coaches; 4 charts |
+
+## Admin console
+
+A full-screen terminal console over SSH. No extra dependencies — `curses` is stdlib.
+
+```bash
+ssh deploy@your-droplet
+cd /opt/afplna && ./venv/bin/python admin_tui.py
+```
+
+Five screens: **Dashboard** (service, database, accounts, effective settings, paths),
+**Accounts** (create, rotate keys, entitlements, per-account settings, activate,
+watermark), **Settings** (service-wide overrides, live), **Database** (schema audit and
+additive repair), **Health** (runs the same checks as `GET /health`, in-process).
+
+Everything is also available non-interactively, for cron or a terminal that cannot do
+curses:
+
+```bash
+./venv/bin/python admin_tui.py audit --apply     # audit and repair the schema
+./venv/bin/python admin_tui.py accounts          # list
+./venv/bin/python admin_tui.py create "Name" team,matchup
+./venv/bin/python admin_tui.py rotate 3
+./venv/bin/python admin_tui.py settings
+./venv/bin/python admin_tui.py set report_effort medium
+./venv/bin/python admin_tui.py unset report_effort
+```
+
+### Settings layering
+
+```
+config.default_settings()   environment / code defaults
+report_service_settings     service-wide overrides   <- admin console, live
+report_accounts.settings    per-account overrides    <- console or PATCH /v1/account/settings
+```
+
+Service-wide and per-account changes take effect immediately — no restart. Settings that
+only exist in the environment (DB credentials, `ADMIN_API_KEY`, timeouts, paths) are
+shown read-only, since changing them needs an `/etc/afplna.env` edit and a restart.
+
+### Schema audit
+
+`schema.py` holds a declarative spec of the tables the service needs. The audit compares
+it against `INFORMATION_SCHEMA` and reports missing tables, columns and indexes, plus
+which `API_KEYS` rows are present — presence only, key values are never displayed.
+
+Repairs are **additive only**: `CREATE TABLE`, `ADD COLUMN`, `ADD INDEX`. Nothing drops,
+renames or narrows anything, so it is safe against a database with live data. `API_KEYS`
+predates this service and is audited but never altered.
 
 ## Search engine and the research model
 

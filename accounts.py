@@ -365,8 +365,20 @@ def validate_settings(settings: dict) -> dict:
 
 
 def effective_settings(account: dict | None) -> dict:
-    """Service defaults with this account's overrides layered on top."""
-    resolved = config.default_settings()
+    """Resolve the three settings layers, lowest precedence first.
+
+        config.default_settings()   environment / code defaults
+        report_service_settings     service-wide overrides (admin console)
+        account['settings']         this account's overrides
+
+    Imported lazily: settings_store reaches back into this module to validate, and a
+    top-level import both ways would be a cycle.
+    """
+    try:
+        import settings_store
+        resolved = settings_store.resolved_defaults()
+    except Exception:
+        resolved = config.default_settings()
     if account:
         resolved.update(account.get('settings') or {})
     return resolved

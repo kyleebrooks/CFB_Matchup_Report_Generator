@@ -270,6 +270,18 @@ curl -sS "https://HOST/health?api_key=$SERVICE_API_KEY" | jq
 
 ---
 
+# Admin console (SSH)
+
+Everything below can also be driven from a terminal console on the droplet, which is
+usually faster than curling admin endpoints:
+
+```bash
+cd /opt/afplna && ./venv/bin/python admin_tui.py
+```
+
+It manages accounts and keys, service-wide and per-account settings, and can audit and
+repair the database schema. See the README for the screen and key reference.
+
 # Setup
 
 ```bash

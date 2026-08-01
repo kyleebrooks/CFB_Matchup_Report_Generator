@@ -12,6 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+import accounts
 import cfbd
 import charts as charts_mod
 import config
@@ -302,7 +303,7 @@ def generate(
 ) -> dict:
     """Build one single-team report end to end."""
     progress = progress or (lambda *a: None)
-    settings = settings or config.default_settings()
+    settings = settings or accounts.effective_settings(None)
     started = time.time()
     current = {"stage": "start", "label": "Starting up"}
 
