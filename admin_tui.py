@@ -22,6 +22,10 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py show TABLE [OFFSET]  page through a table's rows (read-only)
     admin_tui.py reports [TYPE]       report catalog: sections and how they are made
     admin_tui.py examples [ID|admin]  copy-pasteable API calls
+    admin_tui.py files                generated reports, one folder per account
+    admin_tui.py files ID             list one account's reports
+    admin_tui.py files ID --delete F  delete one report
+    admin_tui.py files ID --clear     delete every report for that account
     admin_tui.py injuries             feed freshness, per-team coverage, verdict
     admin_tui.py injuries --team NAME collect one team's injuries right now
     admin_tui.py injuries --sweep     collect every FBS team (costs money — see --help)
@@ -54,12 +58,15 @@ import dbbrowse            # noqa: E402
 import examples            # noqa: E402
 import injuries            # noqa: E402
 import report_types        # noqa: E402
+import reports_store       # noqa: E402
 import schema              # noqa: E402
 import settings_store      # noqa: E402
 import usage               # noqa: E402
 
 SCREENS = ['Dashboard', 'Accounts', 'Settings', 'Database', 'Health',
-           'Browser', 'Reports', 'Examples']
+           'Browser', 'Reports', 'Examples', 'Files']
+# Short labels for the tab bar; nine full names do not fit an 80-column terminal.
+TABS = ['Dash', 'Accts', 'Config', 'DB', 'Health', 'Browse', 'Catalog', 'API', 'Files']
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +197,8 @@ def _curses_main(stdscr):
     catalog_detail = None
     examples_blocks = None
     examples_for = None
+    store_accounts = None
+    store_listing = None
 
     # -- primitives -------------------------------------------------------
     def paint(lines):
@@ -198,9 +207,11 @@ def _curses_main(stdscr):
         height, width = stdscr.getmaxyx()
         body_h = height - 5
 
-        tabs = '  '.join(f"[{i + 1}]{n}" for i, n in enumerate(SCREENS))
-        stdscr.addnstr(0, 0, f" AFPLNA Admin Console   {tabs}", width - 1,
-                       STYLES[ui.HEADER])
+        tabs = '  '.join(f"[{i + 1}]{n}" for i, n in enumerate(TABS))
+        # Drop the product name rather than the tabs when the terminal is narrow — a
+        # tab the operator cannot see is a screen they will never open.
+        header = f" AFPLNA Admin   {tabs}" if len(tabs) + 17 < width else f" {tabs}"
+        stdscr.addnstr(0, 0, header, width - 1, STYLES[ui.HEADER])
         stdscr.addnstr(1, 0, '=' * (width - 1), width - 1, STYLES[ui.DIM])
 
         scroll = max(0, min(scroll, max(0, len(lines) - body_h)))
@@ -322,7 +333,86 @@ def _curses_main(stdscr):
         if screen == 'Examples':
             return ui.render_examples({'examples': examples_blocks or [],
                                        'examples_for': examples_for})
+        if screen == 'Files':
+            return ui.render_reports_store({'store_accounts': store_accounts or [],
+                                            'store_listing': store_listing,
+                                            'selected': selected})
         return ui.HELP
+
+    def load_store():
+        nonlocal store_accounts
+        try:
+            store_accounts = reports_store.overview(state.get('accounts') or [])
+        except Exception as e:
+            store_accounts = []
+            return f'  Could not read the reports directory: {e}'
+        return None
+
+    def open_store_folder():
+        nonlocal store_listing, selected
+        rows = store_accounts or []
+        if not (0 <= selected < len(rows)):
+            return
+        row = rows[selected]
+        store_listing = {
+            'account_id': row['account_id'],
+            'account_name': row['account_name'],
+            'path': reports_store.account_dir(row['account_id'], create=False),
+            'reports': reports_store.list_reports(row['account_id']),
+        }
+        selected = 0
+
+    def act_delete_report():
+        nonlocal flash, selected
+        if not store_listing:
+            return
+        reports = store_listing['reports']
+        if not (0 <= selected < len(reports)):
+            return
+        report = reports[selected]
+        if not confirm(f"Delete '{report['filename']}'? This cannot be undone"):
+            flash = ('  Cancelled.', ui.DIM)
+            return
+        try:
+            reports_store.delete(store_listing['account_id'], report['filename'])
+        except Exception as e:
+            flash = (f'  Delete failed: {e}', ui.ERR)
+            return
+        store_listing['reports'] = reports_store.list_reports(store_listing['account_id'])
+        selected = max(0, selected - 1)
+        load_store()
+        flash = (f"  Deleted {report['filename']}", ui.OK)
+
+    def act_clear_folder():
+        nonlocal flash, store_listing, selected
+        if store_listing:
+            account_id, name = store_listing['account_id'], store_listing['account_name']
+            count = len(store_listing['reports'])
+        else:
+            rows = store_accounts or []
+            if not (0 <= selected < len(rows)):
+                return
+            account_id = rows[selected]['account_id']
+            name = rows[selected]['account_name']
+            count = rows[selected]['reports']
+        if not count:
+            flash = ('  That folder is already empty.', ui.DIM)
+            return
+        # Typing the account name, not just y/n: this wipes every report a customer has.
+        typed = prompt(f"Delete ALL {count} report(s) for '{name}'? Type the account name")
+        if typed is None or typed.strip() != name:
+            flash = ('  Cancelled — the name did not match.', ui.WARN)
+            return
+        try:
+            result = reports_store.clear(account_id)
+        except Exception as e:
+            flash = (f'  Clear failed: {e}', ui.ERR)
+            return
+        if store_listing:
+            store_listing['reports'] = reports_store.list_reports(account_id)
+        load_store()
+        flash = (f"  Deleted {result['deleted']} report(s) "
+                 f"({ui._size(result['bytes'])} freed)", ui.OK)
 
     def selected_account():
         """The account the next action applies to.
@@ -631,11 +721,13 @@ def _curses_main(stdscr):
                 browse_page = None
             elif catalog_detail is not None:
                 catalog_detail = None
+            elif store_listing is not None:
+                store_listing, selected = None, 0
             continue
         if ch in (ord('?'), curses.KEY_F1):
             screen, detail_of, scroll = 'Help', None, 0
             continue
-        if ord('1') <= ch <= ord('8'):
+        if ord('1') <= ch <= ord('9'):
             screen = SCREENS[ch - ord('1')]
             detail_of, selected, scroll = None, 0, 0
             catalog_detail, browse_page = None, None
@@ -651,6 +743,11 @@ def _curses_main(stdscr):
             elif screen == 'Examples' and examples_blocks is None:
                 examples_blocks = examples.build(None)
                 examples_for = 'all report types (generic)'
+            elif screen == 'Files':
+                store_listing = None
+                err = load_store()
+                if err:
+                    flash = (err, ui.ERR)
             continue
         if ch in (ord('r'), ord('R')):
             if screen == 'Health':
@@ -661,6 +758,12 @@ def _curses_main(stdscr):
             elif screen == 'Browser':
                 load_browser()
                 flash = ('  Reloaded.', ui.DIM)
+            elif screen == 'Files':
+                refresh('  Refreshed.', ui.DIM)
+                load_store()
+                if store_listing:
+                    store_listing['reports'] = reports_store.list_reports(
+                        store_listing['account_id'])
             else:
                 refresh('  Refreshed.', ui.DIM)
                 if screen == 'Reports':
@@ -674,7 +777,9 @@ def _curses_main(stdscr):
             (screen == 'Settings' and (state.get('settings') or [])) or
             (screen == 'Browser' and browse_page is None
              and ((browse_tables or {}).get('tables') or [])) or
-            (screen == 'Reports' and catalog_detail is None and (state.get('catalog') or []))
+            (screen == 'Reports' and catalog_detail is None and (state.get('catalog') or [])) or
+            (screen == 'Files' and (store_listing['reports'] if store_listing
+                                    else (store_accounts or [])))
         )
         if ch == curses.KEY_UP:
             if listable:
@@ -747,6 +852,14 @@ def _curses_main(stdscr):
                 scroll = 0
             elif ch == ord('w'):
                 act_write_examples()
+        elif screen == 'Files':
+            if ch in (10, 13, curses.KEY_ENTER) and store_listing is None:
+                open_store_folder()
+                scroll = 0
+            elif ch == ord('x'):
+                act_delete_report()
+            elif ch == ord('C'):
+                act_clear_folder()
         elif screen == 'Settings':
             if ch in (10, 13, curses.KEY_ENTER):
                 act_set_global()
@@ -985,6 +1098,72 @@ def main(argv: list[str]) -> int:
                 print(f"No account with id {args[0]}", file=sys.stderr)
                 return 1
         print(examples.as_text(examples.build(account)))
+        return 0
+
+    if cmd == 'files':
+        try:
+            all_accounts = accounts.list_all()
+        except Exception:
+            all_accounts = []
+
+        if not args:
+            print(_plain(ui.render_reports_store({
+                'store_accounts': reports_store.overview(all_accounts),
+                'store_listing': None, 'selected': -1})))
+            return 0
+
+        target = args[0]
+        account_id = None if target.lower() in ('legacy', 'afplna') else int(target)
+        name = next((a['account_name'] for a in all_accounts if a['id'] == account_id),
+                    'AFPLNA (legacy flow)' if account_id is None
+                    else f'(deleted account {account_id})')
+
+        if '--clear' in args:
+            reports = reports_store.list_reports(account_id)
+            if not reports:
+                print(f"No reports for {name}.")
+                return 0
+            print(f"This deletes all {len(reports)} report(s) for '{name}'.")
+            if '--yes' not in args:
+                try:
+                    if input(f"Type the account name to confirm: ").strip() != name:
+                        print("Cancelled — the name did not match.")
+                        return 0
+                except EOFError:
+                    print("Pass --yes to clear a folder non-interactively.",
+                          file=sys.stderr)
+                    return 2
+            result = reports_store.clear(account_id)
+            print(f"Deleted {result['deleted']} report(s), "
+                  f"{ui._size(result['bytes'])} freed.")
+            for err in result['errors']:
+                print(f"  {err}", file=sys.stderr)
+            return 1 if result['errors'] else 0
+
+        if '--delete' in args:
+            try:
+                filename = args[args.index('--delete') + 1]
+            except IndexError:
+                print('usage: admin_tui.py files ID --delete FILENAME', file=sys.stderr)
+                return 2
+            try:
+                result = reports_store.delete(account_id, filename)
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            if not result['ok']:
+                print(result['error'], file=sys.stderr)
+                return 1
+            print(f"Deleted {filename} ({ui._size(result['bytes'])} freed).")
+            return 0
+
+        print(_plain(ui.render_reports_store({
+            'store_accounts': [], 'selected': -1,
+            'store_listing': {
+                'account_id': account_id, 'account_name': name,
+                'path': reports_store.account_dir(account_id, create=False),
+                'reports': reports_store.list_reports(account_id),
+            }})))
         return 0
 
     if cmd in ('injuries', 'rotowire'):

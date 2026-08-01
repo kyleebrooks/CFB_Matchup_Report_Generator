@@ -32,7 +32,7 @@ def rule(width: int = 78, char: str = '-') -> tuple:
 # action nobody can see is an action that does not exist.
 KEY_BAR = {
     'Dashboard': '[2] accounts  [3] settings  [4] database  [5] health  [6] browser  '
-                 '[7] reports  [8] examples',
+                 '[7] catalog  [8] examples  [9] report files',
     'Accounts':  '[n]ew  [e]dit types  [s]etting  [k]ey  [t]oggle  [m]admin  [w]mark  '
                  '[D]elete  ENTER detail',
     'Settings':  'ENTER change the value   [x] clear the override (back to the env default)',
@@ -41,7 +41,8 @@ KEY_BAR = {
     'Browser':   '[b] switch database   ENTER open table   [n]/[p] page   ESC back',
     'Reports':   'up/down select   ENTER every section and how it is produced   ESC back',
     'Examples':  '[a] pick an account   [d] administrator calls   [w] write to a file',
-    'Help':      '[1-8] back to a screen   [q] quit',
+    'Files':     'ENTER open folder   [x] delete report   [C] clear the folder   ESC back',
+    'Help':      '[1-9] back to a screen   [q] quit',
 }
 
 
@@ -430,6 +431,70 @@ def render_examples(state: dict) -> list[tuple]:
 
 
 # ---------------------------------------------------------------------------
+# Generated reports
+# ---------------------------------------------------------------------------
+def _size(n: int) -> str:
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f"{n:.0f}{unit}" if unit == 'B' else f"{n:.1f}{unit}"
+        n /= 1024.0
+    return f"{n:.1f}GB"
+
+
+def render_reports_store(state: dict) -> list[tuple]:
+    """Per-account report folders, or one folder's contents when drilled in."""
+    rows = state.get('store_accounts') or []
+    listing = state.get('store_listing')
+    selected = state.get('selected', 0)
+
+    if listing is not None:
+        out = [
+            _line(f"REPORTS — {listing['account_name']}", TITLE),
+            rule(),
+            _line('  [x] delete the selected report   [C] clear this whole folder   '
+                  'ESC back', WARN),
+            _line(f"  {listing['path']}", DIM),
+            _line(),
+        ]
+        if not listing['reports']:
+            out.append(_line('  No reports in this folder.', DIM))
+            return out
+        out.append(_line(f"  {'GENERATED':<18} {'TYPE':<9} {'SUBJECT':<34} {'SIZE':>8}",
+                         HEADER))
+        for i, r in enumerate(listing['reports']):
+            when = r['modified'].strftime('%Y-%m-%d %H:%M') if r['modified'] else '-'
+            out.append(_line(f"  {when:<18} {r['report_type']:<9} {r['subject'][:33]:<34} "
+                             f"{_size(r['bytes']):>8}",
+                             SEL if i == selected else NORMAL))
+        return out
+
+    out = [
+        _line('GENERATED REPORTS', TITLE),
+        rule(),
+        _line('  ENTER open a folder   [C] clear the selected folder   '
+              'every account is kept separate', WARN),
+        _line(),
+        _line(f"  {'ACCOUNT':<34} {'REPORTS':>8} {'SIZE':>9}  NEWEST", HEADER),
+    ]
+    for i, row in enumerate(rows):
+        newest = row['newest'].strftime('%Y-%m-%d %H:%M') if row['newest'] else '-'
+        style = SEL if i == selected else (WARN if row['orphaned'] else NORMAL)
+        name = row['account_name'][:33]
+        out.append(_line(f"  {name:<34} {row['reports']:>8} {_size(row['bytes']):>9}  "
+                         f"{newest}", style))
+    if not rows:
+        out.append(_line('  No report folders yet.', DIM))
+
+    total = sum(r['reports'] for r in rows)
+    out.append(_line())
+    out.append(_line(f"  {total} report(s) across {len(rows)} folder(s), "
+                     f"{_size(sum(r['bytes'] for r in rows))} on disk", DIM))
+    out.append(_line('  Folders marked in yellow belong to accounts that no longer exist.',
+                     DIM))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Injury feed
 # ---------------------------------------------------------------------------
 def render_feed(report: dict) -> list[tuple]:
@@ -723,7 +788,7 @@ HELP = [
     rule(),
     _line(),
     _line('  GLOBAL KEYS', HEADER),
-    _line('    1..8     switch screen        q      quit'),
+    _line('    1..9     switch screen        q      quit'),
     _line('    r        refresh this screen  ?      this help'),
     _line('    ESC      back / close'),
     _line(),
@@ -754,6 +819,11 @@ HELP = [
     _line('  EXAMPLES SCREEN (8)', HEADER),
     _line('    a        build examples for one account   d  administrator calls'),
     _line('    w        write the examples to a file'),
+    _line(),
+    _line('  FILES SCREEN (9) — generated reports, one folder per account', HEADER),
+    _line('    ENTER    open an account folder    ESC  back to the folder list'),
+    _line('    x        delete the selected report (confirms first)'),
+    _line('    C        clear a whole folder (type the account name to confirm)'),
     _line(),
     _line('  NOTES', HEADER),
     _line('    API keys are stored as hashes. A new key is shown ONCE, at creation'),

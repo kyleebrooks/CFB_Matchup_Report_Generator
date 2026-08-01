@@ -16,6 +16,7 @@ import accounts
 import config
 import jobs
 import report_types
+import reports_store
 import usage
 
 bp = Blueprint('api_v1', __name__, url_prefix='/v1')
@@ -135,9 +136,12 @@ def create_report():
     except report_types.ValidationError as e:
         return _error(str(e), 400, required_params=spec['required'])
 
-    # Per-account model/search choices and watermark travel with the job.
+    # Per-account model/search choices, watermark and output directory travel with the
+    # job. The directory is what keeps two customers' PDFs apart: filenames are built
+    # from subject and date, so without it the same matchup on the same day collides.
     params['settings'] = accounts.effective_settings(account)
     params['watermark'] = accounts.watermark_path(account)
+    params['report_dir'] = reports_store.account_dir(account['id'])
 
     subject = spec['subject'](params)
 
@@ -198,7 +202,8 @@ def report_status(job_id):
     view = jobs.public_view(job)
     filename = (job.get('result') or {}).get('filename')
     view['report_ready'] = bool(
-        filename and os.path.exists(os.path.join(config.REPORTS_DIR, filename))
+        filename and os.path.exists(
+            reports_store.resolve(request.account['id'], filename))
     )
     if view['report_ready']:
         view['download_url'] = f"/v1/reports/{job_id}/download"
@@ -220,7 +225,10 @@ def report_download(job_id):
         )
 
     filename = (job.get('result') or {}).get('filename')
-    path = os.path.join(config.REPORTS_DIR, filename) if filename else None
+    try:
+        path = reports_store.resolve(request.account['id'], filename) if filename else None
+    except ValueError:
+        return _error('Report file is not readable for this account.', 410)
     if not path or not os.path.exists(path):
         return _error('Report file is no longer on disk. Generate it again.', 410)
 

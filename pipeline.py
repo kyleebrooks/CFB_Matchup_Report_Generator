@@ -58,13 +58,16 @@ def generate(
     kickoff: str | None = None,
     settings: dict | None = None,
     watermark: str | None = None,
+    report_dir: str | None = None,
     progress=None,
 ) -> dict:
     """Build one matchup report end to end. Returns a result summary dict.
 
     `settings` carries the resolved per-account model/search choices; omitted for the
     legacy AFPLNA flow, which uses the service defaults. `watermark` overrides the
-    stamped image for accounts that uploaded their own.
+    stamped image for accounts that uploaded their own. `report_dir` is that account's
+    own directory — without it two accounts requesting the same matchup on the same day
+    write the same filename and overwrite each other.
     """
     progress = progress or _noop
     settings = settings or accounts.effective_settings(None)
@@ -92,8 +95,10 @@ def generate(
     if not year:
         year = cfbd.season_year(today)
 
+    out_dir = report_dir or config.REPORTS_DIR
+    os.makedirs(out_dir, exist_ok=True)
     filename = f"{home_short}_{away_short}_{db.format_friendly_date(today)}.pdf"
-    filepath = os.path.join(config.REPORTS_DIR, filename)
+    filepath = os.path.join(out_dir, filename)
     # Build to a temp path and swap at the end, so any existing report for this matchup
     # stays downloadable for the entire multi-minute run.
     tmp_path = filepath + ".building"
@@ -278,7 +283,8 @@ def generate(
 
     # Swap in the finished file, then retire any older report for this matchup.
     os.replace(tmp_path, filepath)
-    cleanup_old_reports(home_short, away_short, keep_filename=filename)
+    cleanup_old_reports(home_short, away_short, keep_filename=filename,
+                        report_dir=out_dir)
 
     elapsed = int(time.time() - started)
     step("done")
@@ -298,10 +304,12 @@ def generate(
     }
 
 
-def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None) -> None:
+def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None,
+                        report_dir: str | None = None) -> None:
     import glob
 
-    pattern = os.path.join(config.REPORTS_DIR, f"{home_short}_{away_short}_*.pdf")
+    pattern = os.path.join(report_dir or config.REPORTS_DIR,
+                           f"{home_short}_{away_short}_*.pdf")
     for path in glob.glob(pattern):
         if not keep_filename or os.path.basename(path) != keep_filename:
             try:
