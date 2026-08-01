@@ -82,6 +82,7 @@ point at a URL that was hallucinated or dropped.
 | `report_types.py` | Registry of report types — add a type here and the API picks it up |
 | `team_report.py` | Single-team season report pipeline |
 | `admin_tui.py` | SSH admin console (curses UI + CLI subcommands) |
+| `rotowire.py` | Scheduled Bright Data scrape, run history, freshness diagnostics |
 | `admin_console.py` | Console screens as pure render functions — testable headlessly |
 | `schema.py` | Declarative DB schema: audit, report gaps, repair additively |
 | `envfile.py` | Loads the service environment when running outside systemd |
@@ -156,6 +157,13 @@ job is queued and closed out when it finishes. The account list shows lifetime a
 30-day call counts; account detail adds completions, failures and recent request
 history. Accounts also see their own numbers at `GET /v1/account/usage`. Every usage
 write is best-effort — accounting never fails a customer's report.
+
+**Rotowire feed** — `admin_tui.py rotowire` reports the age of the newest row, whether
+the `bright` key exists, the next scheduled fire times, recent run outcomes, and a
+verdict; `--run` triggers a collection now and prints exactly what Bright Data
+returned. Every scheduled run records its outcome in `rotowire_runs`, and `/health`
+checks the *age* of the feed rather than just its row count — a table whose newest row
+was a year old used to report `ok`.
 
 **Browser** — walks the MySQL tables and the Rotowire SQLite side by side. Strictly
 read-only: table names are validated against the live catalog before use, and key,

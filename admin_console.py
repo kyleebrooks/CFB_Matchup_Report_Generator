@@ -118,6 +118,21 @@ def render_dashboard(state: dict) -> list[tuple]:
         out.append(_line(f"  Accounts       : {len(accs)} total, {active_n} active, "
                          f"{admin_n} admin"))
 
+    roto = state.get('rotowire') or {}
+    if roto:
+        stale = roto.get('days_stale')
+        if roto.get('error') or stale is None:
+            out.append(_line(f"  Rotowire feed  : NO DATED ROWS — "
+                             f"{roto.get('error') or 'nothing parseable'}", ERR))
+        elif stale > config.ROTOWIRE_STALE_DAYS:
+            out.append(_line(f"  Rotowire feed  : STALE — newest row is {stale} days old "
+                             f"({roto['newest_text']})", ERR))
+            out.append(_line("                   The scrape runs twice daily; run "
+                             "'admin_tui.py rotowire'", WARN))
+        else:
+            out.append(_line(f"  Rotowire feed  : current — {roto['rows']:,} rows, newest "
+                             f"{roto['newest_text']}", OK))
+
     schema_report = state.get('schema') or {}
     if schema_report:
         import schema as schema_mod
@@ -411,6 +426,106 @@ def render_examples(state: dict) -> list[tuple]:
         for line in block['lines']:
             out.append(_line(f"    {line}"))
         out.append(_line())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Rotowire feed
+# ---------------------------------------------------------------------------
+def render_rotowire(report: dict) -> list[tuple]:
+    st = report.get('status') or {}
+    out = [
+        _line('ROTOWIRE FEED', TITLE),
+        rule(),
+    ]
+
+    stale = st.get('days_stale')
+    if st.get('error'):
+        out.append(_line(f"  {st['error']}", ERR))
+    elif stale is None:
+        out.append(_line('  Freshness      : UNKNOWN — no row has a parseable date', ERR))
+    else:
+        fresh = stale <= config.ROTOWIRE_STALE_DAYS
+        out.append(_line(f"  Newest row     : {st['newest_text']}  ({stale} days old)",
+                         OK if fresh else ERR))
+
+    out.append(_line(f"  Rows           : {st.get('rows', 0):,}"))
+    out.append(_line(f"  Oldest row     : {st.get('oldest_date') or '-'}", DIM))
+    out.append(_line(f"  Database       : {st.get('path')}", DIM))
+    if st.get('modified'):
+        out.append(_line(f"  File modified  : {st['modified']}", DIM))
+    if st.get('unparseable'):
+        out.append(_line(f"  Undated rows   : {st['unparseable']:,}", WARN))
+    if st.get('mismatched_format'):
+        out.append(_line(f"  Rows the report query cannot match: "
+                         f"{st['mismatched_format']:,}", ERR))
+
+    key = report.get('bright_key')
+    out.append(_line(f"  Bright Data key: "
+                     f"{'present' if key else ('MISSING from API_KEYS' if key is False else 'unknown')}",
+                     OK if key else ERR))
+
+    if report.get('schedule'):
+        out.append(_line())
+        out.append(_line('  SCHEDULE', HEADER))
+        for job in report['schedule']:
+            out.append(_line(f"    {job['hour']:02d}:00 {job['timezone']:<20} "
+                             f"next {job['next_run'] or '-'}"))
+
+    out.append(_line())
+    out.append(_line('  RECENT SCRAPE RUNS', HEADER))
+    runs = report.get('runs') or []
+    if not runs:
+        out.append(_line('    No runs recorded yet.', DIM))
+    else:
+        out.append(_line(f"    {'STARTED':<20} {'STAGE':<10} {'NEW':>5} {'DUP':>5} "
+                         f"{'SECS':>6}  RESULT", DIM))
+        for r in runs:
+            style = OK if r['ok'] else ERR
+            out.append(_line(f"    {str(r['started_at'])[:19]:<20} {(r['stage'] or '-')[:9]:<10} "
+                             f"{r['inserted'] or 0:>5} {r['duplicates'] or 0:>5} "
+                             f"{r['seconds'] or 0:>6}  "
+                             f"{'ok' if r['ok'] else (r['error'] or 'failed')[:40]}", style))
+
+    if st.get('recent'):
+        out.append(_line())
+        out.append(_line('  MOST RECENT DATES IN THE FEED', HEADER))
+        for row in st['recent'][:10]:
+            flag = '' if row['matches_report_query'] else '   <- report query cannot match this'
+            out.append(_line(f"    {row['date_text']:<24} {row['rows']:>5} rows{flag}",
+                             NORMAL if row['matches_report_query'] else ERR))
+
+    out.append(_line())
+    out.append(_line('  VERDICT', HEADER))
+    for note in report.get('verdict') or []:
+        out.append(_line(f"    - {note}", WARN))
+    return out
+
+
+def render_scrape_result(result: dict) -> list[tuple]:
+    ok = result.get('ok')
+    out = [
+        _line('ROTOWIRE SCRAPE RUN', TITLE),
+        rule(),
+        _line(f"  Result   : {'SUCCESS' if ok else 'FAILED'}", OK if ok else ERR),
+        _line(f"  Stage    : {result.get('stage')}"),
+        _line(f"  Collector: {result.get('collector')}", DIM),
+        _line(f"  Seconds  : {result.get('seconds')}", DIM),
+    ]
+    if result.get('http_status'):
+        out.append(_line(f"  HTTP     : {result['http_status']}"))
+    if ok:
+        out.append(_line(f"  Fetched  : {result.get('fetched')}"))
+        out.append(_line(f"  Inserted : {result.get('inserted')}", OK))
+        out.append(_line(f"  Duplicate: {result.get('duplicates')}", DIM))
+    if result.get('error'):
+        out.append(_line())
+        out.append(_line(f"  {result['error']}", ERR))
+    if result.get('detail'):
+        out.append(_line())
+        out.append(_line('  WHAT THE VENDOR ACTUALLY RETURNED', HEADER))
+        for chunk in str(result['detail']).splitlines()[:20]:
+            out.append(_line(f"    {chunk[:150]}", DIM))
     return out
 
 

@@ -22,6 +22,8 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py show TABLE [OFFSET]  page through a table's rows (read-only)
     admin_tui.py reports [TYPE]       report catalog: sections and how they are made
     admin_tui.py examples [ID|admin]  copy-pasteable API calls
+    admin_tui.py rotowire             why the injury feed is stale
+    admin_tui.py rotowire --run       run the scrape now and show the real vendor reply
 
 This is a thin view layer: the screens come from admin_console.py as plain text, and
 every mutation goes through accounts.py / settings_store.py / schema.py — the same code
@@ -47,6 +49,7 @@ import config              # noqa: E402
 import dbbrowse            # noqa: E402
 import examples            # noqa: E402
 import report_types        # noqa: E402
+import rotowire            # noqa: E402
 import schema              # noqa: E402
 import settings_store      # noqa: E402
 import usage               # noqa: E402
@@ -89,6 +92,12 @@ def load_state(screen: str = 'Dashboard') -> dict:
     except Exception as e:
         state['usage'] = {}
         state['errors'].append(f"usage: {e}")
+
+    try:
+        state['rotowire'] = rotowire.status()
+    except Exception as e:
+        state['rotowire'] = {}
+        state['errors'].append(f"rotowire: {e}")
 
     state['service'] = ui.service_status()
     state['env'] = ENV_REPORT
@@ -973,6 +982,23 @@ def main(argv: list[str]) -> int:
                 return 1
         print(examples.as_text(examples.build(account)))
         return 0
+
+    if cmd == 'rotowire':
+        if '--run' in args:
+            print("Triggering a Bright Data collection now. This can take several "
+                  "minutes...\n")
+            result = rotowire.run_and_record(
+                poll_seconds=int(os.getenv('ROTOWIRE_POLL_SECONDS', '720')),
+                dry_run='--dry-run' in args,
+                log=lambda m: print(f"  {m}"),
+            )
+            print()
+            print(_plain(ui.render_scrape_result(result)))
+            return 0 if result['ok'] else 1
+        report = rotowire.diagnose()
+        print(_plain(ui.render_rotowire(report)))
+        stale = (report['status'] or {}).get('days_stale')
+        return 0 if stale is not None and stale <= config.ROTOWIRE_STALE_DAYS else 1
 
     if cmd == 'health':
         print(_plain(ui.render_health(run_health())))
