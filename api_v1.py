@@ -9,6 +9,9 @@ import base64
 import functools
 import logging
 import os
+import time
+from datetime import datetime
+from urllib.parse import quote
 
 from flask import Blueprint, jsonify, request, send_file
 
@@ -20,6 +23,9 @@ import reports_store
 import usage
 
 bp = Blueprint('api_v1', __name__, url_prefix='/v1')
+
+# {year or None: {'at': epoch, 'teams': [...]}} — see list_teams.
+_TEAMS_CACHE: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +249,105 @@ def list_reports():
     mine = jobs.manager.for_account(request.account['id'])
     mine.sort(key=lambda j: j['created_at'], reverse=True)
     return jsonify({'reports': [jobs.public_view(j) for j in mine], 'count': len(mine)}), 200
+
+
+@bp.route('/reports/stored', methods=['GET'])
+@require_account
+def list_stored_reports():
+    """Every PDF still on disk for this account, newest first.
+
+    /v1/reports only knows about the current service lifetime, because the job table is
+    in memory. This reads the account's own directory instead, so a consumer can list
+    what actually exists after a restart — which is what a website needs to build a
+    catalogue of published reports.
+    """
+    rows = reports_store.list_reports(request.account['id'])
+    return jsonify({
+        'reports': [{
+            'filename': r['filename'],
+            'report_type': r['report_type'],
+            'subject': r['subject'],
+            'bytes': r['bytes'],
+            'generated_at': r['modified'].isoformat() if r['modified'] else None,
+            'url': f"/v1/reports/stored/{quote(r['filename'])}",
+        } for r in rows],
+        'count': len(rows),
+    }), 200
+
+
+@bp.route('/reports/stored/<path:filename>', methods=['GET'])
+@require_account
+def get_stored_report(filename):
+    """Fetch one stored PDF by name. Scoped to the caller's own directory."""
+    try:
+        path = reports_store.resolve(request.account['id'], filename)
+    except ValueError:
+        return _error('Invalid report filename.', 400)
+    if not os.path.isfile(path):
+        return _error('No such report for this account.', 404)
+    # inline, not attachment: a consumer rendering this in a viewer should not be
+    # handed a Content-Disposition that pushes the browser toward saving it.
+    return send_file(path, mimetype='application/pdf', as_attachment=False,
+                     download_name=os.path.basename(path))
+
+
+@bp.route('/reports/stored/<path:filename>', methods=['DELETE'])
+@require_account
+def delete_stored_report(filename):
+    try:
+        result = reports_store.delete(request.account['id'], filename)
+    except ValueError:
+        return _error('Invalid report filename.', 400)
+    if not result['ok']:
+        return _error(result['error'], 404)
+    return jsonify({'deleted': filename, 'bytes': result['bytes']}), 200
+
+
+@bp.route('/teams', methods=['GET'])
+@require_account
+def list_teams():
+    """FBS teams for the current season, for populating a client's team pickers.
+
+    Cached for an hour: the roster of FBS programs changes a handful of times a year,
+    and every consumer would otherwise hit CFBD on every page load.
+    """
+    global _TEAMS_CACHE
+    year = request.args.get('year', type=int)
+    now = time.time()
+    cached = _TEAMS_CACHE.get(year)
+    if cached and now - cached['at'] < 3600:
+        return jsonify({'teams': cached['teams'], 'count': len(cached['teams']),
+                        'cached': True}), 200
+
+    import cfbd
+    import db as db_mod
+
+    api_key = db_mod.resolve_cfbd_key()
+    if not api_key:
+        return _error('No CollegeFootballData key configured on the service.', 503)
+    errors: list[dict] = []
+    rows = cfbd._get(api_key, '/teams/fbs',
+                     {'year': year or cfbd.season_year(datetime.now())},
+                     'FBS teams', errors)
+    if errors:
+        return _error('CollegeFootballData request failed.', 502,
+                      detail=f"HTTP {errors[0]['status']}: {errors[0]['body'][:200]}")
+
+    teams = []
+    for row in rows or []:
+        school = (row.get('school') or '').strip()
+        if not school:
+            continue
+        mascot = (row.get('mascot') or '').strip()
+        teams.append({
+            'school': school,
+            'mascot': mascot,
+            'full_name': f'{school} {mascot}'.strip(),
+            'conference': (row.get('conference') or '').strip(),
+        })
+    teams.sort(key=lambda t: t['school'].lower())
+    _TEAMS_CACHE[year] = {'at': now, 'teams': teams}
+    return jsonify({'teams': teams, 'count': len(teams), 'cached': False}), 200
 
 
 # ---------------------------------------------------------------------------
