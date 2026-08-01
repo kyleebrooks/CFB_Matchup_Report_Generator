@@ -427,6 +427,12 @@ Checking the feed
         first; teams already inside the TTL are skipped unless you pass --force.
         Add --yes to run it from cron.
 
+    ./venv/bin/python admin_tui.py injuries --purge
+        Preview the rows written before the collector existed (the old Bright Data
+        scrape output). Add --yes to delete them. --all clears everything and asks
+        for a typed confirmation; --older-than DAYS scopes by age. The database file
+        is backed up to <path>.backup-<timestamp> first unless you pass --no-backup.
+
 If the feed is not filling:
   - No 'openrouter' row in API_KEYS -> nothing can be collected at all.
   - Individual team failures appear in the coverage table with the error.

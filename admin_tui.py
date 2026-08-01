@@ -25,6 +25,9 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py injuries             feed freshness, per-team coverage, verdict
     admin_tui.py injuries --team NAME collect one team's injuries right now
     admin_tui.py injuries --sweep     collect every FBS team (costs money — see --help)
+    admin_tui.py injuries --purge     show the old pre-collector rows; add --yes to delete
+                                      (--all for every row, --older-than DAYS to scope by
+                                      age; the file is backed up first unless --no-backup)
 
 This is a thin view layer: the screens come from admin_console.py as plain text, and
 every mutation goes through accounts.py / settings_store.py / schema.py — the same code
@@ -986,6 +989,46 @@ def main(argv: list[str]) -> int:
 
     if cmd in ('injuries', 'rotowire'):
         force = '--force' in args
+
+        if '--purge' in args:
+            scope = 'all' if '--all' in args else 'legacy'
+            older = None
+            if '--older-than' in args:
+                try:
+                    older = int(args[args.index('--older-than') + 1])
+                except (IndexError, ValueError):
+                    print('usage: --older-than DAYS', file=sys.stderr)
+                    return 2
+
+            # Always show what would go first, even when --yes was passed: a purge is
+            # not undoable from the console, and the count is the thing worth checking.
+            preview = injuries.purge(scope, older, dry_run=True)
+            print(_plain(ui.render_purge_result(preview)))
+            if preview.get('error'):
+                return 1
+            if not preview['matched']:
+                print("\nNothing matches — nothing to do.")
+                return 0
+            if '--yes' not in args:
+                return 0
+
+            if scope == 'all':
+                print(f"\nThis deletes ALL {preview['matched']:,} rows, including "
+                      f"anything the collector has gathered.")
+                try:
+                    if input("Type 'delete all' to confirm: ").strip().lower() != 'delete all':
+                        print("Cancelled. Nothing was deleted.")
+                        return 0
+                except EOFError:
+                    print("Refusing to wipe the whole feed without an interactive "
+                          "confirmation.", file=sys.stderr)
+                    return 2
+
+            print()
+            result = injuries.purge(scope, older, dry_run=False,
+                                    backup='--no-backup' not in args)
+            print(_plain(ui.render_purge_result(result)))
+            return 1 if result.get('error') else 0
 
         if '--team' in args:
             idx = args.index('--team')

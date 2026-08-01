@@ -507,6 +507,50 @@ def render_feed(report: dict) -> list[tuple]:
     return out
 
 
+def render_purge_result(result: dict) -> list[tuple]:
+    dry = result.get('dry_run')
+    out = [
+        _line('PURGE THE INJURY FEED' + (' — DRY RUN' if dry else ''), TITLE),
+        rule(),
+    ]
+    if result.get('error'):
+        out.append(_line(f"  {result['error']}", ERR))
+        return out
+
+    scope = ('rows written before the collector existed (the old scrape)'
+             if result['scope'] == 'legacy' else 'EVERY row in the feed')
+    out.append(_line(f"  Scope     : {scope}"))
+    if result.get('older_than') is not None:
+        out.append(_line(f"  Age filter: older than {result['older_than']} days"))
+    out.append(_line(f"  Matched   : {result['matched']:,} of "
+                     f"{result['total_before']:,} rows",
+                     WARN if result['matched'] else DIM))
+
+    if dry:
+        out.append(_line())
+        out.append(_line('  Nothing was deleted. Re-run with --yes to apply.', WARN))
+    else:
+        out.append(_line(f"  Deleted   : {result['deleted']:,}", OK))
+        out.append(_line(f"  Remaining : {result['total_after']:,}"))
+        if result.get('teams_uncached'):
+            out.append(_line(f"  Cache     : cleared for {result['teams_uncached']} team(s) "
+                             f"left with no rows, so reports re-collect them", DIM))
+        if result.get('backup'):
+            out.append(_line(f"  Backup    : {result['backup']}", OK))
+            out.append(_line(f"              restore with: cp '{result['backup']}' "
+                             f"'{config.ROTOWIRE_DB_PATH}'", DIM))
+
+    if result.get('sample'):
+        out.append(_line())
+        out.append(_line(f"  {'WILL BE' if dry else 'WERE'} REMOVED (first 10)", HEADER))
+        for row in result['sample']:
+            tag = 'collected' if row['collected'] else 'legacy'
+            out.append(_line(f"    {(row['team'] or '?')[:20]:<22} "
+                             f"{(row['player'] or '-')[:18]:<20} {row['date'] or '-':<20} "
+                             f"{tag}", DIM))
+    return out
+
+
 def render_collect_result(results: list[dict]) -> list[tuple]:
     ok = [r for r in results if r.get('ok') and not r.get('skipped')]
     skipped = [r for r in results if r.get('skipped')]

@@ -166,6 +166,12 @@ now; `--sweep` collects every FBS team after stating the cost. `/health` checks 
 *age* of the feed rather than just its row count — a table whose newest row was a year
 old used to report `ok`.
 
+`--purge` removes rows written before the collector existed — the old scrape output —
+and previews them first; nothing is deleted without `--yes`. `--all` clears the whole
+feed and additionally requires a typed confirmation at a terminal. The database file is
+copied to `<path>.backup-<timestamp>` before any delete, and any team left with no rows
+loses its cache entry so the next report re-collects it rather than serving nothing.
+
 **Browser** — walks the MySQL tables and the feed SQLite side by side. Strictly
 read-only: table names are validated against the live catalog before use, and key,
 hash and password columns render as `<redacted>`.
