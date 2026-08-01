@@ -56,6 +56,19 @@ Optional shortcut so it can be run as one word from anywhere:
 
 Screens: Dashboard, Accounts, Settings, Database, Health. Press ? for the key map.
 
+The console needs the same environment the service gets. systemd supplies that from
+/etc/afplna.env, but an interactive shell does not, so the console loads it itself -
+preferring the running service's own environment via /proc, which the deploy user can
+read with no sudo and no permission changes. Check which source was used with:
+
+    afplna-admin env
+
+If it reports the environment is missing, the service is probably stopped. Either
+start it, or run the console under sudo:
+
+    sudo systemctl start afplna
+    sudo /opt/afplna/venv/bin/python /opt/afplna/admin_tui.py
+
 Run the database audit once after deploying: it creates report_accounts and
 report_service_settings if they do not exist, and reports any API_KEYS rows the
 service needs. Repairs are additive only - it never drops or rewrites anything.
@@ -405,6 +418,19 @@ Optional shortcut so it can be run as one word from anywhere:
     afplna-admin --help     # all subcommands
 
 Screens: Dashboard, Accounts, Settings, Database, Health. Press ? for the key map.
+
+The console needs the same environment the service gets. systemd supplies that from
+/etc/afplna.env, but an interactive shell does not, so the console loads it itself -
+preferring the running service's own environment via /proc, which the deploy user can
+read with no sudo and no permission changes. Check which source was used with:
+
+    afplna-admin env
+
+If it reports the environment is missing, the service is probably stopped. Either
+start it, or run the console under sudo:
+
+    sudo systemctl start afplna
+    sudo /opt/afplna/venv/bin/python /opt/afplna/admin_tui.py
 
 Run the database audit once after deploying: it creates report_accounts and
 report_service_settings if they do not exist, and reports any API_KEYS rows the

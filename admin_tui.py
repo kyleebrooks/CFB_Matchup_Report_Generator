@@ -15,6 +15,7 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py settings             show effective settings
     admin_tui.py set KEY VALUE        set a service-wide override
     admin_tui.py unset KEY            clear a service-wide override
+    admin_tui.py env                  show where the service environment came from
 
 This is a thin view layer: the screens come from admin_console.py as plain text, and
 every mutation goes through accounts.py / settings_store.py / schema.py — the same code
@@ -25,6 +26,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# The service reads /etc/afplna.env through systemd; an interactive shell does not.
+# Fill the gap BEFORE importing config, which snapshots os.environ at import time.
+# Without this the console fails with a database "Access denied ... (using password: NO)",
+# which points at the database when the real problem is a missing environment.
+import envfile            # noqa: E402
+ENV_REPORT = envfile.bootstrap()
 
 import accounts            # noqa: E402
 import admin_console as ui  # noqa: E402
@@ -66,7 +74,33 @@ def load_state(screen: str = 'Dashboard') -> dict:
         state['errors'].append(f"settings: {e}")
 
     state['service'] = ui.service_status()
+    state['env'] = ENV_REPORT
     return state
+
+
+def env_ok() -> bool:
+    return not ENV_REPORT.get('missing')
+
+
+def print_env_guidance(stream=sys.stderr) -> None:
+    for line in envfile.guidance(ENV_REPORT):
+        print(line, file=stream)
+
+
+def preflight() -> str | None:
+    """Confirm the database is actually reachable before doing anything else.
+
+    A missing DB_PASSWORD is only a *hint* that the environment was not loaded — a
+    database could be reachable some other way. So probe first and refuse only when
+    the connection genuinely fails, rather than blocking a working setup on a proxy
+    signal. Returns the database error when the environment is to blame, else None.
+    """
+    probe = schema.audit()
+    if not probe.get('error'):
+        return None
+    if env_ok():
+        return None          # reachable-looking env; the caller reports the real error
+    return probe['error']
 
 
 def run_health() -> dict:
@@ -495,6 +529,11 @@ def _curses_main(stdscr):
 
 
 def run_tui() -> int:
+    db_error = preflight()
+    if db_error:
+        print(f"Database unreachable: {db_error}\n", file=sys.stderr)
+        print_env_guidance()
+        return 3
     try:
         import curses
     except ImportError:
@@ -532,6 +571,27 @@ def main(argv: list[str]) -> int:
     if cmd in ('-h', '--help', 'help'):
         print(__doc__)
         return 0
+
+    if cmd == 'env':
+        print(f"Environment source: {ENV_REPORT.get('source') or 'NOT FOUND'}")
+        if ENV_REPORT.get('loaded'):
+            print(f"Imported: {', '.join(ENV_REPORT['loaded'])}")
+        for attempt in ENV_REPORT.get('attempts', []):
+            print(f"  tried {attempt}")
+        if ENV_REPORT.get('missing'):
+            print()
+            print_env_guidance()
+            return 1
+        return 0
+
+    # Every remaining command touches the database. If it is unreachable AND the
+    # service environment never loaded, that is almost certainly the cause — say so
+    # instead of surfacing "Access denied ... (using password: NO)".
+    db_error = preflight()
+    if db_error:
+        print(f"Database unreachable: {db_error}\n", file=sys.stderr)
+        print_env_guidance()
+        return 3
 
     if cmd == 'audit':
         report = schema.audit()

@@ -87,6 +87,9 @@ def render_dashboard(state: dict) -> list[tuple]:
                          f" @ {config.DB_HOST}", OK))
     else:
         out.append(_line(f"  Database       : UNREACHABLE — {dbinfo.get('error', '')[:50]}", ERR))
+        if (state.get('env') or {}).get('missing'):
+            out.append(_line("                   The service environment did not load — run "
+                             "'admin_tui.py env'", WARN))
 
     accs = state.get('accounts')
     if accs is None:
@@ -118,6 +121,12 @@ def render_dashboard(state: dict) -> list[tuple]:
                         ('Rotowire DB', config.ROTOWIRE_DB_PATH)):
         exists = os.path.exists(path)
         out.append(_line(f"    {label:<12} {path}", NORMAL if exists else WARN))
+
+    env = state.get('env') or {}
+    if env.get('source') and env['source'] != 'environment':
+        out.append(_line(f"  Environment    : loaded from {env['source']}", DIM))
+    elif env.get('missing'):
+        out.append(_line(f"  Environment    : MISSING {', '.join(env['missing'])}", ERR))
 
     out.append(_line())
     out.append(_line(f"  Admin bootstrap key set: "

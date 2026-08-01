@@ -84,6 +84,7 @@ point at a URL that was hallucinated or dropped.
 | `admin_tui.py` | SSH admin console (curses UI + CLI subcommands) |
 | `admin_console.py` | Console screens as pure render functions — testable headlessly |
 | `schema.py` | Declarative DB schema: audit, report gaps, repair additively |
+| `envfile.py` | Loads the service environment when running outside systemd |
 | `settings_store.py` | Service-wide setting overrides, live from the database |
 | `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
 | `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
@@ -121,6 +122,25 @@ Five screens: **Dashboard** (service, database, accounts, effective settings, pa
 **Accounts** (create, rotate keys, entitlements, per-account settings, activate,
 watermark), **Settings** (service-wide overrides, live), **Database** (schema audit and
 additive repair), **Health** (runs the same checks as `GET /health`, in-process).
+
+### Running it from a shell
+
+systemd feeds the service `/etc/afplna.env` via `EnvironmentFile=`; an interactive SSH
+shell gets none of that, so a hand-run console would otherwise fail with
+`Access denied for user ... (using password: NO)` — which blames the database for a
+missing environment.
+
+The console fills that gap itself, trying in order: the environment already in the
+shell, the env file if readable (works under `sudo`), then the **running service's own
+environment via `/proc/<pid>/environ`** — which the `deploy` user can read without sudo
+and without loosening any file permissions. That last path is the one that normally
+fires.
+
+If none work it refuses with the four ways to fix it rather than surfacing a database
+error. `admin_tui.py env` shows which source was used.
+
+The check is probe-based: it only refuses when the database is *actually* unreachable,
+so a differently-configured or passwordless database is never blocked on a proxy signal.
 
 Everything is also available non-interactively, for cron or a terminal that cannot do
 curses:
