@@ -179,6 +179,55 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
     }
 
 
+def fetch_team(api_key: str, year: int, team: str) -> dict:
+    """Everything the single-team report needs, for ONE school.
+
+    Same endpoints as the matchup fetch minus the opponent half, plus the full
+    schedule (played and upcoming) and the league-wide tables used for percentiles.
+    """
+    jobs: dict[str, tuple] = {}
+    for endpoint, label in PER_TEAM_ENDPOINTS:
+        jobs[f"stat::{label}"] = (endpoint, {"year": year, "team": team}, f"{label} ({team})")
+
+    jobs["league::advanced"] = ("/stats/season/advanced", {"year": year}, "League Advanced Stats")
+    jobs["league::sp"] = ("/ratings/sp", {"year": year}, "League SP Ratings")
+    jobs["meta::teams"] = ("/teams/fbs", {"year": year}, "FBS Teams")
+    jobs["meta::talent"] = ("/talent", {"year": year}, "Team Talent")
+    jobs["games"] = ("/games", {"year": year, "team": team}, f"Games ({team})")
+    jobs["records"] = ("/records", {"year": year, "team": team}, f"Records ({team})")
+
+    results: dict[str, object] = {}
+    errors: list[dict] = []
+    with ThreadPoolExecutor(max_workers=config.CFBD_MAX_WORKERS) as pool:
+        futures = {
+            pool.submit(_get, api_key, ep, params, label, errors): key
+            for key, (ep, params, label) in jobs.items()
+        }
+        for fut, key in futures.items():
+            try:
+                results[key] = fut.result()
+            except Exception as e:
+                logging.warning(f"CFBD job {key} raised: {e}")
+                results[key] = []
+
+    stats = {label: results.get(f"stat::{label}") or [] for _ep, label in PER_TEAM_ENDPOINTS}
+    talent_all = results.get("meta::talent") or []
+    stats["Team Talent"] = [t for t in talent_all if pick(t, "school", "team") == team]
+
+    auth_failures = [e for e in errors if e["status"] in (401, 403)]
+    return {
+        "errors": errors,
+        "auth_failures": auth_failures,
+        "total_requests": len(jobs),
+        "stats": stats,
+        "league": {"advanced": results.get("league::advanced") or [],
+                   "sp": results.get("league::sp") or []},
+        "teams": results.get("meta::teams") or [],
+        "games": results.get("games") or [],
+        "records": results.get("records") or [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Team metadata (logo + official colors, used to style every chart)
 # ---------------------------------------------------------------------------

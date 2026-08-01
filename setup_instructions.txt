@@ -181,11 +181,17 @@ DB_PASSWORD=REPLACE_WITH_YOUR_DB_PASSWORD
 # OPENROUTER_API_KEY=   # single gateway for ALL LLM calls (research + report)
 # WKHTMLTOPDF_PATH=/usr/bin/wkhtmltopdf
 
+# Multi-tenant API (/v1). Whoever holds this can mint accounts - keep it secret.
+ADMIN_API_KEY=REPLACE_WITH_A_LONG_RANDOM_STRING
+
 # Optional model / behavior overrides (defaults shown)
-# OPENROUTER_RESEARCH_MODEL=openai/gpt-5.6-luna
+# OPENROUTER_RESEARCH_MODEL=deepseek/deepseek-v4-flash
 # OPENROUTER_REPORT_MODEL=moonshotai/kimi-k3
-# OPENROUTER_SEARCH_ENGINE=native      # native | exa | (blank = OpenRouter picks)
-# OPENROUTER_SEARCH_MAX_RESULTS=10
+# OPENROUTER_SEARCH_ENGINE=exa         # exa | native | (blank = OpenRouter picks)
+#   NOTE: DeepSeek has no native web search - leave this on 'exa' unless the
+#   research model is switched to an OpenAI/Anthropic/Google/xAI model.
+# OPENROUTER_SEARCH_MAX_RESULTS=5      # Exa bills ~$4/1000 results
+# WATERMARKS_DIR=/opt/afplna/watermarks
 # RESEARCH_TIMEOUT=240
 # REPORT_TIMEOUT=420
 # REPORT_MAX_TOKENS=96000   # covers reasoning tokens AND the report; too low = empty output

@@ -144,25 +144,36 @@ def build_html(
     charts: list[dict],
     registry,
     meta_lines: list[str],
+    title: str | None = None,
+    banner: str = "AFPLNA College Football Matchup Report",
 ) -> str:
+    """Assemble the printable HTML.
+
+    Single-team reports pass an empty away_full/away_logo; the header then centres on
+    one crest instead of rendering an "X vs (blank)" line and an empty <img>.
+    """
     body = inject_charts(markdown_to_html(strip_model_sources(report_markdown)), charts)
     meta_html = "".join(f"<p>{line}</p>" for line in meta_lines)
+
+    subject = f"{home_full} vs {away_full} ({year})" if away_full else f"{home_full} ({year})"
+    doc_title = title or (f"{home_full} vs {away_full}" if away_full else home_full)
+    away_img = f'<img src="{away_logo}" alt="{away_full} logo">' if away_full and away_logo else ""
 
     return f"""<html>
 <head>
   <meta charset="utf-8" />
-  <title>Matchup Report</title>
+  <title>{doc_title}</title>
   <style>{CSS}</style>
 </head>
 <body>
   <div class="hdr">
     <img src="{home_logo}" alt="{home_full} logo">
     <div style="text-align:center; flex-grow:1;">
-        <h1>AFPLNA College Football Matchup Report</h1>
-        <h2>{home_full} vs {away_full} ({year})</h2>
+        <h1>{banner}</h1>
+        <h2>{subject}</h2>
         <p style="margin:0;">Report created on: {report_created}</p>
     </div>
-    <img src="{away_logo}" alt="{away_full} logo">
+    {away_img}
   </div>
   <div class="content">{body}</div>
   {sources_block(registry)}

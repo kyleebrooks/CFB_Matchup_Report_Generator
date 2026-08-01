@@ -12,6 +12,7 @@ from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
 
+import api_v1
 import cfbd
 import config
 import db
@@ -78,6 +79,11 @@ def add_cors(resp):
 logging.basicConfig(level=logging.INFO)
 
 os.makedirs(config.REPORTS_DIR, exist_ok=True)
+os.makedirs(config.WATERMARKS_DIR, exist_ok=True)
+
+# Multi-tenant API for CFBReports.com and other consumers. Mounted under /v1 so the
+# legacy AFPLNA endpoints below keep their exact URLs, auth and behaviour.
+app.register_blueprint(api_v1.bp)
 
 
 # ---------------------------
@@ -442,6 +448,26 @@ def health():
         "path": config.REPORTS_DIR,
     }
     out["checks"]["watermark"] = {"ok": os.path.exists(config.WATERMARK_PATH)}
+
+    try:
+        import accounts
+        accounts.ensure_schema()
+        rows = accounts.list_all()
+        out["checks"]["accounts"] = {
+            "ok": True,
+            "count": len(rows),
+            "active": sum(1 for a in rows if a["active"]),
+            "admins": sum(1 for a in rows if a["is_admin"]),
+            "bootstrap_admin_key_set": bool(config.ADMIN_API_KEY),
+        }
+    except Exception as e:
+        out["ok"] = False
+        out["checks"]["accounts"] = {"ok": False, "error": str(e)[:300]}
+
+    out["checks"]["watermarks_dir"] = {
+        "ok": os.path.isdir(config.WATERMARKS_DIR) and os.access(config.WATERMARKS_DIR, os.W_OK),
+        "path": config.WATERMARKS_DIR,
+    }
 
     import charts as charts_mod
     out["checks"]["charts"] = {
