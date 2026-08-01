@@ -124,7 +124,6 @@ SPEC: dict[str, dict] = {
 REQUIRED_KEY_ROWS = [
     ('openrouter', True,  'All LLM calls (research + report synthesis)'),
     ('CFD',        True,  'CollegeFootballData statistics'),
-    ('bright',     False, 'Bright Data collector for the Rotowire scrape'),
     ('cfbmatchupreport', False, 'Service key the afplnapicks.com proxy presents'),
 ]
 

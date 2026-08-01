@@ -1,7 +1,7 @@
 """Stage 2: the single Kimi K3 synthesis call that writes the finished report.
 
 No web search here — every fact this model is allowed to use has already been gathered:
-CFBD statistics, the eight research buckets, the Rotowire feed, and the computed
+CFBD statistics, the eight research buckets, the stored injury feed, and the computed
 statistical baseline. Its job is to reason over that bundle and produce the prose.
 """
 
@@ -44,7 +44,7 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
         ("Adjusted Team Metrics", "Opponent-adjusted efficiency."),
         (f"{home_full} Injury Updates",
          "MEDICAL items only. This section has TWO separate inputs — live web research and the "
-         "Rotowire feed — and you must present them as clearly labeled separate groups."),
+         "stored injury feed — and you must present them as clearly labeled separate groups."),
         (f"{away_full} Injury Updates",
          "MEDICAL items only. Same two-input structure as above; keep the groups separate."),
         ("Key Player Matchups",
@@ -109,7 +109,7 @@ FORMATTING
 - Then list the key figures (where applicable), then AT LEAST TWO substantial paragraphs of
   analysis explaining how those numbers shape THIS game. Analysis, not restatement.
 - When a section has more than one input bucket, keep them visibly separate with a bolded
-  sub-label (e.g. "**Live web research:**" and "**Rotowire feed:**") before each group. Never
+  sub-label (e.g. "**Live web research:**" and "**Injury feed:**") before each group. Never
   blend two sources into one undifferentiated list.
 - If a section's data is empty or marked no_data, keep the heading and write ONE sentence
   saying no data was available for that section. Write nothing else in it — no speculation,
@@ -121,7 +121,7 @@ was actually retrieved. Rules:
 - Cite with the exact bracketed marker from that list, e.g. [3], placed inline right after the
   claim it supports. Every news, injury, roster, practice and media claim needs one.
 - Use [1] for anything drawn from the CollegeFootballData statistics and [2] for anything from
-  the Rotowire feed.
+  the stored injury feed.
 - NEVER invent a marker number that is not on the list, and never write a bare URL.
 - Do NOT write a SOURCES or References section — one is appended automatically. Do not mention
   URLs, retrieval problems, search coverage, or which pages you could or could not reach.

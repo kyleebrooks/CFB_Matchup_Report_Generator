@@ -1,6 +1,6 @@
 AFPLNA AI Report Service — Full Setup on DigitalOcean
 
-This guide bootstraps a brand-new Ubuntu Droplet and deploys the Flask/Gunicorn/Nginx service that generates and serves matchup PDFs, runs scheduled Rotowire updates, and exposes the /generate-report and /get-report endpoints.
+This guide bootstraps a brand-new Ubuntu Droplet and deploys the Flask/Gunicorn/Nginx service that generates and serves matchup PDFs, collects college-football injury news, and exposes the /generate-report and /get-report endpoints.
 
 Contents
 
@@ -34,7 +34,7 @@ Prerequisites
 
 14) Frontend integration
 
-15) Scheduler notes
+15) The injury feed
 
 15b) Admin console
 
@@ -389,47 +389,48 @@ progress instead of looking idle.
 Because the previous PDF is only swapped out at the very end of a rebuild, Download
 stays usable the whole time a regeneration is running.
 
-15) Scheduler notes
+15) The injury feed
 
-APScheduler triggers the Rotowire/Bright Data collector at 9:00 and 18:00
-(SCHEDULER_TIMEZONE, default America/New_York) and upserts into the rotowire table.
+There is no scheduled job. The Bright Data scrape that used to run twice a day is gone:
+Rotowire blocks automated clients, which is the only reason that proxy was ever in the
+stack, and every failure of it was silent.
 
-The timezone must be passed to the trigger, not just the scheduler. A bare
-CronTrigger(hour=9) takes the SYSTEM timezone, which on the droplet is UTC — for a
-long time these fired at 05:00/14:00 ET while this document claimed otherwise.
+The feed is now collected on demand by the report pipeline itself:
 
-Keep Gunicorn workers at 1 in the unit to avoid duplicate runs. The unit above is set
-to --workers 1 --threads 8 for exactly this reason: report generation is I/O-bound on
-API calls, so threads give concurrency without duplicating the scheduler.
+  - Every matchup and team report already makes a live per-team injury research call
+    (OpenRouter + Exa). injuries.record_findings() persists what it found, so the table
+    fills as a side effect of normal use, at no additional cost.
 
-Diagnosing a stale feed
------------------------
-Every run now writes its outcome to the rotowire_runs table, and /health reports the
-age of the newest row rather than just its row count.
+  - If a team has not been collected inside INJURY_FEED_TTL_HOURS (default 6), the next
+    report that needs it collects it first. Set the TTL lower for fresher data and more
+    search calls, higher for the reverse.
 
-    ./venv/bin/python admin_tui.py rotowire
-        Newest row, how many days stale, whether the 'bright' API_KEYS row exists,
-        the next scheduled fire times, recent run outcomes, and a plain-language
-        verdict. Exit code 1 when the feed is stale.
+Rows carry the publisher and article URL they came from, so report citations point at
+the real source rather than at one aggregator. They also carry an ISO news_date, so the
+feed can no longer be emptied by a change in date formatting — the failure that made
+the old table invisible to reports even when it had rows.
 
-    ./venv/bin/python admin_tui.py rotowire --run
-        Run a collection right now and print exactly what Bright Data returned,
-        including the HTTP status and response body on failure. This is the command
-        that answers "why did it stop" — the scheduled job used to swallow all of it.
+Gunicorn still runs --workers 1 --threads 8, now only because the job manager keeps its
+state in memory.
 
-    sudo journalctl -u afplna --since "30 days ago" | grep -i rotowire
+Checking the feed
+-----------------
+    ./venv/bin/python admin_tui.py injuries
+        Newest item and its age, rows collected vs legacy, per-team coverage with
+        cache ages, and a plain-language verdict. Exit code 1 when the feed is stale.
 
-Common causes, in the order they present:
-  - No 'bright' row in API_KEYS (or an empty value) -> the job aborts at step one.
-  - HTTP 401 -> the Bright Data token was rotated or revoked.
-  - HTTP 403 -> the account is suspended or out of credit, or the token has no
-    rights to this collector.
-  - HTTP 404 -> collector c_meewnv1y2gctpr239v was deleted from the account.
-  - Snapshot completes with zero rows -> the collector no longer matches the
-    Rotowire page layout and needs rebuilding in the Bright Data console.
-  - Rows arrive but reports still show nothing -> check the date_text shape. The
-    report query matches exact strings like "August 1, 2026"; anything else is
-    invisible to it. 'admin_tui.py rotowire' flags those rows explicitly.
+    ./venv/bin/python admin_tui.py injuries --team "Georgia Bulldogs"
+        Collect one team right now and print what came back.
+
+    ./venv/bin/python admin_tui.py injuries --sweep
+        Collect every FBS team. States the estimated cost and asks for confirmation
+        first; teams already inside the TTL are skipped unless you pass --force.
+        Add --yes to run it from cron.
+
+If the feed is not filling:
+  - No 'openrouter' row in API_KEYS -> nothing can be collected at all.
+  - Individual team failures appear in the coverage table with the error.
+  - A feed that is stale but has no failures usually means no reports have been run.
 
 15b) Admin console
 

@@ -22,8 +22,9 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py show TABLE [OFFSET]  page through a table's rows (read-only)
     admin_tui.py reports [TYPE]       report catalog: sections and how they are made
     admin_tui.py examples [ID|admin]  copy-pasteable API calls
-    admin_tui.py rotowire             why the injury feed is stale
-    admin_tui.py rotowire --run       run the scrape now and show the real vendor reply
+    admin_tui.py injuries             feed freshness, per-team coverage, verdict
+    admin_tui.py injuries --team NAME collect one team's injuries right now
+    admin_tui.py injuries --sweep     collect every FBS team (costs money — see --help)
 
 This is a thin view layer: the screens come from admin_console.py as plain text, and
 every mutation goes through accounts.py / settings_store.py / schema.py — the same code
@@ -48,8 +49,8 @@ import catalog             # noqa: E402
 import config              # noqa: E402
 import dbbrowse            # noqa: E402
 import examples            # noqa: E402
+import injuries            # noqa: E402
 import report_types        # noqa: E402
-import rotowire            # noqa: E402
 import schema              # noqa: E402
 import settings_store      # noqa: E402
 import usage               # noqa: E402
@@ -94,10 +95,10 @@ def load_state(screen: str = 'Dashboard') -> dict:
         state['errors'].append(f"usage: {e}")
 
     try:
-        state['rotowire'] = rotowire.status()
+        state['rotowire'] = injuries.status()
     except Exception as e:
         state['rotowire'] = {}
-        state['errors'].append(f"rotowire: {e}")
+        state['errors'].append(f"injury feed: {e}")
 
     state['service'] = ui.service_status()
     state['env'] = ENV_REPORT
@@ -983,20 +984,57 @@ def main(argv: list[str]) -> int:
         print(examples.as_text(examples.build(account)))
         return 0
 
-    if cmd == 'rotowire':
-        if '--run' in args:
-            print("Triggering a Bright Data collection now. This can take several "
-                  "minutes...\n")
-            result = rotowire.run_and_record(
-                poll_seconds=int(os.getenv('ROTOWIRE_POLL_SECONDS', '720')),
-                dry_run='--dry-run' in args,
-                log=lambda m: print(f"  {m}"),
-            )
-            print()
-            print(_plain(ui.render_scrape_result(result)))
+    if cmd in ('injuries', 'rotowire'):
+        force = '--force' in args
+
+        if '--team' in args:
+            idx = args.index('--team')
+            name = ' '.join(a for a in args[idx + 1:] if not a.startswith('--'))
+            if not name:
+                print('usage: admin_tui.py injuries --team "Georgia Bulldogs"',
+                      file=sys.stderr)
+                return 2
+            print(f"Collecting current injuries for {name}...\n")
+            result = injuries.refresh_team(name.split()[0], name)
+            print(_plain(ui.render_collect_result([result])))
             return 0 if result['ok'] else 1
-        report = rotowire.diagnose()
-        print(_plain(ui.render_rotowire(report)))
+
+        if '--sweep' in args:
+            try:
+                teams = injuries.fbs_teams()
+            except Exception as e:
+                print(f"Could not load the FBS team list from CFBD: {e}", file=sys.stderr)
+                return 1
+            per_call = config.SEARCH_COST_PER_CALL
+            print(f"About to collect injuries for {len(teams)} FBS teams.")
+            print(f"Roughly ${len(teams) * per_call:.2f} in web-search cost, plus model "
+                  f"tokens.")
+            if not force:
+                print(f"Teams refreshed within {config.INJURY_FEED_TTL_HOURS}h are "
+                      f"skipped; pass --force to collect them anyway.")
+            if '--yes' not in args:
+                try:
+                    if input("Type 'yes' to continue: ").strip().lower() != 'yes':
+                        print("Cancelled.")
+                        return 0
+                except EOFError:
+                    print("Not a terminal — pass --yes to run non-interactively.",
+                          file=sys.stderr)
+                    return 2
+
+            def tick(result, done, total):
+                mark = 'skip' if result.get('skipped') else ('ok  ' if result['ok'] else 'FAIL')
+                print(f"  [{done:>3}/{total}] {mark} {result['team'][:40]:<42} "
+                      f"{result.get('items', 0)} items"
+                      f"{'  ' + str(result['error'])[:50] if result.get('error') else ''}")
+
+            results = injuries.sweep(teams, force=force, progress=tick)
+            print()
+            print(_plain(ui.render_collect_result(results)))
+            return 0 if all(r['ok'] for r in results) else 1
+
+        report = injuries.diagnose()
+        print(_plain(ui.render_feed(report)))
         stale = (report['status'] or {}).get('days_stale')
         return 0 if stale is not None and stale <= config.ROTOWIRE_STALE_DAYS else 1
 

@@ -5,8 +5,6 @@ import time
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
 from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
 
@@ -15,8 +13,8 @@ import cfbd
 import config
 import db
 import jobs
+import injuries
 import pipeline
-import rotowire
 
 # ---------------------------
 # App & CORS
@@ -114,42 +112,18 @@ def handle_any_error(e):
 
 
 # ---------------------------
-# Scheduler: Rotowire scrape via Bright Data
+# Injury feed
 # ---------------------------
-sched = BackgroundScheduler(timezone=config.SCHEDULER_TIMEZONE)
-
-
-def scheduled_rotowire_job():
-    """Run the Bright Data collection and record the outcome.
-
-    The body used to live here and swallowed every failure into a log line. It now
-    lives in rotowire.py, returns a structured result, and writes that result to the
-    rotowire_runs table — so 'why is the feed stale' is answerable after the fact
-    instead of needing someone to have been reading the journal at the time.
-    """
-    result = rotowire.run_and_record()
-    if not result['ok']:
-        logging.error(
-            f"Rotowire scrape failed at '{result['stage']}': {result['error']} "
-            f"({result.get('detail') or 'no detail'})"
-        )
-
-
-# A bare CronTrigger takes the SYSTEM timezone, not the scheduler's — on the droplet
-# that is UTC, so these were firing at 05:00/14:00 ET, not the 09:00/18:00 the docs
-# claim. The timezone has to be given to the trigger itself.
-for _hour in rotowire.SCRAPE_HOURS:
-    sched.add_job(
-        scheduled_rotowire_job,
-        CronTrigger(hour=_hour, minute=0, timezone=config.SCHEDULER_TIMEZONE),
-        id=f"rotowire-{_hour:02d}",
-        replace_existing=True,
-        misfire_grace_time=3600,
-        coalesce=True,
-        max_instances=1,
-    )
-
-sched.start()
+# There is no scheduled job any more. The Bright Data scrape it used to run is gone —
+# Rotowire blocks automated clients, which is the only reason that proxy was ever in the
+# stack. The feed is now collected on demand: every report already makes a per-team
+# injury research call, and injuries.record_findings() persists what it found, so the
+# table fills as a side effect of normal use. A team nobody has reported on recently is
+# refreshed by injuries.ensure_fresh() when a report asks for it and the cached rows are
+# older than INJURY_FEED_TTL_HOURS.
+#
+# A deliberate sweep of every FBS team is still available, but only as an explicit act:
+#     admin_tui.py injuries --sweep
 
 
 # ---------------------------
@@ -377,7 +351,7 @@ def health():
     # A row count alone called this healthy while the newest row aged past a year.
     # Freshness is the only thing that distinguishes a working feed from a dead one.
     try:
-        st = rotowire.status()
+        st = injuries.status()
         stale = st["days_stale"]
         fresh = stale is not None and stale <= config.ROTOWIRE_STALE_DAYS
         check = {
@@ -395,12 +369,11 @@ def health():
             check["error"] = (
                 f"The newest Rotowire row is {stale if stale is not None else 'un-dated'} "
                 f"days old; the scrape runs twice a day. Run "
-                f"'admin_tui.py rotowire' on the droplet for the cause."
+                f"'admin_tui.py injuries' on the droplet for the cause."
             )
-        runs = rotowire.recent_runs(1)
-        if runs:
-            check["last_run"] = {k: runs[0][k] for k in
-                                 ("started_at", "ok", "stage", "inserted", "error")}
+        cov = injuries.coverage(0)
+        check["teams_collected"] = cov.get("teams", 0)
+        check["teams_fresh"] = cov.get("fresh", 0)
         out["checks"]["rotowire_db"] = check
     except Exception as e:
         out["checks"]["rotowire_db"] = {"ok": False, "error": str(e)[:300]}

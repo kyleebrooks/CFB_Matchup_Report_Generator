@@ -183,20 +183,36 @@ def fetch_rotowire_for_team(short_name: str, full_name: str, days: int | None = 
     """
     days = days or config.ROTOWIRE_WINDOW_DAYS
     dates = [format_friendly_date(datetime.now() - timedelta(days=i)) for i in range(days)]
+    cutoff = (datetime.now() - timedelta(days=days)).date().isoformat()
 
     conn = get_rotowire_db_connection()
     items: list[dict] = []
     try:
         cur = conn.cursor()
+        # Rows written by the collector carry an ISO news_date and are selected by range.
+        # Legacy rows have none, so they keep the original exact-string match — which is
+        # why a change in the old scraper's date format could empty the feed silently.
+        has_news_date = any(r[1] == "news_date"
+                            for r in cur.execute("PRAGMA table_info(rotowire)"))
         placeholders = ",".join(["?"] * len(dates))
-        cur.execute(
-            "SELECT player_name, headline, team_name, date_text, news_text, position, analysis_text "
-            f"FROM rotowire WHERE date_text IN ({placeholders})",
-            dates,
-        )
+        columns = ("player_name, headline, team_name, date_text, news_text, position, "
+                   "analysis_text")
+        if has_news_date:
+            cur.execute(
+                f"SELECT {columns}, source_name, source_url, status FROM rotowire "
+                f"WHERE (news_date IS NOT NULL AND news_date >= ?) "
+                f"   OR (news_date IS NULL AND date_text IN ({placeholders}))",
+                [cutoff] + dates,
+            )
+        else:
+            cur.execute(
+                f"SELECT {columns} FROM rotowire WHERE date_text IN ({placeholders})",
+                dates,
+            )
         for row in cur.fetchall() or []:
             if not team_matches(row["team_name"], short_name, full_name):
                 continue
+            keys = row.keys()
             items.append({
                 "team": row["team_name"],
                 "player": row["player_name"],
@@ -205,8 +221,11 @@ def fetch_rotowire_for_team(short_name: str, full_name: str, days: int | None = 
                 "headline": row["headline"],
                 "news": row["news_text"],
                 "analysis": row["analysis_text"],
-                "source_name": "Rotowire",
-                "source_url": "https://www.rotowire.com/cfb/news.php",
+                "status": row["status"] if "status" in keys else "",
+                "source_name": (row["source_name"] if "source_name" in keys else "")
+                               or "College football injury feed",
+                "source_url": (row["source_url"] if "source_url" in keys else "")
+                              or "https://www.rotowire.com/cfootball/news.php",
             })
         cur.close()
     finally:
