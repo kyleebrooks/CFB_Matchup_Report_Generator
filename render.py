@@ -301,11 +301,36 @@ def prepare_watermark(image_path: str):
         # The image really is transparent somewhere; respect it and layer darkness on top.
         darkness = Image.composite(darkness, Image.new('L', src.size, 0), existing)
 
+    # A source that has already been faded to near-white has almost no darkness left,
+    # so the derived alpha is ~0 and the stamp comes out invisible. Say so: the symptom
+    # is a report with no watermark and nothing anywhere explaining why.
+    peak = darkness.getextrema()[1]
+    if peak < 40:
+        logging.warning(
+            f"Watermark {os.path.basename(image_path)} is almost entirely light "
+            f"(peak ink {peak}/255). It will stamp close to invisible. Supply the "
+            f"full-contrast version of the artwork and let watermark_opacity do the "
+            f"fading."
+        )
+
     out = Image.merge('RGBA', (*src.convert('RGB').split(), darkness))
     buf = io.BytesIO()
     out.save(buf, format='PNG', optimize=True)
     buf.seek(0)
     return buf
+
+
+def watermark_ink(image_path: str) -> dict:
+    """How much usable ink a candidate watermark has. For the preview command."""
+    from PIL import Image
+    with Image.open(image_path) as raw:
+        grey = raw.convert('RGBA').convert('L')
+    lo, hi = grey.getextrema()
+    px = list(grey.getdata())
+    inked = sum(1 for v in px if v < 200)
+    return {'peak_ink': 255 - lo, 'lightest': hi,
+            'inked_pct': inked / len(px) * 100,
+            'usable': (255 - lo) >= 40}
 
 
 def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.09, scale: float = 0.92) -> None:
