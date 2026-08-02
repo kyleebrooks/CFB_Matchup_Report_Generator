@@ -479,6 +479,8 @@ def generate(
         meta_lines=meta_lines,
         title=f"{team_full} Season Report",
         banner="College Football Team Report",
+        include_sources=bool(settings.get("include_sources", 1)),
+        include_generation_details=bool(settings.get("include_generation_details", 1)),
     )
 
     try:

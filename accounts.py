@@ -348,6 +348,11 @@ _INT_BOUNDS = {
     'research_max_tokens': (1000, 200000),
     'report_max_tokens': (2000, 400000),
 }
+# Stored as 1/0 rather than True/False: settings survive a round trip through JSON
+# (per-account) and a text column (service-wide), and "0" must never come back truthy.
+_BOOLS = ('include_sources', 'include_generation_details')
+_TRUE_WORDS = ('1', 'true', 'yes', 'on')
+_FALSE_WORDS = ('0', 'false', 'no', 'off')
 
 
 def validate_settings(settings: dict) -> dict:
@@ -389,6 +394,15 @@ def validate_settings(settings: dict) -> dict:
             if effort not in _EFFORTS:
                 raise AccountError(f"'{key}' must be one of: {', '.join(_EFFORTS)}")
             clean[key] = effort
+
+        elif key in _BOOLS:
+            word = str(value).strip().lower()
+            if word in _TRUE_WORDS:
+                clean[key] = 1
+            elif word in _FALSE_WORDS:
+                clean[key] = 0
+            else:
+                raise AccountError(f"'{key}' must be on or off (got '{value}')")
 
         elif key in _FLOAT_BOUNDS:
             try:

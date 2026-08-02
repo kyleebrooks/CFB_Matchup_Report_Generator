@@ -262,6 +262,8 @@ def generate(
         charts=chart_set,
         registry=registry,
         meta_lines=meta_lines,
+        include_sources=bool(settings.get("include_sources", 1)),
+        include_generation_details=bool(settings.get("include_generation_details", 1)),
     )
 
     try:
