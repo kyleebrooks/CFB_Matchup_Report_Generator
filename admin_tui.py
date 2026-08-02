@@ -1200,6 +1200,21 @@ def main(argv: list[str]) -> int:
         print(f"Account : {account['account_name'] if account else 'service default'}")
         print(f"Image   : {image}")
         print(f"Opacity : {opacity}   Scale: {scale}")
+
+        try:
+            ink = render.watermark_ink(image)
+        except Exception as e:
+            print(f"Could not read the image: {e}", file=sys.stderr)
+            return 1
+        print(f"Ink     : peak {ink['peak_ink']}/255, {ink['inked_pct']:.1f}% of the "
+              f"image is ink")
+        if not ink['usable']:
+            print()
+            print("  WARNING: this image is almost entirely light. The renderer builds")
+            print("  the stamp from how DARK the artwork is, so a pre-faded image has")
+            print("  nothing to work with and will print close to invisible.")
+            print("  Upload the full-contrast version and let --opacity do the fading.")
+            print()
         try:
             render.watermark_preview(image, out, opacity=opacity, scale=scale)
         except Exception as e:
