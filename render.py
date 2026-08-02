@@ -277,16 +277,28 @@ def build_html(
     meta_lines: list[str],
     title: str | None = None,
     banner: str = "AFPLNA College Football Matchup Report",
+    include_sources: bool = True,
+    include_generation_details: bool = True,
 ) -> str:
     """Assemble the printable HTML.
 
     Single-team reports pass an empty away_full/away_logo; the header then centres on
     one crest instead of rendering an "X vs (blank)" line and an empty <img>.
     """
-    body = link_citations(markdown_to_html(strip_model_sources(report_markdown)))
+    # With sources off, [n] markers would point at a list that is not there — strip
+    # them entirely rather than leaving dead superscripts in the text.
+    prose = strip_model_sources(report_markdown)
+    if not include_sources:
+        prose = _CITE_RE.sub("", prose)
+        prose = re.sub(r"[ \t]+([.,;:!?])", r"\1", prose)   # no space left before punctuation
+    body = markdown_to_html(prose)
+    if include_sources:
+        body = link_citations(body)
     body = inject_charts(body, charts)
     body, sections = number_sections(body)
     meta_html = "".join(f"<p>{line}</p>" for line in meta_lines)
+    meta_block = (f'<div class="meta"><p class="meta-head">Generation details</p>'
+                  f'{meta_html}</div>') if include_generation_details else ''
 
     subject = f"{home_full} vs {away_full} ({year})" if away_full else f"{home_full} ({year})"
     doc_title = title or (f"{home_full} vs {away_full}" if away_full else home_full)
@@ -327,8 +339,8 @@ def build_html(
     {toc_block(sections)}
   </div>
   <div class="content">{body}</div>
-  {sources_block(registry)}
-  <div class="meta"><p class="meta-head">Generation details</p>{meta_html}</div>
+  {sources_block(registry) if include_sources else ''}
+  {meta_block}
 </body>
 </html>
 """

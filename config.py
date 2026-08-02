@@ -122,6 +122,13 @@ WATERMARK_OPACITY = float(os.getenv('WATERMARK_OPACITY', '0.09'))
 # Fraction of the page the mark spans, longest edge.
 WATERMARK_SCALE = float(os.getenv('WATERMARK_SCALE', '0.92'))
 
+# Whether the closing document furniture is included in the PDF: the numbered source
+# list, and the "Generation details" panel (models, token counts, timings). On by
+# default; a white-label account can turn either off.
+INCLUDE_SOURCES = os.getenv('INCLUDE_SOURCES', '1').lower() not in ('0', 'false', 'no')
+INCLUDE_GENERATION_DETAILS = os.getenv(
+    'INCLUDE_GENERATION_DETAILS', '1').lower() not in ('0', 'false', 'no')
+
 # Settings an account is allowed to override. Anything else in a PATCH is rejected
 # rather than silently ignored.
 ACCOUNT_SETTING_KEYS = (
@@ -135,6 +142,8 @@ ACCOUNT_SETTING_KEYS = (
     'report_max_tokens',
     'watermark_opacity',
     'watermark_scale',
+    'include_sources',
+    'include_generation_details',
 )
 
 # Optional guard rail: comma-separated allowlist of model ids accounts may select.
@@ -156,6 +165,8 @@ def default_settings() -> dict:
         'report_max_tokens': REPORT_MAX_TOKENS,
         'watermark_opacity': WATERMARK_OPACITY,
         'watermark_scale': WATERMARK_SCALE,
+        'include_sources': 1 if INCLUDE_SOURCES else 0,
+        'include_generation_details': 1 if INCLUDE_GENERATION_DETAILS else 0,
     }
 
 

@@ -40,7 +40,10 @@ def _coerce(key: str, raw: str):
     """Settings are stored as text; integers come back as integers."""
     if raw is None:
         return None
-    if key in ('search_max_results', 'research_max_tokens', 'report_max_tokens'):
+    if key in ('search_max_results', 'research_max_tokens', 'report_max_tokens',
+               # The toggles live in a text column; the string "0" is truthy, so they
+               # must come back as integers or "off" would silently mean "on".
+               'include_sources', 'include_generation_details'):
         try:
             return int(raw)
         except (TypeError, ValueError):
