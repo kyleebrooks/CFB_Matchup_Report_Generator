@@ -211,8 +211,10 @@ def _assemble(raw: dict, rotowire: list, registry, ctx: dict, settings: dict) ->
                               "rotowire_feed": {
                                   "source": ("Stored injury feed — items collected for this "
                                              "team and kept in the local database"),
-                                  "window_days": config.ROTOWIRE_WINDOW_DAYS,
+                                  "window_days": config.INJURY_WINDOW_DAYS,
                                   "no_data": not rotowire,
+                                  "current_availability":
+                                      injuries.resolve_availability(rotowire),
                                   "items": rotowire,
                               },
                           }},
@@ -392,8 +394,11 @@ def generate(
 
     # Persist what the report's own injury call already found, then read the feed back
     # — refreshing only if no lookup for this team has run inside the TTL.
+    injury_bucket = raw.get("injuries") or {}
     injuries.record_findings(team_short, team_full,
-                             (raw.get("injuries") or {}).get("findings") or [])
+                             injury_bucket.get("findings") or [],
+                             succeeded=not injury_bucket.get("error"),
+                             error=injury_bucket.get("error") or "")
     try:
         rotowire = injuries.ensure_fresh(team_short, team_full, settings)
     except Exception as e:

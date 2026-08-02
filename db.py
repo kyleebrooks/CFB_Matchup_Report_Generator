@@ -192,14 +192,17 @@ def fetch_rotowire_for_team(short_name: str, full_name: str, days: int | None = 
         # Rows written by the collector carry an ISO news_date and are selected by range.
         # Legacy rows have none, so they keep the original exact-string match — which is
         # why a change in the old scraper's date format could empty the feed silently.
-        has_news_date = any(r[1] == "news_date"
-                            for r in cur.execute("PRAGMA table_info(rotowire)"))
+        table_columns = {r[1] for r in cur.execute("PRAGMA table_info(rotowire)")}
+        has_news_date = "news_date" in table_columns
         placeholders = ",".join(["?"] * len(dates))
         columns = ("player_name, headline, team_name, date_text, news_text, position, "
                    "analysis_text")
         if has_news_date:
+            # Newer collector columns ride along when the database has them.
+            extras = [c for c in ("source_name", "source_url", "status", "news_date",
+                                  "provider", "confidence") if c in table_columns]
             cur.execute(
-                f"SELECT {columns}, source_name, source_url, status FROM rotowire "
+                f"SELECT {columns}{''.join(', ' + c for c in extras)} FROM rotowire "
                 f"WHERE (news_date IS NOT NULL AND news_date >= ?) "
                 f"   OR (news_date IS NULL AND date_text IN ({placeholders}))",
                 [cutoff] + dates,
@@ -222,6 +225,9 @@ def fetch_rotowire_for_team(short_name: str, full_name: str, days: int | None = 
                 "news": row["news_text"],
                 "analysis": row["analysis_text"],
                 "status": row["status"] if "status" in keys else "",
+                "news_date": row["news_date"] if "news_date" in keys else "",
+                "provider": (row["provider"] if "provider" in keys else "") or "",
+                "confidence": (row["confidence"] if "confidence" in keys else "") or "",
                 "source_name": (row["source_name"] if "source_name" in keys else "")
                                or "College football injury feed",
                 "source_url": (row["source_url"] if "source_url" in keys else "")
