@@ -82,6 +82,14 @@ os.makedirs(config.WATERMARKS_DIR, exist_ok=True)
 # legacy AFPLNA endpoints below keep their exact URLs, auth and behaviour.
 app.register_blueprint(api_v1.bp)
 
+# Per-account recurring report schedules. The runner claims due schedules through the
+# database, so running it in every worker is safe. SCHEDULES_ENABLED=0 turns it off;
+# SKIP_SCHEDULER=1 is what the admin console sets for its in-process health probe.
+if (os.environ.get("SCHEDULES_ENABLED", "1") not in ("0", "false", "no")
+        and os.environ.get("SKIP_SCHEDULER") != "1"):
+    import schedules
+    schedules.start()
+
 
 # ---------------------------
 # Helpers

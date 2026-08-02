@@ -67,13 +67,22 @@ def _describe(path: str, name: str) -> dict:
         size, modified = stat.st_size, datetime.fromtimestamp(stat.st_mtime)
     except OSError:
         size, modified = 0, None
-    # Filenames are "{home}_{away}_{Month D, YYYY}.pdf", "team_{team}_..." or
-    # "recap_{home}_{away}_...".
+    # Filenames are "{home}_{away}_{Month D, YYYY}.pdf" for matchups, or a
+    # type prefix followed by the subject: "team_...", "recap_...", "slate_...",
+    # "wrap_...", "predaudit_...", "predreview_...".
     stem = name[:-4] if name.lower().endswith('.pdf') else name
-    if stem.startswith('team_'):
-        report_type, subject = 'team', stem[5:]
-    elif stem.startswith('recap_'):
-        report_type, subject = 'full_game_recap', stem[6:]
+    prefixes = (
+        ('team_', 'team'),
+        ('recap_', 'full_game_recap'),
+        ('slate_', 'weekly_preview'),
+        ('wrap_', 'weekly_wrap'),
+        ('predaudit_', 'prediction_audit'),
+        ('predreview_', 'prediction_review'),
+    )
+    for prefix, rtype in prefixes:
+        if stem.startswith(prefix):
+            report_type, subject = rtype, stem[len(prefix):]
+            break
     else:
         report_type, subject = 'matchup', stem
     subject = re.sub(r'_[A-Z][a-z]+ \d{1,2}, \d{4}$', '', subject).replace('_', ' ')

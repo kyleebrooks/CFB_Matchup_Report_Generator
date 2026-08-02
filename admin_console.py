@@ -32,7 +32,9 @@ def rule(width: int = 78, char: str = '-') -> tuple:
 # action nobody can see is an action that does not exist.
 KEY_BAR = {
     'Dashboard': '[2] accounts  [3] settings  [4] database  [5] health  [6] browser  '
-                 '[7] catalog  [8] examples  [9] report files',
+                 '[7] catalog  [8] examples  [9] report files  [0] schedules',
+    'Schedules': '[n]ew  [t] on/off  [e]dit  [D]elete   up/down select   '
+                 'weekly, per account, times in UTC',
     'Accounts':  '[n]ew  [e]dit types  [s]ettings  [k]ey  [t]oggle  [m]admin  [w]mark  '
                  '[D]elete  ENTER detail (settings live there, one per row)',
     'Settings':  'ENTER change the value   [x] clear the override (back to the env default)',
@@ -284,6 +286,54 @@ def render_account_detail(account: dict, settings_rows: list[dict],
                              f"{h['seconds'] or '-'}", style))
             if h['state'] == 'error' and h.get('error'):
                 out.append(_line(f"      {str(h['error'])[:70]}", ERR))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Recurring schedules
+# ---------------------------------------------------------------------------
+DAY_NAMES = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
+
+
+def render_schedules(state: dict) -> list[tuple]:
+    rows = state.get('schedules')
+    selected = state.get('selected', 0)
+    names = {a['id']: a['account_name'] for a in (state.get('accounts') or [])}
+
+    out = [
+        _line('RECURRING REPORT SCHEDULES', TITLE),
+        rule(),
+        _line('  Weekly, per account, optional. The runner fires them on the hour '
+              '(UTC) and submits ordinary jobs — same entitlements, settings and '
+              'watermark as a manual API call.', DIM),
+        _line('  [n] new   [t] on/off   [e] edit   [D] delete', WARN),
+        _line(),
+    ]
+    if rows is None:
+        out.append(_line('  Could not load schedules (database unreachable).', ERR))
+        return out
+    if not rows:
+        out.append(_line('  No schedules yet — press [n] to create one.', DIM))
+        return out
+
+    out.append(_line(f"  {'ID':<4} {'ACCOUNT':<18} {'REPORT':<17} {'SCOPE':<16} "
+                     f"{'WHEN (UTC)':<11} {'MAX':>3}  ON", HEADER))
+    for i, s in enumerate(rows):
+        name = (names.get(s['account_id']) or f"#{s['account_id']}")[:17]
+        when = f"{DAY_NAMES[int(s['day_of_week']) % 7]} {int(s['hour_utc']):02d}:00"
+        on = 'ON ' if s['enabled'] else 'off'
+        text = (f"  {s['id']:<4} {name:<18} {s['report_type'][:16]:<17} "
+                f"{(s['scope'] or '-')[:15]:<16} {when:<11} {s['max_reports']:>3}  {on}")
+        out.append(_line(text, SEL if i == selected else
+                         (NORMAL if s['enabled'] else DIM)))
+        if i == selected and (s.get('last_run_at') or s.get('last_result')):
+            out.append(_line(f"       last run {s.get('last_run_at') or 'never'} — "
+                             f"{s.get('last_result') or ''}"[:76], DIM))
+    out.append(_line())
+    out.append(_line("  Scopes for matchup/recap schedules: top25, all, team:<school>, "
+                     "conference:<name>.", DIM))
+    out.append(_line("  Single-report types (weekly preview/wrap, prediction reports) "
+                     "ignore scope.", DIM))
     return out
 
 
@@ -795,7 +845,7 @@ HELP = [
     rule(),
     _line(),
     _line('  GLOBAL KEYS', HEADER),
-    _line('    1..9     switch screen        q      quit'),
+    _line('    1..9, 0  switch screen        q      quit'),
     _line('    r        refresh this screen  ?      this help'),
     _line('    ESC      back / close'),
     _line(),
@@ -831,6 +881,13 @@ HELP = [
     _line('    ENTER    open an account folder    ESC  back to the folder list'),
     _line('    x        delete the selected report (confirms first)'),
     _line('    C        clear a whole folder (type the account name to confirm)'),
+    _line(),
+    _line('  SCHEDULES SCREEN (0) — recurring reports, per account', HEADER),
+    _line('    n        new schedule (account, type, scope, day, hour, cap)'),
+    _line('    t        turn the selected schedule on or off'),
+    _line('    e        edit scope / day / hour / cap    D  delete'),
+    _line('    Weekly, at the chosen UTC hour. Scopes: top25, all, team:<school>,'),
+    _line('    conference:<name>. Jobs run exactly like manual API calls.'),
     _line(),
     _line('  NOTES', HEADER),
     _line('    API keys are stored as hashes. A new key is shown ONCE, at creation'),

@@ -1051,3 +1051,247 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict) -> list[di
         out.append({"key": key, "title": title, "caption": caption,
                     "img": img, "available": available})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Weekly publication charts
+# ---------------------------------------------------------------------------
+WEEKLY_CHART_SPECS = {
+    'preview': [
+        ("week_edges", "Model vs Market",
+         "Every game with both a model margin and a market line. Distance from the "
+         "diagonal is disagreement; the games farthest off it are the week's "
+         "arguments."),
+        ("week_mismatches", "Biggest Projected Mismatches",
+         "The week's largest model margins — the games the numbers say should not be "
+         "close."),
+    ],
+    'wrap': [
+        ("week_movers", "Elo Movers",
+         "The teams whose rating moved most on the week's results."),
+        ("week_excitement", "The Best Games",
+         "The week's finals ranked by excitement index."),
+    ],
+}
+
+
+def chart_week_edges(games):
+    pts = [(g['model_margin_home'], g['market_margin_home'],
+            f"{g['away']} @ {g['home']}")
+           for g in games
+           if g.get('model_margin_home') is not None
+           and g.get('market_margin_home') is not None]
+    if len(pts) < 3:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.8))
+    xs = [p[1] for p in pts]
+    ys = [p[0] for p in pts]
+    lo = min(min(xs), min(ys)) - 3
+    hi = max(max(xs), max(ys)) + 3
+    ax.plot([lo, hi], [lo, hi], color=config.CHART_MUTED, linewidth=1,
+            linestyle='--', zorder=2)
+    ax.scatter(xs, ys, s=42, color=config.CHART_FALLBACK_HOME, zorder=3, alpha=0.85)
+    ranked = sorted(pts, key=lambda p: -abs(p[0] - p[1]))[:6]
+    for model, market, label in ranked:
+        ax.annotate(label, (market, model), fontsize=7,
+                    color=config.CHART_TEXT, xytext=(4, 4),
+                    textcoords='offset points')
+    _grid(ax, axis='both')
+    ax.set_xlabel('market line (home margin)')
+    ax.set_ylabel('model margin (home)')
+    fig.suptitle('Model vs Market', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_week_mismatches(games):
+    rows = sorted((g for g in games if g.get('model_margin_home') is not None),
+                  key=lambda g: -abs(g['model_margin_home']))[:12][::-1]
+    if len(rows) < 3:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.8))
+    labels = [f"{g['away']} @ {g['home']}" for g in rows]
+    values = [abs(g['model_margin_home']) for g in rows]
+    bars = ax.barh(labels, values, color=config.CHART_FALLBACK_HOME, zorder=3)
+    ax.bar_label(bars, fmt='%.1f', padding=2, fontsize=7.5, color=config.CHART_TEXT)
+    _grid(ax, axis='x')
+    ax.set_xlabel('projected margin (absolute points)')
+    fig.suptitle('Biggest Projected Mismatches', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_week_movers(finals):
+    moves = []
+    for g in finals or []:
+        for side, pre, post in (('home', 'home_pregame_elo', 'home_postgame_elo'),
+                                ('away', 'away_pregame_elo', 'away_postgame_elo')):
+            if g.get(pre) is not None and g.get(post) is not None:
+                moves.append((g[side], float(g[post]) - float(g[pre])))
+    if len(moves) < 4:
+        return None
+    moves.sort(key=lambda m: m[1])
+    picked = moves[:6] + moves[-6:]
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.8))
+    labels = [m[0] for m in picked]
+    values = [m[1] for m in picked]
+    colors = [config.CHART_FALLBACK_AWAY if v < 0 else config.CHART_FALLBACK_HOME
+              for v in values]
+    bars = ax.barh(labels, values, color=colors, zorder=3)
+    ax.bar_label(bars, fmt='%+.0f', padding=2, fontsize=7.5, color=config.CHART_TEXT)
+    ax.axvline(0, color=config.CHART_MUTED, linewidth=0.8)
+    _grid(ax, axis='x')
+    ax.set_xlabel('Elo change this week')
+    fig.suptitle('Elo Movers', fontsize=13, fontweight='bold', color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_week_excitement(finals):
+    rows = sorted((g for g in finals or [] if g.get('excitement_index') is not None),
+                  key=lambda g: -float(g['excitement_index']))[:10][::-1]
+    if len(rows) < 3:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.8))
+    labels = [f"{g['away']} {g['away_points']} @ {g['home']} {g['home_points']}"
+              for g in rows]
+    values = [float(g['excitement_index']) for g in rows]
+    bars = ax.barh(labels, values, color=config.CHART_FALLBACK_HOME, zorder=3)
+    ax.bar_label(bars, fmt='%.1f', padding=2, fontsize=7.5, color=config.CHART_TEXT)
+    _grid(ax, axis='x')
+    ax.set_xlabel('excitement index')
+    fig.suptitle('The Best Games', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_weekly_charts(kind: str, data: dict, extras: dict) -> list[dict]:
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt")
+    _apply_style()
+    builders = {
+        'week_edges': lambda: chart_week_edges(data['games']),
+        'week_mismatches': lambda: chart_week_mismatches(data['games']),
+        'week_movers': lambda: chart_week_movers(extras.get('finals_detail')),
+        'week_excitement': lambda: chart_week_excitement(extras.get('finals_detail')),
+    }
+    out = []
+    for key, title, caption in WEEKLY_CHART_SPECS[kind]:
+        img, available = None, True
+        try:
+            img = builders[key]()
+        except Exception as e:
+            logging.warning(f"Weekly chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "No data available from CollegeFootballData for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Prediction performance charts
+# ---------------------------------------------------------------------------
+def chart_days_out(curve):
+    rows = [c for c in curve or [] if c.get('mean_abs_error') is not None]
+    if len(rows) < 2:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    labels = [c['days_before_game'] for c in rows]
+    values = [c['mean_abs_error'] for c in rows]
+    ax.plot(labels, values, marker='o', color=config.CHART_FALLBACK_HOME,
+            linewidth=2.2, zorder=3)
+    for x, y in zip(labels, values):
+        ax.annotate(f"{y:.1f}", (x, y), fontsize=8, color=config.CHART_TEXT,
+                    xytext=(0, 7), textcoords='offset points', ha='center')
+    _grid(ax)
+    ax.set_xlabel('days before kickoff the prediction was made')
+    ax.set_ylabel('mean absolute margin error (points)')
+    fig.suptitle('Do Predictions Improve as Game Day Nears?', fontsize=13,
+                 fontweight='bold', color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_model_errors(by_model):
+    rows = [(m, s['mean_abs_error']) for m, s in (by_model or {}).items()
+            if s.get('mean_abs_error') is not None and s.get('graded', 0) >= 3]
+    if len(rows) < 2:
+        return None
+    rows.sort(key=lambda r: r[1], reverse=True)
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    bars = ax.barh([r[0] for r in rows], [r[1] for r in rows],
+                   color=config.CHART_FALLBACK_HOME, zorder=3)
+    ax.bar_label(bars, fmt='%.1f', padding=2, fontsize=8, color=config.CHART_TEXT)
+    _grid(ax, axis='x')
+    ax.set_xlabel('mean absolute margin error (points) — lower is better')
+    fig.suptitle('Report Model Comparison', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_pred_vs_actual(rows):
+    pts = [(float(r['consensus_margin']), int(r['actual_margin'])) for r in rows or []
+           if r.get('consensus_margin') is not None and r.get('actual_margin') is not None]
+    if len(pts) < 4:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H + 0.6))
+    lo = min(min(p[0] for p in pts), min(p[1] for p in pts)) - 4
+    hi = max(max(p[0] for p in pts), max(p[1] for p in pts)) + 4
+    ax.plot([lo, hi], [lo, hi], color=config.CHART_MUTED, linewidth=1,
+            linestyle='--', zorder=2)
+    ax.scatter([p[0] for p in pts], [p[1] for p in pts], s=40,
+               color=config.CHART_FALLBACK_HOME, alpha=0.8, zorder=3)
+    _grid(ax, axis='both')
+    ax.set_xlabel('predicted margin (home perspective)')
+    ax.set_ylabel('actual margin')
+    fig.suptitle('Predicted vs Actual Margins', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_prediction_charts(kind: str, *, curve, by_model, graded_rows) -> list[dict]:
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt")
+    _apply_style()
+    specs = [
+        ("pred_scatter", "Predicted vs Actual Margins",
+         "Every graded prediction against how the game actually finished. The tighter "
+         "the cloud hugs the diagonal, the better the projections.",
+         lambda: chart_pred_vs_actual(graded_rows)),
+        ("pred_days_out", "Do Predictions Improve as Game Day Nears?",
+         "Mean absolute margin error, bucketed by how many days before kickoff the "
+         "prediction was made.",
+         lambda: chart_days_out(curve)),
+    ]
+    if kind == 'audit':
+        specs.append(
+            ("pred_models", "Report Model Comparison",
+             "Mean absolute margin error by the model that wrote each report — the "
+             "measurable answer to which model earns its cost.",
+             lambda: chart_model_errors(by_model)))
+    out = []
+    for key, title, caption, build in specs:
+        img, available = None, True
+        try:
+            img = build()
+        except Exception as e:
+            logging.warning(f"Prediction chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "Not enough graded predictions yet for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out
