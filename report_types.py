@@ -5,6 +5,7 @@ API surface, per-account entitlements, job handling and PDF delivery all key off
 table, so nothing else needs to change.
 """
 
+import game_recap
 import pipeline
 import team_report
 
@@ -87,6 +88,31 @@ def _run_team(params: dict, progress) -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# full_game_recap — a finished game, from the game record alone
+# ---------------------------------------------------------------------------
+def _validate_recap(params: dict) -> dict:
+    _require(params, 'game_id')
+    try:
+        game_id = int(str(params['game_id']).strip())
+    except (TypeError, ValueError):
+        raise ValidationError("'game_id' must be a CollegeFootballData game id "
+                              "(an integer — GET /v1/games lists them)")
+    if game_id <= 0:
+        raise ValidationError("'game_id' must be a positive integer")
+    return {'game_id': game_id}
+
+
+def _run_recap(params: dict, progress) -> dict:
+    return game_recap.generate(
+        game_id=params['game_id'],
+        settings=params.get('settings'),
+        watermark=params.get('watermark'),
+        report_dir=params.get('report_dir'),
+        progress=progress,
+    )
+
+
 REPORT_TYPES: dict[str, dict] = {
     'matchup': {
         'name': 'matchup',
@@ -116,6 +142,22 @@ REPORT_TYPES: dict[str, dict] = {
         'run': _run_team,
         'subject': lambda p: p['team_short'],
         'dedup_key': lambda p: f"team:{p['team_short']}",
+    },
+    'full_game_recap': {
+        'name': 'full_game_recap',
+        'title': 'Full Game Recap',
+        'description': (
+            'Post-game breakdown of one finished game, built entirely from the game '
+            'record: how it unfolded, the drives that decided it, what went right and '
+            'wrong for each team, the adjustments made and missed, and what could have '
+            'been done differently — with four charts from the play-by-play.'
+        ),
+        'required': ['game_id'],
+        'optional': [],
+        'validate': _validate_recap,
+        'run': _run_recap,
+        'subject': lambda p: f"game {p['game_id']}",
+        'dedup_key': lambda p: f"recap:{p['game_id']}",
     },
     # Planned, not yet implemented. Listed so entitlements can be granted ahead of the
     # build and clients can discover what is coming.

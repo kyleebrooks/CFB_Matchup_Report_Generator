@@ -838,3 +838,216 @@ def build_team_charts(stats, percentiles, team_meta, team_label, games) -> list[
         out.append({"key": key, "title": title, "caption": caption,
                     "img": img, "available": available})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Game recap charts
+# ---------------------------------------------------------------------------
+RECAP_CHART_SPECS = [
+    ("recap_flow", "Scoring Flow",
+     "The score after every scoring play, from kickoff to the final whistle. Long flat "
+     "stretches are stalled offense; steep runs are momentum."),
+    ("recap_drives", "Drive Outcomes",
+     "Every drive by both offenses: how far it travelled and how it ended. Scoring "
+     "drives are solid; empty possessions are hollow."),
+    ("recap_box", "Advanced Box Score",
+     "Efficiency, explosiveness and finishing for both offenses, from the advanced box "
+     "score. Higher is better on every axis."),
+    ("recap_players", "Top Individual Impact",
+     "The players who moved the game most, by total PPA across their touches."),
+]
+
+
+def _drive_points(result: str) -> int | None:
+    r = (result or "").upper()
+    if "TD" in r:
+        return 7
+    if "FG" in r and "MISSED" not in r:
+        return 3
+    return 0
+
+
+def chart_recap_flow(plays, game, home_c, away_c):
+    home, away = game.get("homeTeam"), game.get("awayTeam")
+    points = []
+    for p in plays or []:
+        try:
+            period = int(p.get("period") or 0)
+            clock = p.get("clock") or {}
+            elapsed = (period - 1) * 900 + (900 - (int(clock.get("minutes") or 0) * 60
+                                                   + int(clock.get("seconds") or 0)))
+            off, home_score, away_score = p.get("offense"), None, None
+            if off == home:
+                home_score, away_score = p.get("offenseScore"), p.get("defenseScore")
+            else:
+                home_score, away_score = p.get("defenseScore"), p.get("offenseScore")
+            if home_score is None or away_score is None:
+                continue
+            points.append((elapsed, int(home_score), int(away_score)))
+        except (TypeError, ValueError):
+            continue
+    if len(points) < 4:
+        return None
+    points.sort()
+    xs = [p[0] / 60 for p in points]
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    ax.step(xs, [p[1] for p in points], where="post", color=home_c, linewidth=2.2,
+            label=home, zorder=3)
+    ax.step(xs, [p[2] for p in points], where="post", color=away_c, linewidth=2.2,
+            label=away, zorder=3)
+    top = max(max(p[1] for p in points), max(p[2] for p in points))
+    for q in (15, 30, 45):
+        ax.axvline(q, color=config.CHART_GRID, linewidth=0.9, linestyle="--", zorder=1)
+    for q, x in enumerate((7.5, 22.5, 37.5, 52.5), start=1):
+        ax.text(x, top * 1.06, f"Q{q}", ha="center", fontsize=8.5,
+                color=config.CHART_MUTED)
+    _grid(ax)
+    ax.set_xlim(0, max(60, xs[-1]))
+    ax.set_xlabel("game minute")
+    ax.set_ylabel("points")
+    ax.legend(loc="upper left", fontsize=9)
+    fig.suptitle("Scoring Flow", fontsize=13, fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_recap_drives(drives, game, home_c, away_c):
+    home = game.get("homeTeam")
+    rows = [d for d in drives or [] if d.get("offense")]
+    if len(rows) < 4:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    labels_done = set()
+    for i, d in enumerate(rows):
+        is_home = d.get("offense") == home
+        color = home_c if is_home else away_c
+        yards = d.get("yards") or 0
+        scoring = bool(d.get("scoring"))
+        label = d.get("offense") if d.get("offense") not in labels_done else None
+        if label:
+            labels_done.add(d.get("offense"))
+        ax.bar(i + 1, yards, color=color, alpha=1.0 if scoring else 0.35,
+               label=label, zorder=3)
+    ax.axhline(0, color=config.CHART_MUTED, linewidth=0.8)
+    _grid(ax)
+    ax.set_xlabel("drive number (game order)")
+    ax.set_ylabel("yards gained")
+    ax.legend(loc="upper right", fontsize=9)
+    fig.suptitle("Drive Outcomes — solid bars scored", fontsize=13,
+                 fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def _box_team_rows(box: dict, section: str) -> list[dict]:
+    teams = (box or {}).get("teams") or {}
+    rows = teams.get(section)
+    return rows if isinstance(rows, list) else []
+
+
+def chart_recap_box(box, game, home_c, away_c):
+    home, away = game.get("homeTeam"), game.get("awayTeam")
+    ppa = {r.get("team"): r for r in _box_team_rows(box, "ppa")}
+    rates = {r.get("team"): r for r in _box_team_rows(box, "successRates")}
+    expl = {r.get("team"): r for r in _box_team_rows(box, "explosiveness")}
+    opps = {r.get("team"): r for r in _box_team_rows(box, "scoringOpportunities")}
+
+    def overall(table, team):
+        row = table.get(team) or {}
+        val = (row.get("overall") or {}).get("total")
+        return float(val) if val is not None else None
+
+    metrics = []
+    for label, getter in (
+        ("PPA/play", lambda t: overall(ppa, t)),
+        ("Success rate", lambda t: overall(rates, t)),
+        ("Explosiveness", lambda t: overall(expl, t)),
+        ("Pts/opportunity", lambda t: (opps.get(t) or {}).get("pointsPerOpportunity")),
+    ):
+        hv, av = getter(home), getter(away)
+        if hv is not None and av is not None:
+            metrics.append((label, float(hv), float(av)))
+    if len(metrics) < 2:
+        return None
+
+    fig, axes = plt.subplots(1, len(metrics), figsize=(FIG_W, FIG_H))
+    if len(metrics) == 1:
+        axes = [axes]
+    for ax, (label, hv, av) in zip(axes, metrics):
+        bars = ax.bar([0, 1], [hv, av], color=[home_c, away_c], zorder=3)
+        ax.bar_label(bars, fmt="%.2f", padding=2, fontsize=8, color=config.CHART_TEXT)
+        ax.set_xticks([])
+        ax.set_title(label, fontsize=9.5, color=config.CHART_TEXT)
+        _grid(ax)
+    from matplotlib.patches import Patch
+    fig.legend(handles=[Patch(color=home_c, label=home), Patch(color=away_c, label=away)],
+               loc="lower center", ncol=2, fontsize=9, frameon=False)
+    fig.suptitle("Advanced Box Score", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0.08, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_recap_players(box, game, home_c, away_c):
+    home = game.get("homeTeam")
+    rows = ((box or {}).get("players") or {}).get("ppa") or []
+    scored = []
+    for r in rows:
+        total = ((r.get("cumulative") or {}).get("total")
+                 if isinstance(r.get("cumulative"), dict) else None)
+        if total is None:
+            total = (r.get("average") or {}).get("total") if isinstance(r.get("average"), dict) else None
+        if total is None or not r.get("player"):
+            continue
+        scored.append((float(total), r))
+    if len(scored) < 3:
+        return None
+    scored.sort(key=lambda t: abs(t[0]), reverse=True)
+    top = scored[:10][::-1]
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    names = [f"{r.get('player')} ({r.get('position') or '?'}, {r.get('team')})"
+             for _v, r in top]
+    values = [v for v, _r in top]
+    colors = [home_c if r.get("team") == home else away_c for _v, r in top]
+    bars = ax.barh(names, values, color=colors, zorder=3)
+    ax.bar_label(bars, fmt="%.1f", padding=2, fontsize=7.5, color=config.CHART_TEXT)
+    _grid(ax, axis="x")
+    ax.set_xlabel("total PPA in this game")
+    fig.suptitle("Top Individual Impact", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict) -> list[dict]:
+    """Render the four game-recap charts. Failures become styled placeholders."""
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt"
+        )
+    _apply_style()
+    game = recap.get("game") or {}
+    home_c, away_c = resolve_colors(home_meta or {}, away_meta or {})
+
+    builders = {
+        "recap_flow": lambda: chart_recap_flow(recap.get("plays"), game, home_c, away_c),
+        "recap_drives": lambda: chart_recap_drives(recap.get("drives"), game, home_c, away_c),
+        "recap_box": lambda: chart_recap_box(recap.get("box"), game, home_c, away_c),
+        "recap_players": lambda: chart_recap_players(recap.get("box"), game, home_c, away_c),
+    }
+
+    out: list[dict] = []
+    for key, title, caption in RECAP_CHART_SPECS:
+        img, available = None, True
+        try:
+            img = builders[key]()
+        except Exception as e:
+            logging.warning(f"Recap chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "No data available from CollegeFootballData for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out

@@ -488,3 +488,154 @@ def probe(api_key: str, year: int, team: str = "Georgia") -> dict:
         "failed_endpoints": [c["endpoint"] for c in failed],
         "checks": checks,
     }
+
+
+# ---------------------------------------------------------------------------
+# Schedule windows: the games a client can pick from
+# ---------------------------------------------------------------------------
+def schedule_windows(api_key: str, now=None) -> dict:
+    """Upcoming games and recent finals, for the pickers on client sites.
+
+    The calendar names the week that contains `now`; the pickable windows are that
+    week plus the next (upcoming) and the last two weeks (recent finals). Off-season,
+    when no week contains today, the nearest week in each direction is used — so in
+    August the selector shows week 1, and in February it shows the postseason.
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    year = season_year(now)
+    errors: list[dict] = []
+
+    weeks = _get(api_key, "/calendar", {"year": year}, "Calendar", errors) or []
+
+    def parse(stamp):
+        try:
+            return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+
+    for w in weeks:
+        w["_start"], w["_end"] = parse(w.get("startDate")), parse(w.get("endDate"))
+    weeks = [w for w in weeks if w["_start"] and w["_end"]]
+    weeks.sort(key=lambda w: w["_start"])
+
+    current = next((i for i, w in enumerate(weeks) if w["_start"] <= now <= w["_end"]), None)
+    if current is None:
+        upcoming_weeks = [w for w in weeks if w["_start"] > now][:2]
+        recent_weeks = [w for w in weeks if w["_end"] < now][-2:]
+    else:
+        upcoming_weeks = weeks[current:current + 2]
+        recent_weeks = weeks[max(0, current - 2):current + 1]
+
+    def fetch_week(w):
+        return _get(api_key, "/games",
+                    {"year": year, "week": w.get("week"),
+                     "seasonType": w.get("seasonType", "regular"),
+                     "classification": "fbs"},
+                    f"Games (week {w.get('week')})", errors) or []
+
+    seen: set = set()
+    upcoming: list[dict] = []
+    recent: list[dict] = []
+    for w in upcoming_weeks + recent_weeks:
+        key = (w.get("seasonType"), w.get("week"))
+        if key in seen:
+            continue
+        seen.add(key)
+        for g in fetch_week(w):
+            row = {
+                "id": g.get("id"),
+                "season": g.get("season"),
+                "week": g.get("week"),
+                "season_type": g.get("seasonType"),
+                "start": g.get("startDate"),
+                "start_time_tbd": bool(g.get("startTimeTBD")),
+                "completed": bool(g.get("completed")),
+                "neutral_site": bool(g.get("neutralSite")),
+                "venue": g.get("venue"),
+                "home": g.get("homeTeam"),
+                "home_conference": g.get("homeConference"),
+                "home_points": g.get("homePoints"),
+                "away": g.get("awayTeam"),
+                "away_conference": g.get("awayConference"),
+                "away_points": g.get("awayPoints"),
+            }
+            if not row["id"] or not row["home"] or not row["away"]:
+                continue
+            started = parse(row["start"])
+            if row["completed"]:
+                recent.append(row)
+            elif started is None or started >= now:
+                upcoming.append(row)
+
+    upcoming.sort(key=lambda r: (r["start"] or "", r["home"]))
+    recent.sort(key=lambda r: (r["start"] or "", r["home"]), reverse=True)
+    return {"season": year, "upcoming": upcoming, "recent": recent, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# One finished game, end to end — the Full Game Recap's entire data diet
+# ---------------------------------------------------------------------------
+def fetch_game_recap(api_key: str, game_id: int) -> dict:
+    """Everything CFBD knows about one game: the game row, the advanced box score,
+    every drive, every play, and the player-play stat lines.
+
+    Drives and plays cannot be filtered by game id, so the game row is fetched first
+    and its year/week/team scope the follow-up calls; rows for other games in the
+    same week are dropped by gameId afterwards.
+    """
+    errors: list[dict] = []
+
+    # /games requires year "except when id is specified".
+    games = _get(api_key, "/games", {"id": game_id}, "Game", errors)
+    game = _first(games)
+    if not game:
+        return {"game": {}, "errors": errors, "auth_failures":
+                [e for e in errors if e["status"] in (401, 403)], "total_requests": 1}
+
+    year = game.get("season")
+    week = game.get("week")
+    season_type = game.get("seasonType", "regular")
+    home, away = game.get("homeTeam"), game.get("awayTeam")
+
+    jobs = {
+        "box": ("/game/box/advanced", {"id": game_id}, "Advanced Box Score"),
+        "drives": ("/drives", {"year": year, "week": week, "seasonType": season_type,
+                               "team": home}, "Drives"),
+        "plays": ("/plays", {"year": year, "week": week, "seasonType": season_type,
+                             "team": home}, "Plays"),
+        "play_stats": ("/plays/stats", {"gameId": game_id}, "Player-Play Stats"),
+        "teams": ("/teams/fbs", {"year": year}, "FBS Teams"),
+    }
+
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=min(5, config.CFBD_MAX_WORKERS)) as pool:
+        futures = {pool.submit(_get, api_key, ep, params, label, errors): key
+                   for key, (ep, params, label) in jobs.items()}
+        for fut, key in futures.items():
+            try:
+                results[key] = fut.result()
+            except Exception as e:
+                logging.warning(f"CFBD recap job {key} raised: {e}")
+                results[key] = []
+
+    drives = [d for d in (results.get("drives") or [])
+              if d.get("gameId") in (game_id, None)]
+    plays = [p for p in (results.get("plays") or []) if p.get("gameId") == game_id]
+
+    box = results.get("box")
+    if isinstance(box, list):          # tolerate either envelope shape
+        box = _first(box)
+
+    return {
+        "game": game,
+        "box": box or {},
+        "drives": drives,
+        "plays": plays,
+        "play_stats": results.get("play_stats") or [],
+        "teams": results.get("teams") or [],
+        "errors": errors,
+        "auth_failures": [e for e in errors if e["status"] in (401, 403)],
+        "total_requests": len(jobs) + 1,
+    }
