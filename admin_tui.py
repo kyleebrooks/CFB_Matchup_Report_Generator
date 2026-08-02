@@ -192,6 +192,7 @@ def _curses_main(stdscr):
     scroll = 0
     flash = ('', ui.NORMAL)
     detail_of = None
+    detail_selected = 0       # which setting row the account-detail cursor is on
     health = {}
     browse_source = dbbrowse.MYSQL
     browse_tables = None
@@ -316,6 +317,7 @@ def _curses_main(stdscr):
                         account, state.get('settings') or [],
                         (state.get('usage') or {}).get(account['id']),
                         usage.recent(account['id'], limit=12),
+                        setting_selected=detail_selected,
                     )
             return ui.render_accounts({**state, 'selected': selected})
         if screen == 'Settings':
@@ -512,17 +514,32 @@ def _curses_main(stdscr):
             return
         refresh(f"  Entitlements updated: {', '.join(wanted) or '(none)'}", ui.OK)
 
-    def act_account_setting():
+    def _selected_setting_row():
+        """The setting row the detail-view cursor is on, or None."""
+        rows = state.get('settings') or []
+        if 0 <= detail_selected < len(rows):
+            return rows[detail_selected]
+        return None
+
+    def act_edit_selected_setting():
+        """Change exactly ONE setting for the account on screen.
+
+        This used to prompt for the setting's name out of a ten-item list and then
+        for its value — every edit meant retyping a key correctly. Now the cursor
+        picks the setting and the prompt asks only for its new value, the same way
+        the service-wide Settings screen has always worked.
+        """
         nonlocal flash
         account = selected_account()
-        if not account:
+        row = _selected_setting_row()
+        if not account or not row:
             return
-        key = prompt(f"Setting ({', '.join(config.ACCOUNT_SETTING_KEYS)})")
-        if not key:
-            return
-        current = (account.get('settings') or {}).get(key, '')
-        value = prompt(f"Value for {key} (blank clears the override)", str(current),
-                       allow_empty=True)
+        key = row['key']
+        overrides = account.get('settings') or {}
+        current = overrides.get(key, row['value'])
+        value = prompt(f"{key} for '{account['account_name']}' "
+                       f"(blank clears this account's override)",
+                       str(current), allow_empty=True)
         if value is None:
             return
         try:
@@ -530,7 +547,26 @@ def _curses_main(stdscr):
         except Exception as e:
             flash = (f"  {e}", ui.ERR)
             return
-        refresh(f"  {key} {'cleared' if not value else 'set to ' + value}.", ui.OK)
+        refresh(f"  {key} {'override cleared' if not value else 'set to ' + value} "
+                f"for {account['account_name']}.", ui.OK)
+
+    def act_clear_selected_setting():
+        nonlocal flash
+        account = selected_account()
+        row = _selected_setting_row()
+        if not account or not row:
+            return
+        key = row['key']
+        if key not in (account.get('settings') or {}):
+            flash = (f"  {key} has no override on this account — it already follows "
+                     f"the service default.", ui.DIM)
+            return
+        try:
+            accounts.merge_settings(account['id'], {key: None})
+        except Exception as e:
+            flash = (f"  {e}", ui.ERR)
+            return
+        refresh(f"  {key} override cleared for {account['account_name']}.", ui.OK)
 
     def act_toggle(field, label):
         nonlocal flash
@@ -783,14 +819,25 @@ def _curses_main(stdscr):
             (screen == 'Files' and (store_listing['reports'] if store_listing
                                     else (store_accounts or [])))
         )
+        # In the account detail view the arrows walk the settings list, one row at a
+        # time, exactly like the service-wide Settings screen. PgUp/PgDn still scroll.
+        detail_settings = (screen == 'Accounts' and detail_of is not None
+                           and (state.get('settings') or []))
+        if ch == 9 and detail_settings:      # TAB cycles too — arrow-free terminals
+            detail_selected = (detail_selected + 1) % len(detail_settings)
+            continue
         if ch == curses.KEY_UP:
-            if listable:
+            if detail_settings:
+                detail_selected = max(0, detail_selected - 1)
+            elif listable:
                 selected = max(0, selected - 1)
             else:
                 scroll = max(0, scroll - 1)
             continue
         if ch == curses.KEY_DOWN:
-            if listable:
+            if detail_settings:
+                detail_selected = min(len(detail_settings) - 1, detail_selected + 1)
+            elif listable:
                 selected = min(len(listable) - 1, selected + 1)
             else:
                 scroll += 1
@@ -807,8 +854,15 @@ def _curses_main(stdscr):
             # view turned "press ENTER on a row" into a dead end where every key did
             # nothing, with no hint that ESC was the way out.
             if ch in (10, 13, curses.KEY_ENTER):
-                account = selected_account()
-                detail_of = None if detail_of is not None else (account or {}).get('id')
+                if detail_of is None:
+                    # Open the detail view with the settings cursor at the top.
+                    account = selected_account()
+                    detail_of = (account or {}).get('id')
+                    detail_selected = 0
+                else:
+                    # Inside the detail view ENTER edits the highlighted setting;
+                    # ESC is the way back to the list.
+                    act_edit_selected_setting()
             elif ch == ord('n'):
                 act_new_account()
             elif ch == ord('k'):
@@ -816,7 +870,16 @@ def _curses_main(stdscr):
             elif ch == ord('e'):
                 act_edit_reports()
             elif ch == ord('s'):
-                act_account_setting()
+                # [s]ettings: from the list this opens the detail view (where the
+                # settings live); inside it, it edits the highlighted one.
+                if detail_of is None:
+                    account = selected_account()
+                    detail_of = (account or {}).get('id')
+                    detail_selected = 0
+                else:
+                    act_edit_selected_setting()
+            elif ch == ord('x') and detail_of is not None:
+                act_clear_selected_setting()
             elif ch == ord('t'):
                 act_toggle('active', 'Active')
             elif ch == ord('m'):
