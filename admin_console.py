@@ -33,8 +33,8 @@ def rule(width: int = 78, char: str = '-') -> tuple:
 KEY_BAR = {
     'Dashboard': '[2] accounts  [3] settings  [4] database  [5] health  [6] browser  '
                  '[7] catalog  [8] examples  [9] report files',
-    'Accounts':  '[n]ew  [e]dit types  [s]etting  [k]ey  [t]oggle  [m]admin  [w]mark  '
-                 '[D]elete  ENTER detail',
+    'Accounts':  '[n]ew  [e]dit types  [s]ettings  [k]ey  [t]oggle  [m]admin  [w]mark  '
+                 '[D]elete  ENTER detail (settings live there, one per row)',
     'Settings':  'ENTER change the value   [x] clear the override (back to the env default)',
     'Database':  '[a] apply the proposed repairs (additive only — nothing is dropped)',
     'Health':    '[r] run the live health checks (makes real API calls)',
@@ -220,13 +220,15 @@ def render_accounts(state: dict) -> list[tuple]:
 
 def render_account_detail(account: dict, settings_rows: list[dict],
                           usage_summary: dict | None = None,
-                          history: list[dict] | None = None) -> list[tuple]:
+                          history: list[dict] | None = None,
+                          setting_selected: int = -1) -> list[tuple]:
     out = [
         _line(f"ACCOUNT {account['id']} — {account['account_name']}", TITLE),
         rule(),
-        _line('  ESC or ENTER back to the list.  Every account key still works here:', WARN),
-        _line('  [e] report types   [s] setting   [k] new API key   [t] on/off   '
-              '[D] delete', WARN),
+        _line('  up/down or TAB pick a setting   ENTER change it   [x] clear its '
+              'override   ESC back', WARN),
+        _line('  [e] report types   [k] new API key   [t] on/off   [m] admin   '
+              '[w] watermark   [D] delete', WARN),
         _line(),
         _line(f"  Key prefix     : {account['api_key_prefix']}..."),
         _line(f"  Contact        : {account.get('contact_email') or '-'}"),
@@ -240,14 +242,19 @@ def render_account_detail(account: dict, settings_rows: list[dict],
         _line(f"  Updated        : {account['updated_at']}", DIM),
         _line(),
         _line('  SETTINGS (this account overrides service defaults)', HEADER),
+        _line('  One at a time: the highlighted row is the one ENTER edits.', DIM),
     ]
     overrides = account.get('settings') or {}
-    for row in settings_rows:
+    for i, row in enumerate(settings_rows):
         key = row['key']
+        cursor = '>' if i == setting_selected else ' '
         if key in overrides:
-            out.append(_line(f"  * {key:<22} {str(overrides[key]):<30} (account override)", WARN))
+            text = f" {cursor}* {key:<22} {str(overrides[key]):<28} (account override)"
+            style = SEL if i == setting_selected else WARN
         else:
-            out.append(_line(f"    {key:<22} {str(row['value']):<30} (from {row['source']})", DIM))
+            text = f" {cursor}  {key:<22} {str(row['value']):<28} (from {row['source']})"
+            style = SEL if i == setting_selected else DIM
+        out.append(_line(text, style))
 
     stats = usage_summary or {}
     out.append(_line())
