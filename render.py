@@ -12,46 +12,116 @@ except ImportError:
     markdown = None
 
 
+# Design notes, learned the hard way:
+# - wkhtmltopdf is WebKit circa 2015 and, as packaged by Ubuntu, the reduced build.
+#   No CSS variables, no grid, unreliable flexbox — layout is tables and floats.
+#   Header/footer options are silently ignored, so page numbers are stamped onto the
+#   finished PDF with PyMuPDF instead (see _add_page_furniture).
+# - The palette is editorial black/white/grey on purpose: every chart is drawn in the
+#   two teams' own colours, and any brand colour here would eventually clash with one.
+#   Ink and weight carry the hierarchy; the team colours get the page to themselves.
 CSS = """
-  @page { margin: 16mm 12mm; }
-  body { font-family: Arial, Helvetica, sans-serif; line-height: 1.5; color: #1f2933; font-size: 11pt; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, "Liberation Sans",
+                      "DejaVu Sans", sans-serif;
+         line-height: 1.55; color: #16181d; font-size: 10.2pt; margin: 0; }
   h1, h2, h3 { margin: 0.35em 0 0.25em; }
-  .hdr { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px;
-         background-color:#333; padding:18px; color:white; position:relative; z-index:1; }
-  .hdr img { width:100px; height:100px; object-fit:contain; }
-  .hdr h1 { font-size: 19pt; margin: 0 0 4px; }
-  .hdr h2 { font-size: 13pt; margin: 0 0 6px; font-weight: normal; }
-  .content { text-align:left; position:relative; z-index:1; }
 
-  /* Section headings: larger, bold, underlined - per report spec. */
-  .content h2 { font-size: 15pt; font-weight: bold; text-decoration: underline;
-                margin-top: 22px; padding-top: 6px; page-break-after: avoid; }
-  .content h1 { font-size: 16pt; font-weight: bold; text-decoration: underline;
-                margin-top: 22px; page-break-after: avoid; }
-  .content h3 { font-size: 12pt; font-weight: bold; margin-top: 14px; page-break-after: avoid; }
+  /* ---------- cover ---------- */
+  .cover { page-break-after: always; }
+  .cover-band { background: #101114; color: #ffffff; padding: 26pt 26pt 22pt; }
+  .cover-kicker { font-size: 8.5pt; letter-spacing: 3.2pt; text-transform: uppercase;
+                  color: #9aa0aa; margin: 0 0 14pt; font-weight: bold; }
+  .cover-crests { width: 100%; border-collapse: collapse; margin: 0 0 16pt; }
+  .cover-crests td { border: none; text-align: center; vertical-align: middle; }
+  .cover-crests img { width: 86pt; height: 86pt; object-fit: contain; }
+  .cover-vs { font-size: 13pt; font-weight: bold; color: #6d737e;
+              letter-spacing: 2pt; width: 60pt; }
+  .cover-title { font-size: 27pt; line-height: 1.08; font-weight: bold; margin: 0 0 6pt;
+                 letter-spacing: 0.2pt; }
+  .cover-sub { font-size: 11pt; color: #c3c7ce; margin: 0; }
+  .cover-rule { border: none; border-top: 2.5pt solid #101114; margin: 0; }
+  .cover-date { font-size: 9pt; color: #565b64; margin: 8pt 0 0;
+                text-transform: uppercase; letter-spacing: 1.4pt; }
+
+  .toc { margin-top: 22pt; }
+  .toc-head { font-size: 9pt; letter-spacing: 2.6pt; text-transform: uppercase;
+              font-weight: bold; color: #16181d; border-bottom: 1.5pt solid #101114;
+              padding-bottom: 5pt; margin: 0 0 10pt; }
+  .toc ol { margin: 0; padding: 0; list-style: none;
+            column-count: 2; -webkit-column-count: 2; column-gap: 26pt;
+            -webkit-column-gap: 26pt; }
+  .toc li { font-size: 9.6pt; padding: 3.5pt 0; border-bottom: 0.75pt solid #e3e4e6;
+            -webkit-column-break-inside: avoid; page-break-inside: avoid; }
+  .toc a { color: #16181d; text-decoration: none; }
+  .toc .toc-n { display: inline-block; width: 18pt; color: #8b9099; font-weight: bold;
+                font-size: 8.5pt; }
+
+  /* ---------- running content ---------- */
+  .content { text-align: left; }
+  .content h2 { font-size: 13.5pt; font-weight: bold; text-transform: uppercase;
+                letter-spacing: 0.5pt; margin: 26pt 0 8pt; padding: 0 0 5pt;
+                border-bottom: 1.5pt solid #101114; page-break-after: avoid; }
+  .content h2 .sec-n { color: #9aa0aa; padding-right: 7pt; }
+  .content h1 { font-size: 14pt; font-weight: bold; margin-top: 24pt;
+                page-break-after: avoid; }
+  .content h3 { font-size: 10.8pt; font-weight: bold; margin: 13pt 0 4pt;
+                page-break-after: avoid; }
   .content p { margin: 0.55em 0; }
-  .content ul, .content ol { margin: 0.4em 0 0.7em 1.2em; }
-  .content li { margin: 0.2em 0; }
-  .content table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 9.5pt; }
-  .content th, .content td { border: 1px solid #d9dde3; padding: 5px 7px; text-align: left; }
-  .content th { background: #f2f4f7; }
+  .content ul, .content ol { margin: 0.4em 0 0.7em 1.35em; padding: 0; }
+  .content li { margin: 0.28em 0; }
+  .content blockquote { margin: 10pt 0 10pt 0; padding: 2pt 0 2pt 12pt;
+                        border-left: 2.5pt solid #101114; color: #3c414a;
+                        font-style: italic; }
+  .content blockquote p { margin: 0.3em 0; }
+  sup.cite { font-size: 6.8pt; line-height: 0; }
+  sup.cite a { color: #6d737e; text-decoration: none; }
 
-  .viz { margin: 18px 0 6px; }
-  .viz-intro { font-size: 9.5pt; color: #6b7280; margin: 0 0 12px; }
-  figure.chart { margin: 0 0 20px; padding: 0; page-break-inside: avoid; }
+  /* Tables: black header band, hairline rows, zebra — no vertical grid. */
+  .content table { border-collapse: collapse; width: 100%; margin: 0.8em 0;
+                   font-size: 9pt; page-break-inside: auto; }
+  .content tr { page-break-inside: avoid; }
+  .content th { background: #101114; color: #ffffff; text-align: left;
+                font-size: 7.8pt; text-transform: uppercase; letter-spacing: 0.8pt;
+                padding: 5.5pt 8pt; border: none; }
+  .content td { padding: 5pt 8pt; border: none; border-bottom: 0.75pt solid #e3e4e6; }
+  .content tr:nth-child(even) td { background: #f6f6f4; }
+
+  /* ---------- charts ---------- */
+  .viz-intro { font-size: 9pt; color: #6d737e; margin: 0 0 12pt; }
+  figure.chart { margin: 0 0 16pt; padding: 8pt 8pt 7pt; border: 0.75pt solid #d9dade;
+                 page-break-inside: avoid; }
   figure.chart img { width: 100%; max-width: 100%; height: auto; display: block; }
-  figure.chart figcaption { font-size: 9pt; color: #6b7280; margin-top: 5px;
-                            border-left: 3px solid #d9dde3; padding-left: 8px; }
-  figure.chart .chart-name { font-weight: bold; color: #1f2933; }
+  figure.chart figcaption { font-size: 8.6pt; color: #6d737e; margin-top: 6pt;
+                            padding-top: 5pt; border-top: 0.75pt solid #e3e4e6; }
+  figure.chart .chart-name { font-weight: bold; color: #16181d;
+                             text-transform: uppercase; letter-spacing: 0.5pt;
+                             font-size: 8.2pt; }
 
-  .sources { margin-top: 26px; page-break-before: auto; }
-  .sources ol { margin: 0.4em 0 0 1.4em; padding: 0; }
-  .sources li { font-size: 9pt; margin: 3px 0; word-wrap: break-word; }
-  .sources .src-url { color: #55606e; }
+  /* A section heading pinned alone at the foot of a page reads as a mistake; keep it
+     glued to its opening line. (wkhtmltopdf honours break-inside far more reliably
+     than break-after.) */
+  .keep { page-break-inside: avoid; }
 
-  .meta { margin-top: 22px; border-top: 1px solid #d9dde3; padding-top: 8px;
-          font-size: 8.5pt; color: #6b7280; }
-  .meta p { margin: 2px 0; }
+  /* ---------- sources ---------- */
+  /* Two columns via a table: this WebKit ignores CSS multi-column entirely. */
+  .sources { margin-top: 26pt; }
+  .sources h2 { font-size: 13.5pt; font-weight: bold; text-transform: uppercase;
+                letter-spacing: 0.5pt; margin: 26pt 0 8pt; padding-bottom: 5pt;
+                border-bottom: 1.5pt solid #101114; page-break-after: avoid; }
+  .sources-cols { width: 100%; border-collapse: collapse; }
+  .sources-cols td { width: 50%; vertical-align: top; border: none; padding: 0; }
+  .sources-cols td + td { padding-left: 20pt; }
+  .sources ol { margin: 6pt 0 0; padding-left: 16pt; }
+  .sources li { font-size: 7.8pt; margin: 0 0 5pt; word-wrap: break-word;
+                color: #3c414a; line-height: 1.4; }
+  .sources .src-url { color: #8b9099; }
+
+  /* ---------- generation details ---------- */
+  .meta { margin-top: 20pt; background: #f6f6f4; border-top: 1.5pt solid #101114;
+          padding: 8pt 12pt 9pt; font-size: 7.6pt; color: #6d737e; }
+  .meta-head { text-transform: uppercase; letter-spacing: 1.6pt; font-weight: bold;
+               color: #3c414a; margin: 0 0 4pt; font-size: 7.6pt; }
+  .meta p { margin: 2pt 0; }
 """
 
 _HEADING_RE = re.compile(r"<h[1-3][^>]*>", re.IGNORECASE)
@@ -78,20 +148,73 @@ def markdown_to_html(text: str) -> str:
     return "<br>\n".join(text.split("\n"))
 
 
+_H2_RE = re.compile(r"<h2([^>]*)>(.*?)</h2>", re.IGNORECASE | re.DOTALL)
+_CITE_RE = re.compile(r"\[(\d{1,3})\]")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def link_citations(body_html: str) -> str:
+    """Turn the model's inline [n] markers into superscript links to the source list.
+
+    Bracketed citations as body text read like a draft; superscripts read like a
+    published report. The target ids already exist — sources_block() writes one per
+    entry — so the marker becomes navigation instead of clutter.
+    """
+    return _CITE_RE.sub(r'<sup class="cite"><a href="#src-\1">\1</a></sup>', body_html)
+
+
+def number_sections(body_html: str) -> tuple[str, list[tuple[int, str]]]:
+    """Give every section heading a number and an anchor; return the contents list.
+
+    The reports run twelve-plus sections over eight-plus pages with nothing to
+    navigate by. Numbering the headings and collecting them for a linked contents
+    page on the cover is what turns that from a scroll into a document.
+    """
+    sections: list[tuple[int, str]] = []
+
+    def stamp(match):
+        n = len(sections) + 1
+        attrs, inner = match.group(1), match.group(2)
+        title = _TAG_RE.sub("", inner).strip()
+        sections.append((n, title))
+        return (f'<h2 id="sec-{n}"{attrs}>'
+                f'<span class="sec-n">{n:02d}</span>{inner}</h2>')
+
+    numbered = _H2_RE.sub(stamp, body_html)
+    # Glue each heading to its opening paragraph so a section title is never left
+    # stranded as the last line of a page.
+    numbered = re.sub(r"(<h2\b.*?</h2>)\s*(<p>.*?</p>)",
+                      r'<div class="keep">\1\2</div>', numbered,
+                      flags=re.IGNORECASE | re.DOTALL)
+    return numbered, sections
+
+
+def toc_block(sections: list[tuple[int, str]]) -> str:
+    if not sections:
+        return ""
+    items = "".join(
+        f'<li><a href="#sec-{n}"><span class="toc-n">{n:02d}</span>{title}</a></li>'
+        for n, title in sections
+    )
+    return (f'<div class="toc"><p class="toc-head">In this report</p>'
+            f'<ol>{items}</ol></div>')
+
+
 def _charts_block(charts: list[dict]) -> str:
     figures = []
     for c in charts:
         figures.append(
             f'<figure class="chart">'
             f'<img src="{c["img"]}" alt="{c["title"]}">'
-            f'<figcaption><span class="chart-name">{c["title"]}.</span> {c["caption"]}</figcaption>'
+            f'<figcaption><span class="chart-name">{c["title"]}</span> &middot; '
+            f'{c["caption"]}</figcaption>'
             f'</figure>'
         )
     return (
         '<div class="viz">'
         '<h2>Visual Analytics</h2>'
         '<p class="viz-intro">Generated directly from the CollegeFootballData feeds for this '
-        'matchup. The same eight visuals appear on every report, so numbers can be compared '
+        'matchup. The same visuals appear on every report, so numbers can be compared '
         'like-for-like from one game to the next.</p>'
         + "".join(figures) +
         '</div>'
@@ -127,8 +250,16 @@ def sources_block(registry) -> str:
             f'<li id="src-{e["index"]}">{label}{publisher}<br>'
             f'<span class="src-url">{e["url"]}</span></li>'
         )
+    # Split into two balanced columns, numbering continuing down then across.
+    half = (len(items) + 1) // 2
+    first, second = items[:half], items[half:]
+    right = (f'<ol start="{half + 1}">' + "".join(second) + '</ol>') if second else ''
     return (
-        '<div class="sources"><h2>Sources</h2><ol>' + "".join(items) + '</ol></div>'
+        '<div class="sources"><h2>Sources</h2>'
+        '<table class="sources-cols"><tr>'
+        f'<td><ol>{"".join(first)}</ol></td>'
+        f'<td>{right}</td>'
+        '</tr></table></div>'
     )
 
 
@@ -152,12 +283,31 @@ def build_html(
     Single-team reports pass an empty away_full/away_logo; the header then centres on
     one crest instead of rendering an "X vs (blank)" line and an empty <img>.
     """
-    body = inject_charts(markdown_to_html(strip_model_sources(report_markdown)), charts)
+    body = link_citations(markdown_to_html(strip_model_sources(report_markdown)))
+    body = inject_charts(body, charts)
+    body, sections = number_sections(body)
     meta_html = "".join(f"<p>{line}</p>" for line in meta_lines)
 
     subject = f"{home_full} vs {away_full} ({year})" if away_full else f"{home_full} ({year})"
     doc_title = title or (f"{home_full} vs {away_full}" if away_full else home_full)
-    away_img = f'<img src="{away_logo}" alt="{away_full} logo">' if away_full and away_logo else ""
+
+    # The cover: one crest centred for a team report, two either side of a VS mark for
+    # a matchup. Laid out with a table because this renders through wkhtmltopdf.
+    home_img = (f'<img src="{home_logo}" alt="{home_full} logo">'
+                if home_logo else "")
+    if away_full:
+        away_img = (f'<img src="{away_logo}" alt="{away_full} logo">'
+                    if away_logo else "")
+        crests = (f'<table class="cover-crests"><tr>'
+                  f'<td style="width:45%">{home_img}</td>'
+                  f'<td class="cover-vs">VS</td>'
+                  f'<td style="width:45%">{away_img}</td>'
+                  f'</tr></table>')
+        cover_title = f"{home_full}<br>vs {away_full}"
+    else:
+        crests = (f'<table class="cover-crests"><tr><td>{home_img}</td></tr></table>'
+                  if home_img else "")
+        cover_title = home_full
 
     return f"""<html>
 <head>
@@ -166,18 +316,19 @@ def build_html(
   <style>{CSS}</style>
 </head>
 <body>
-  <div class="hdr">
-    <img src="{home_logo}" alt="{home_full} logo">
-    <div style="text-align:center; flex-grow:1;">
-        <h1>{banner}</h1>
-        <h2>{subject}</h2>
-        <p style="margin:0;">Report created on: {report_created}</p>
+  <div class="cover">
+    <div class="cover-band">
+      <p class="cover-kicker">{banner}</p>
+      {crests}
+      <p class="cover-title">{cover_title}</p>
+      <p class="cover-sub">{year} Season</p>
     </div>
-    {away_img}
+    <p class="cover-date">Generated {report_created}</p>
+    {toc_block(sections)}
   </div>
   <div class="content">{body}</div>
   {sources_block(registry)}
-  <div class="meta">{meta_html}</div>
+  <div class="meta"><p class="meta-head">Generation details</p>{meta_html}</div>
 </body>
 </html>
 """
@@ -186,7 +337,44 @@ def build_html(
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
-def write_pdf(html_content: str, filepath: str) -> None:
+def _add_page_furniture(filepath: str, subject: str, brand: str) -> None:
+    """Stamp a running footer — subject left, page numbers right — onto every page.
+
+    wkhtmltopdf's own header/footer options require the patched-Qt build, and the one
+    apt installs is the reduced build that silently ignores them. PyMuPDF is already a
+    dependency for the watermark, and stamping after the fact works on any build.
+
+    The cover is left clean; numbering starts at 2 on the first content page, the way
+    any printed report numbers its front matter.
+    """
+    import fitz
+
+    ink = (0.42, 0.44, 0.48)
+    hairline = (0.85, 0.85, 0.86)
+    inset = 34                       # matches the 12mm side margins
+    doc = fitz.open(filepath)
+    try:
+        total = doc.page_count
+        for index in range(1, total):
+            page = doc[index]
+            width, height = page.rect.width, page.rect.height
+            y = height - 26
+            page.draw_line(fitz.Point(inset, y - 10), fitz.Point(width - inset, y - 10),
+                           color=hairline, width=0.7)
+            left = f"{subject}  ·  {brand}" if brand else subject
+            page.insert_text(fitz.Point(inset, y), left, fontsize=7.2,
+                             fontname="helv", color=ink)
+            label = f"Page {index + 1} of {total}"
+            text_w = fitz.get_text_length(label, fontname="helv", fontsize=7.2)
+            page.insert_text(fitz.Point(width - inset - text_w, y), label,
+                             fontsize=7.2, fontname="helv", color=ink)
+        doc.saveIncr()
+    finally:
+        doc.close()
+
+
+def write_pdf(html_content: str, filepath: str, *, footer_subject: str = "",
+              footer_brand: str = "") -> None:
     """Render HTML to PDF, tolerating wkhtmltopdf's non-zero exit on non-fatal warnings."""
     import pdfkit
 
@@ -202,6 +390,12 @@ def write_pdf(html_content: str, filepath: str) -> None:
         "load-error-handling": "ignore",
         "load-media-error-handling": "ignore",
         "encoding": "UTF-8",
+        # wkhtmltopdf ignores @page CSS margins; they only exist as options. The wide
+        # bottom margin reserves the strip the stamped running footer sits in.
+        "margin-top": "14mm",
+        "margin-bottom": "16mm",
+        "margin-left": "12mm",
+        "margin-right": "12mm",
     }
     try:
         pdfkit.from_string(html_content, filepath, configuration=pdfkit_config, options=pdf_options)
@@ -221,6 +415,13 @@ def write_pdf(html_content: str, filepath: str) -> None:
         if not pdf_ok:
             raise
         logging.warning(f"wkhtmltopdf exited non-zero but produced a valid PDF; continuing: {e}")
+
+    if footer_subject or footer_brand:
+        try:
+            _add_page_furniture(filepath, footer_subject, footer_brand)
+        except Exception as e:
+            # A report without page numbers still ships; one that failed does not.
+            logging.warning(f"Could not stamp the page footer: {e}")
 
 
 

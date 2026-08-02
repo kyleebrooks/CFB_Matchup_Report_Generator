@@ -482,7 +482,9 @@ def generate(
     )
 
     try:
-        render.write_pdf(html, tmp_path)
+        render.write_pdf(html, tmp_path,
+                         footer_subject=f"{team_full} — {year}",
+                         footer_brand="Team Report")
     except ImportError:
         raise PipelineError("PDF generation library not installed on server.", "", 500)
     except Exception as e:
