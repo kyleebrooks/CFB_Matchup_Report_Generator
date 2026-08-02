@@ -223,6 +223,91 @@ def write_pdf(html_content: str, filepath: str) -> None:
         logging.warning(f"wkhtmltopdf exited non-zero but produced a valid PDF; continuing: {e}")
 
 
+
+def watermark_preview(image_path: str, out_path: str, opacity: float = 0.09,
+                      scale: float = 0.92, pages: int = 1) -> str:
+    """Stamp a sample page so a watermark can be judged without building a report.
+
+    A real report costs several minutes and real money per attempt, which is a poor way
+    to discover that an image is too strong, too pale, or carrying a background.
+    """
+    import io
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+    for n in range(max(1, pages)):
+        c.setFont('Helvetica-Bold', 16)
+        c.drawString(64, height - 72, 'Watermark preview')
+        c.setFont('Helvetica', 10)
+        c.drawString(64, height - 92,
+                     f'opacity={opacity}  scale={scale}  source={os.path.basename(image_path)}')
+        c.setFont('Helvetica', 10.5)
+        y = height - 130
+        body = (
+            "This paragraph exists so the watermark can be judged against real body text. "
+            "If any word below is hard to read, the mark is too strong: lower the opacity. "
+            "If the mark is invisible, raise it. A background box, a grey grid or a hard "
+            "rectangular edge behind this text means the source image is carrying a "
+            "background that should have been transparent."
+        )
+        for i in range(28):
+            c.drawString(64, y, body[:96] if i % 2 == 0 else body[96:192] or body[:96])
+            y -= 15
+        c.showPage()
+    c.save()
+
+    with open(out_path, 'wb') as fh:
+        fh.write(buf.getvalue())
+    add_pdf_watermark(out_path, image_path, opacity=opacity, scale=scale)
+    return out_path
+
+
+def prepare_watermark(image_path: str):
+    """Turn any supplied image into something usable as a page watermark.
+
+    Customers send whatever they have. Two shapes arrive repeatedly and both stamp
+    badly if used as-is:
+
+      - a logo on an opaque WHITE background, which lays a white rectangle over the
+        page and boxes in the text;
+      - an export where the checkerboard that a graphics editor draws to *indicate*
+        transparency has been flattened into real pixels, so the mark arrives wearing
+        a grey grid.
+
+    Both are fixed by the same rule: build the alpha channel from darkness. Ink stays,
+    paper disappears, and the mid-grey of a checkerboard falls away to almost nothing.
+    An image that already carries real transparency keeps it — that alpha is multiplied
+    by the darkness ramp rather than replaced, so a genuine transparent PNG is not
+    second-guessed.
+
+    Returns a BytesIO of a PNG, ready for ImageReader.
+    """
+    import io
+    from PIL import Image
+
+    with Image.open(image_path) as raw:
+        src = raw.convert('RGBA')
+
+    grey = src.convert('L')
+    # alpha = how dark the pixel is. White -> 0, black -> 255, and the ~90% grey of a
+    # transparency checkerboard -> single digits.
+    darkness = grey.point(lambda v: 255 - v)
+
+    existing = src.getchannel('A')
+    if existing.getextrema()[0] < 255:
+        # The image really is transparent somewhere; respect it and layer darkness on top.
+        darkness = Image.composite(darkness, Image.new('L', src.size, 0), existing)
+
+    out = Image.merge('RGBA', (*src.convert('RGB').split(), darkness))
+    buf = io.BytesIO()
+    out.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return buf
+
+
 def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.09, scale: float = 0.92) -> None:
     """Stamp a centered, faint watermark on every page of a PDF.
 
@@ -238,7 +323,7 @@ def add_pdf_watermark(pdf_path: str, image_path: str, opacity: float = 0.09, sca
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
 
-    img = ImageReader(image_path)
+    img = ImageReader(prepare_watermark(image_path))
     iw, ih = img.getSize()
 
     def _overlay(pw, ph):

@@ -26,6 +26,8 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py files ID             list one account's reports
     admin_tui.py files ID --delete F  delete one report
     admin_tui.py files ID --clear     delete every report for that account
+    admin_tui.py watermark [ID]       stamp a sample page to judge a watermark
+                                      (--opacity N --scale N to try values)
     admin_tui.py injuries             feed freshness, per-team coverage, verdict
     admin_tui.py injuries --team NAME collect one team's injuries right now
     admin_tui.py injuries --sweep     collect every FBS team (costs money — see --help)
@@ -1164,6 +1166,50 @@ def main(argv: list[str]) -> int:
                 'path': reports_store.account_dir(account_id, create=False),
                 'reports': reports_store.list_reports(account_id),
             }})))
+        return 0
+
+    if cmd == 'watermark':
+        import render
+        account_id = None
+        for a in args:
+            if a.isdigit():
+                account_id = int(a)
+                break
+        account = accounts.get(account_id) if account_id else None
+        if account_id and not account:
+            print(f"No account with id {account_id}", file=sys.stderr)
+            return 1
+
+        settings = accounts.effective_settings(account)
+        opacity = settings.get('watermark_opacity', config.WATERMARK_OPACITY)
+        scale = settings.get('watermark_scale', config.WATERMARK_SCALE)
+        for flag, cast in (('--opacity', float), ('--scale', float)):
+            if flag in args:
+                try:
+                    value = cast(args[args.index(flag) + 1])
+                except (IndexError, ValueError):
+                    print(f"usage: {flag} NUMBER", file=sys.stderr)
+                    return 2
+                if flag == '--opacity':
+                    opacity = value
+                else:
+                    scale = value
+
+        image = accounts.watermark_path(account)
+        out = os.path.join(config.REPORTS_DIR, 'watermark-preview.pdf')
+        print(f"Account : {account['account_name'] if account else 'service default'}")
+        print(f"Image   : {image}")
+        print(f"Opacity : {opacity}   Scale: {scale}")
+        try:
+            render.watermark_preview(image, out, opacity=opacity, scale=scale)
+        except Exception as e:
+            print(f"Preview failed: {e.__class__.__name__}: {e}", file=sys.stderr)
+            return 1
+        print(f"\nWrote {out}")
+        print("Copy it off the droplet and look at it:")
+        print(f"  scp deploy@143.198.20.72:{out} .")
+        print("\nToo strong -> lower --opacity. Invisible -> raise it. A grey grid or a")
+        print("hard rectangle behind the text -> the source image has a background baked in.")
         return 0
 
     if cmd in ('injuries', 'rotowire'):
