@@ -7,7 +7,9 @@ table, so nothing else needs to change.
 
 import game_recap
 import pipeline
+import prediction_reports
 import team_report
+import weekly
 
 
 class ValidationError(ValueError):
@@ -31,6 +33,19 @@ def _year(params: dict):
     if not 1900 <= year <= 2200:
         raise ValidationError("'year' must be a four-digit season, e.g. 2025")
     return year
+
+
+def _week(params: dict):
+    raw = params.get('week')
+    if raw in (None, ''):
+        return None
+    try:
+        week = int(raw)
+    except (TypeError, ValueError):
+        raise ValidationError("'week' must be a week number, e.g. 9")
+    if not 0 <= week <= 30:
+        raise ValidationError("'week' must be a week number, e.g. 9")
+    return week
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +74,7 @@ def _run_matchup(params: dict, progress) -> dict:
         settings=params.get('settings'),
         watermark=params.get('watermark'),
         report_dir=params.get('report_dir'),
+        account_id=params.get('account_id'),
         progress=progress,
     )
 
@@ -113,6 +129,56 @@ def _run_recap(params: dict, progress) -> dict:
     )
 
 
+# ---------------------------------------------------------------------------
+# weekly_preview / weekly_wrap — the whole slate, before and after
+# ---------------------------------------------------------------------------
+def _validate_weekly(params: dict) -> dict:
+    return {'year': _year(params), 'week': _week(params)}
+
+
+def _run_weekly(generator):
+    def run(params: dict, progress) -> dict:
+        return generator(
+            year=params.get('year'),
+            week=params.get('week'),
+            settings=params.get('settings'),
+            watermark=params.get('watermark'),
+            report_dir=params.get('report_dir'),
+            progress=progress,
+        )
+    return run
+
+
+def _weekly_subject(p: dict) -> str:
+    if p.get('year') and p.get('week'):
+        return f"{p['year']} week {p['week']}"
+    return "current week"
+
+
+# ---------------------------------------------------------------------------
+# prediction_audit / prediction_review — the prediction record, graded
+# ---------------------------------------------------------------------------
+def _validate_predictions(params: dict) -> dict:
+    return {'year': _year(params)}
+
+
+def _run_predictions(kind):
+    def run(params: dict, progress) -> dict:
+        return prediction_reports.generate(
+            kind,
+            year=params.get('year'),
+            settings=params.get('settings'),
+            watermark=params.get('watermark'),
+            report_dir=params.get('report_dir'),
+            progress=progress,
+        )
+    return run
+
+
+def _prediction_subject(p: dict) -> str:
+    return f"predictions {p['year']}" if p.get('year') else "predictions"
+
+
 REPORT_TYPES: dict[str, dict] = {
     'matchup': {
         'name': 'matchup',
@@ -158,6 +224,68 @@ REPORT_TYPES: dict[str, dict] = {
         'run': _run_recap,
         'subject': lambda p: f"game {p['game_id']}",
         'dedup_key': lambda p: f"recap:{p['game_id']}",
+    },
+    'weekly_preview': {
+        'name': 'weekly_preview',
+        'title': 'Weekly Slate Preview',
+        'description': (
+            'The full upcoming week in one report: games of the week, a slate board '
+            'with model and market lines for every game, upset watch, ranked teams on '
+            'alert, and a day-by-day viewing guide — with charts comparing model '
+            'projections to the betting market.'
+        ),
+        'required': [],
+        'optional': ['year', 'week'],
+        'validate': _validate_weekly,
+        'run': _run_weekly(weekly.generate_preview),
+        'subject': _weekly_subject,
+        'dedup_key': lambda p: f"weekly_preview:{p.get('year')}|{p.get('week')}",
+    },
+    'weekly_wrap': {
+        'name': 'weekly_wrap',
+        'title': 'Weekly Wrap',
+        'description': (
+            'The completed week in review: biggest surprises against the ratings, '
+            'rating movers, closest escapes and worst blowouts, the best games by '
+            'excitement, an overreaction check, and what the results set up next.'
+        ),
+        'required': [],
+        'optional': ['year', 'week'],
+        'validate': _validate_weekly,
+        'run': _run_weekly(weekly.generate_wrap),
+        'subject': _weekly_subject,
+        'dedup_key': lambda p: f"weekly_wrap:{p.get('year')}|{p.get('week')}",
+    },
+    'prediction_audit': {
+        'name': 'prediction_audit',
+        'title': 'Prediction Audit (internal)',
+        'description': (
+            'Internal accuracy audit of every stored matchup prediction: grades open '
+            'predictions against final scores, compares report models head to head, '
+            'and shows how accuracy moves as game day approaches. Names models — '
+            'for operators, not the public.'
+        ),
+        'required': [],
+        'optional': ['year'],
+        'validate': _validate_predictions,
+        'run': _run_predictions('audit'),
+        'subject': _prediction_subject,
+        'dedup_key': lambda p: f"prediction_audit:{p.get('year')}",
+    },
+    'prediction_review': {
+        'name': 'prediction_review',
+        'title': 'Prediction Review',
+        'description': (
+            'Public review of the prediction record: overall accuracy, how projections '
+            'sharpen as kickoff approaches, signature calls and honest misses. No '
+            'models or internal mechanics — prediction analysis only.'
+        ),
+        'required': [],
+        'optional': ['year'],
+        'validate': _validate_predictions,
+        'run': _run_predictions('review'),
+        'subject': _prediction_subject,
+        'dedup_key': lambda p: f"prediction_review:{p.get('year')}",
     },
     # Planned, not yet implemented. Listed so entitlements can be granted ahead of the
     # build and clients can discover what is coming.

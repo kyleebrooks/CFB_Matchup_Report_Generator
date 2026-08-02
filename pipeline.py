@@ -59,6 +59,7 @@ def generate(
     settings: dict | None = None,
     watermark: str | None = None,
     report_dir: str | None = None,
+    account_id: int | None = None,
     progress=None,
 ) -> dict:
     """Build one matchup report end to end. Returns a result summary dict.
@@ -295,6 +296,31 @@ def generate(
     os.replace(tmp_path, filepath)
     cleanup_old_reports(home_short, away_short, keep_filename=filename,
                         report_dir=out_dir)
+
+    # File the prediction for the permanent record — run date, the full baseline,
+    # the market at this moment, and which report model wrote it — so it can be
+    # graded against the final score and audited later. Never fatal.
+    try:
+        import predictions
+        upcoming_game = next(
+            (g for g in (cfbd_data["games"]["teamA"] or [])
+             if not cfbd.pick(g, "completed", default=False)
+             and cfbd.pick(g, "awayTeam", "away_team") in (away_short, away_full)
+             and cfbd.pick(g, "homeTeam", "home_team") in (home_short, home_full)),
+            None)
+        predictions.record(
+            account_id=account_id,
+            baseline=baseline,
+            report_model=result["model"],
+            report_filename=filename,
+            home_full=home_full, away_full=away_full,
+            season=year,
+            week=cfbd.pick(upcoming_game or {}, "week"),
+            game_id=cfbd.pick(upcoming_game or {}, "id"),
+            game_date=cfbd.pick(upcoming_game or {}, "startDate", "start_date"),
+        )
+    except Exception as e:
+        logging.warning(f"Prediction bookkeeping failed (non-fatal): {e}")
 
     elapsed = int(time.time() - started)
     step("done")

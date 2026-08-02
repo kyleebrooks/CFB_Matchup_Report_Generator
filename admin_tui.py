@@ -15,6 +15,10 @@ when the terminal cannot do curses (a bare TERM, a cron job, a pipe):
     admin_tui.py settings             show effective settings
     admin_tui.py set KEY VALUE        set a service-wide override
     admin_tui.py unset KEY            clear a service-wide override
+    admin_tui.py schedules            list recurring report schedules
+    admin_tui.py schedules add ACCT TYPE [SCOPE] [DAY] [HOUR] [MAX]
+    admin_tui.py schedules on|off ID  enable / disable one schedule
+    admin_tui.py schedules rm ID      delete one schedule
     admin_tui.py env                  show where the service environment came from
     admin_tui.py delete ID            permanently delete an account
     admin_tui.py usage [ID]           API call counts, overall or for one account
@@ -61,14 +65,16 @@ import examples            # noqa: E402
 import injuries            # noqa: E402
 import report_types        # noqa: E402
 import reports_store       # noqa: E402
+import schedules           # noqa: E402
 import schema              # noqa: E402
 import settings_store      # noqa: E402
 import usage               # noqa: E402
 
 SCREENS = ['Dashboard', 'Accounts', 'Settings', 'Database', 'Health',
-           'Browser', 'Reports', 'Examples', 'Files']
-# Short labels for the tab bar; nine full names do not fit an 80-column terminal.
-TABS = ['Dash', 'Accts', 'Config', 'DB', 'Health', 'Browse', 'Catalog', 'API', 'Files']
+           'Browser', 'Reports', 'Examples', 'Files', 'Schedules']
+# Short labels for the tab bar; ten full names do not fit an 80-column terminal.
+TABS = ['Dash', 'Accts', 'Config', 'DB', 'Health', 'Browse', 'Catalog', 'API', 'Files',
+        'Sched']
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +111,12 @@ def load_state(screen: str = 'Dashboard') -> dict:
     except Exception as e:
         state['usage'] = {}
         state['errors'].append(f"usage: {e}")
+
+    try:
+        state['schedules'] = schedules.list_all()
+    except Exception as e:
+        state['schedules'] = None
+        state['errors'].append(f"schedules: {e}")
 
     try:
         state['rotowire'] = injuries.status()
@@ -210,7 +222,8 @@ def _curses_main(stdscr):
         height, width = stdscr.getmaxyx()
         body_h = height - 5
 
-        tabs = '  '.join(f"[{i + 1}]{n}" for i, n in enumerate(TABS))
+        # The tenth screen rides on the 0 key: "[0]Sched", not "[10]Sched".
+        tabs = '  '.join(f"[{(i + 1) % 10}]{n}" for i, n in enumerate(TABS))
         # Drop the product name rather than the tabs when the terminal is narrow — a
         # tab the operator cannot see is a screen they will never open.
         header = f" AFPLNA Admin   {tabs}" if len(tabs) + 17 < width else f" {tabs}"
@@ -229,7 +242,7 @@ def _curses_main(stdscr):
         # per-screen bar lives here rather than in the body so a long list can never
         # scroll it out of sight.
         keys = ui.KEY_BAR.get(screen, '')
-        footer = msg or "  [1-8] screen   [r] refresh   [?] help   [q] quit"
+        footer = msg or "  [1-9,0] screen   [r] refresh   [?] help   [q] quit"
         try:
             stdscr.addnstr(height - 3, 0, '=' * (width - 1), width - 1, STYLES[ui.DIM])
             stdscr.addnstr(height - 2, 0, f"  {keys}".ljust(width - 1), width - 1,
@@ -341,6 +354,8 @@ def _curses_main(stdscr):
             return ui.render_reports_store({'store_accounts': store_accounts or [],
                                             'store_listing': store_listing,
                                             'selected': selected})
+        if screen == 'Schedules':
+            return ui.render_schedules({**state, 'selected': selected})
         return ui.HELP
 
     def load_store():
@@ -740,6 +755,109 @@ def _curses_main(stdscr):
         else:
             refresh(f"  {good} repair(s) applied successfully.", ui.OK)
 
+    # -- schedule actions --------------------------------------------------
+    def selected_schedule():
+        rows = state.get('schedules') or []
+        return rows[selected] if 0 <= selected < len(rows) else None
+
+    def act_new_schedule():
+        nonlocal flash
+        accts = state.get('accounts') or []
+        if not accts:
+            flash = ('  Create an account first (screen 2).', ui.WARN)
+            return
+        hint = '  '.join(f"{a['id']}={a['account_name'][:14]}" for a in accts[:6])
+        acct_id = prompt(f'Account id ({hint})', str(accts[0]['id']))
+        if acct_id is None:
+            return
+        account = next((a for a in accts if str(a['id']) == acct_id.strip()), None)
+        if not account:
+            flash = (f"  No account with id '{acct_id}'.", ui.ERR)
+            return
+        rtype = prompt(f"Report type ({', '.join(schedules.VALID_TYPES)})",
+                       'weekly_preview')
+        if rtype is None:
+            return
+        scope = prompt('Scope (top25 / all / team:X / conference:Y)', 'top25')
+        if scope is None:
+            return
+        day = prompt('Day of week (0=Mon .. 6=Sun)', '1')
+        if day is None:
+            return
+        hour = prompt('Hour, UTC (0-23)', '12')
+        if hour is None:
+            return
+        cap = prompt('Max reports per run (1-30)', '10')
+        if cap is None:
+            return
+        try:
+            row = schedules.create(account['id'], rtype.strip(), scope.strip(),
+                                   int(day), int(hour), int(cap))
+        except Exception as e:
+            flash = (f"  Create failed: {e}", ui.ERR)
+            return
+        if rtype.strip().lower() not in (account.get('allowed_reports') or []):
+            # Stored fine, but it will skip every run until the entitlement exists.
+            refresh(f"  Schedule {row['id']} created — but account "
+                    f"{account['id']} is NOT entitled to {rtype.strip()}; grant it "
+                    f"with [e] on the Accounts screen.", ui.WARN)
+        else:
+            refresh(f"  Schedule {row['id']} created.", ui.OK)
+
+    def act_toggle_schedule():
+        nonlocal flash
+        row = selected_schedule()
+        if not row:
+            return
+        try:
+            schedules.set_enabled(row['id'], not row['enabled'])
+        except Exception as e:
+            flash = (f"  Toggle failed: {e}", ui.ERR)
+            return
+        refresh(f"  Schedule {row['id']} turned "
+                f"{'off' if row['enabled'] else 'ON'}.", ui.OK)
+
+    def act_edit_schedule():
+        nonlocal flash
+        row = selected_schedule()
+        if not row:
+            return
+        scope = prompt('Scope (top25 / all / team:X / conference:Y)', row['scope'])
+        if scope is None:
+            return
+        day = prompt('Day of week (0=Mon .. 6=Sun)', str(row['day_of_week']))
+        if day is None:
+            return
+        hour = prompt('Hour, UTC (0-23)', str(row['hour_utc']))
+        if hour is None:
+            return
+        cap = prompt('Max reports per run (1-30)', str(row['max_reports']))
+        if cap is None:
+            return
+        try:
+            schedules.update(row['id'], scope=scope.strip(), day_of_week=int(day),
+                             hour_utc=int(hour), max_reports=int(cap))
+        except Exception as e:
+            flash = (f"  Update failed: {e}", ui.ERR)
+            return
+        refresh(f"  Schedule {row['id']} updated.", ui.OK)
+
+    def act_delete_schedule():
+        nonlocal flash, selected
+        row = selected_schedule()
+        if not row:
+            return
+        if not confirm(f"Delete schedule {row['id']} ({row['report_type']})?"):
+            flash = ('  Cancelled.', ui.DIM)
+            return
+        try:
+            schedules.delete(row['id'])
+        except Exception as e:
+            flash = (f"  Delete failed: {e}", ui.ERR)
+            return
+        selected = max(0, selected - 1)
+        refresh(f"  Schedule {row['id']} deleted.", ui.OK)
+
     # -- main loop --------------------------------------------------------
     while True:
         paint(current_lines())
@@ -765,8 +883,8 @@ def _curses_main(stdscr):
         if ch in (ord('?'), curses.KEY_F1):
             screen, detail_of, scroll = 'Help', None, 0
             continue
-        if ord('1') <= ch <= ord('9'):
-            screen = SCREENS[ch - ord('1')]
+        if ord('1') <= ch <= ord('9') or ch == ord('0'):
+            screen = SCREENS[9] if ch == ord('0') else SCREENS[ch - ord('1')]
             detail_of, selected, scroll = None, 0, 0
             catalog_detail, browse_page = None, None
             if screen == 'Health' and not health:
@@ -817,7 +935,8 @@ def _curses_main(stdscr):
              and ((browse_tables or {}).get('tables') or [])) or
             (screen == 'Reports' and catalog_detail is None and (state.get('catalog') or [])) or
             (screen == 'Files' and (store_listing['reports'] if store_listing
-                                    else (store_accounts or [])))
+                                    else (store_accounts or []))) or
+            (screen == 'Schedules' and (state.get('schedules') or []))
         )
         # In the account detail view the arrows walk the settings list, one row at a
         # time, exactly like the service-wide Settings screen. PgUp/PgDn still scroll.
@@ -933,6 +1052,15 @@ def _curses_main(stdscr):
         elif screen == 'Database':
             if ch == ord('a'):
                 act_apply_schema()
+        elif screen == 'Schedules':
+            if ch == ord('n'):
+                act_new_schedule()
+            elif ch == ord('t'):
+                act_toggle_schedule()
+            elif ch == ord('e'):
+                act_edit_schedule()
+            elif ch == ord('D'):
+                act_delete_schedule()
 
 
 def run_tui() -> int:
@@ -1059,6 +1187,52 @@ def main(argv: list[str]) -> int:
         print(_plain(ui.render_global_settings({'settings': settings_store.describe(),
                                                 'selected': -1})))
         return 0
+
+    if cmd == 'schedules':
+        # schedules                              list them all
+        # schedules add ACCT TYPE [SCOPE] [DAY] [HOUR] [MAX]
+        # schedules on|off ID    schedules rm ID
+        if not args:
+            print(_plain(ui.render_schedules({'schedules': schedules.list_all(),
+                                              'accounts': accounts.list_all(),
+                                              'selected': -1})))
+            return 0
+        sub = args[0]
+        try:
+            if sub == 'add':
+                if len(args) < 3:
+                    print("usage: admin_tui.py schedules add ACCOUNT_ID REPORT_TYPE "
+                          "[SCOPE] [DAY 0-6] [HOUR_UTC] [MAX]", file=sys.stderr)
+                    return 2
+                row = schedules.create(
+                    int(args[1]), args[2],
+                    args[3] if len(args) > 3 else 'top25',
+                    int(args[4]) if len(args) > 4 else 1,
+                    int(args[5]) if len(args) > 5 else 12,
+                    int(args[6]) if len(args) > 6 else 10)
+                print(f"Schedule {row['id']} created: {row['report_type']} "
+                      f"({row['scope']}) {ui.DAY_NAMES[row['day_of_week']]} "
+                      f"{row['hour_utc']:02d}:00 UTC for account {row['account_id']}.")
+                return 0
+            if sub in ('on', 'off'):
+                if len(args) < 2:
+                    print(f"usage: admin_tui.py schedules {sub} SCHEDULE_ID", file=sys.stderr)
+                    return 2
+                schedules.set_enabled(int(args[1]), sub == 'on')
+                print(f"Schedule {args[1]} turned {sub}.")
+                return 0
+            if sub == 'rm':
+                if len(args) < 2:
+                    print("usage: admin_tui.py schedules rm SCHEDULE_ID", file=sys.stderr)
+                    return 2
+                schedules.delete(int(args[1]))
+                print(f"Schedule {args[1]} deleted.")
+                return 0
+        except (schedules.ScheduleError, ValueError) as e:
+            print(f"{e}", file=sys.stderr)
+            return 2
+        print("usage: admin_tui.py schedules [add|on|off|rm] ...", file=sys.stderr)
+        return 2
 
     if cmd == 'set':
         if len(args) < 2:

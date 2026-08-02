@@ -148,6 +148,7 @@ def create_report():
     params['settings'] = accounts.effective_settings(account)
     params['watermark'] = accounts.watermark_path(account)
     params['report_dir'] = reports_store.account_dir(account['id'])
+    params['account_id'] = account['id']
 
     subject = spec['subject'](params)
 
@@ -561,6 +562,101 @@ def delete_watermark():
         'message': 'Custom watermark removed; reports revert to the service default.',
         'account': accounts.public_view(account),
     }), 200
+
+
+# ---------------------------------------------------------------------------
+# Recurring report schedules (per account, optional)
+# ---------------------------------------------------------------------------
+def _schedule_view(row: dict) -> dict:
+    import schedules as schedules_mod
+    out = {k: row.get(k) for k in ('id', 'report_type', 'scope', 'day_of_week',
+                                   'hour_utc', 'max_reports', 'last_result')}
+    out['enabled'] = bool(row.get('enabled'))
+    out['day_name'] = schedules_mod.DAYS[int(row['day_of_week']) % 7]
+    for key in ('last_run_at', 'created_at'):
+        v = row.get(key)
+        out[key] = v.isoformat() if hasattr(v, 'isoformat') else v
+    return out
+
+
+@bp.route('/account/schedules', methods=['GET'])
+@require_account
+def list_schedules():
+    import schedules as schedules_mod
+    mine = [r for r in schedules_mod.list_all()
+            if r['account_id'] == request.account['id']]
+    return jsonify({'schedules': [_schedule_view(r) for r in mine],
+                    'valid_report_types': list(schedules_mod.VALID_TYPES)}), 200
+
+
+@bp.route('/account/schedules', methods=['POST'])
+@require_account
+def create_schedule():
+    """Create a weekly recurring report. Times are UTC; day 0 = Monday."""
+    import schedules as schedules_mod
+    data = _body()
+    rtype = (data.get('report_type') or '').strip().lower()
+    if rtype and rtype not in (request.account.get('allowed_reports') or []):
+        return _error(f"This account is not entitled to '{rtype}'.", 403)
+    try:
+        row = schedules_mod.create(
+            account_id=request.account['id'],
+            report_type=rtype,
+            scope=data.get('scope') or 'top25',
+            day_of_week=int(data.get('day_of_week', 1)),
+            hour_utc=int(data.get('hour_utc', 12)),
+            max_reports=int(data.get('max_reports', 10)),
+        )
+    except (schedules_mod.ScheduleError, TypeError, ValueError) as e:
+        return _error(str(e), 400)
+    return jsonify({'schedule': _schedule_view(row)}), 201
+
+
+def _owned_schedule(schedule_id: int):
+    import schedules as schedules_mod
+    row = schedules_mod.get(schedule_id)
+    if not row or row['account_id'] != request.account['id']:
+        return None
+    return row
+
+
+@bp.route('/account/schedules/<int:schedule_id>', methods=['PATCH'])
+@require_account
+def update_schedule(schedule_id):
+    """Adjust a schedule: enabled on/off, scope, day, hour, or report cap."""
+    import schedules as schedules_mod
+    row = _owned_schedule(schedule_id)
+    if not row:
+        return _error('No such schedule.', 404)
+    data = _body()
+    editable = ('enabled', 'scope', 'day_of_week', 'hour_utc', 'max_reports')
+    if not any(k in data for k in editable):
+        return _error(f"Send at least one of: {', '.join(editable)}.", 400)
+    try:
+        if any(k in data for k in editable[1:]):
+            schedules_mod.update(
+                schedule_id,
+                scope=data.get('scope'),
+                day_of_week=data.get('day_of_week'),
+                hour_utc=data.get('hour_utc'),
+                max_reports=data.get('max_reports'),
+            )
+        if 'enabled' in data:
+            schedules_mod.set_enabled(schedule_id, bool(data['enabled']))
+    except (schedules_mod.ScheduleError, TypeError, ValueError) as e:
+        return _error(str(e), 400)
+    return jsonify({'schedule': _schedule_view(schedules_mod.get(schedule_id))}), 200
+
+
+@bp.route('/account/schedules/<int:schedule_id>', methods=['DELETE'])
+@require_account
+def delete_schedule(schedule_id):
+    import schedules as schedules_mod
+    row = _owned_schedule(schedule_id)
+    if not row:
+        return _error('No such schedule.', 404)
+    schedules_mod.delete(schedule_id)
+    return jsonify({'message': 'Schedule deleted.'}), 200
 
 
 # ---------------------------------------------------------------------------
