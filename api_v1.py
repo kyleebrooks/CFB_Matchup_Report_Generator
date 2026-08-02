@@ -358,14 +358,29 @@ _GAMES_CACHE: dict = {}
 def list_games():
     """The games a client can offer in a picker.
 
-    Two windows, both derived from the CFBD calendar around today: `upcoming` (this
-    week and next, for the matchup selector) and `recent` (the last two weeks'
-    finals, for the Full Game Recap selector). Cached for ten minutes — scores and
-    schedules move faster than the team list, but not faster than that.
+    Without parameters: two windows derived from the CFBD calendar around today —
+    `upcoming` (this week and next, for the matchup selector) and `recent` (the last
+    two weeks' finals, for the Full Game Recap selector). With `year` (and optionally
+    `week` and `season_type`): that explicit week, split the same way — which is how
+    a client reaches prior seasons' finals and future weeks' matchups. Both shapes
+    include the season's `weeks` list and the `current` week, so a client can build
+    its year/week selectors from the response alone. Cached for ten minutes per
+    distinct selection.
     """
     global _GAMES_CACHE
+    year = request.args.get('year', type=int)
+    week = request.args.get('week', type=int)
+    season_type = (request.args.get('season_type') or '').strip() or None
+    if year is not None and not 1900 <= year <= 2200:
+        return _error("'year' must be a four-digit season, e.g. 2025", 400)
+    if week is not None and not 1 <= week <= 30:
+        return _error("'week' must be between 1 and 30", 400)
+    if season_type and season_type not in ('regular', 'postseason'):
+        return _error("'season_type' must be 'regular' or 'postseason'", 400)
+
+    cache_key = (year, week, season_type)
     now = time.time()
-    cached = _GAMES_CACHE.get('windows')
+    cached = _GAMES_CACHE.get(cache_key)
     if cached and now - cached['at'] < 600:
         payload = dict(cached['data'])
         payload['cached'] = True
@@ -378,7 +393,13 @@ def list_games():
     if not api_key:
         return _error('No CollegeFootballData key configured on the service.', 503)
 
-    windows = cfbd.schedule_windows(api_key)
+    if year is None and week is None and season_type is None:
+        windows = cfbd.schedule_windows(api_key)
+    else:
+        from datetime import datetime, timezone
+        resolved_year = year or cfbd.season_year(datetime.now(timezone.utc))
+        windows = cfbd.week_games(api_key, resolved_year, week, season_type)
+
     if not windows['upcoming'] and not windows['recent'] and windows['errors']:
         first = windows['errors'][0]
         return _error('CollegeFootballData request failed.', 502,
@@ -386,12 +407,17 @@ def list_games():
 
     payload = {
         'season': windows['season'],
+        'weeks': windows['weeks'],
+        'current': windows['current'],
+        'selected': windows['selected'],
         'upcoming': windows['upcoming'],
         'recent': windows['recent'],
         'count': len(windows['upcoming']) + len(windows['recent']),
         'cached': False,
     }
-    _GAMES_CACHE['windows'] = {'at': now, 'data': payload}
+    _GAMES_CACHE[cache_key] = {'at': now, 'data': payload}
+    while len(_GAMES_CACHE) > 64:
+        _GAMES_CACHE.pop(next(iter(_GAMES_CACHE)))
     return jsonify(payload), 200
 
 
