@@ -493,85 +493,170 @@ def probe(api_key: str, year: int, team: str = "Georgia") -> dict:
 # ---------------------------------------------------------------------------
 # Schedule windows: the games a client can pick from
 # ---------------------------------------------------------------------------
+def _parse_stamp(stamp):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _game_row(g: dict) -> dict | None:
+    row = {
+        "id": g.get("id"),
+        "season": g.get("season"),
+        "week": g.get("week"),
+        "season_type": g.get("seasonType"),
+        "start": g.get("startDate"),
+        "start_time_tbd": bool(g.get("startTimeTBD")),
+        "completed": bool(g.get("completed")),
+        "neutral_site": bool(g.get("neutralSite")),
+        "venue": g.get("venue"),
+        "home": g.get("homeTeam"),
+        "home_conference": g.get("homeConference"),
+        "home_points": g.get("homePoints"),
+        "away": g.get("awayTeam"),
+        "away_conference": g.get("awayConference"),
+        "away_points": g.get("awayPoints"),
+    }
+    if not row["id"] or not row["home"] or not row["away"]:
+        return None
+    return row
+
+
+def calendar_weeks(api_key: str, year: int, errors: list | None = None) -> list[dict]:
+    """The season's weeks, parsed, sorted, JSON-ready."""
+    raw = _get(api_key, "/calendar", {"year": year}, "Calendar", errors) or []
+    weeks = []
+    for w in raw:
+        start, end = _parse_stamp(w.get("startDate")), _parse_stamp(w.get("endDate"))
+        if not start or not end:
+            continue
+        weeks.append({"week": w.get("week"), "season_type": w.get("seasonType", "regular"),
+                      "start": w.get("startDate"), "end": w.get("endDate"),
+                      "_start": start, "_end": end})
+    weeks.sort(key=lambda w: w["_start"])
+    return weeks
+
+
+def _strip_weeks(weeks: list[dict]) -> list[dict]:
+    return [{k: v for k, v in w.items() if not k.startswith("_")} for w in weeks]
+
+
+def games_for(api_key: str, year: int, week: int, season_type: str,
+              errors: list | None = None) -> list[dict]:
+    rows = _get(api_key, "/games",
+                {"year": year, "week": week, "seasonType": season_type or "regular",
+                 "classification": "fbs"},
+                f"Games ({year} {season_type} week {week})", errors) or []
+    out = [r for r in (_game_row(g) for g in rows) if r]
+    out.sort(key=lambda r: (r["start"] or "", r["home"]))
+    return out
+
+
+def _week_around(weeks: list[dict], now) -> int | None:
+    """Index of the week containing `now`, else the next upcoming, else the last."""
+    if not weeks:
+        return None
+    for i, w in enumerate(weeks):
+        if w["_start"] <= now <= w["_end"]:
+            return i
+    for i, w in enumerate(weeks):
+        if w["_start"] > now:
+            return i
+    return len(weeks) - 1
+
+
 def schedule_windows(api_key: str, now=None) -> dict:
-    """Upcoming games and recent finals, for the pickers on client sites.
+    """The default picker feed: upcoming games and recent finals around today.
 
     The calendar names the week that contains `now`; the pickable windows are that
     week plus the next (upcoming) and the last two weeks (recent finals). Off-season,
-    when no week contains today, the nearest week in each direction is used — so in
-    August the selector shows week 1, and in February it shows the postseason.
+    when no week contains today, the nearest week is used — so in August the selector
+    shows week 1, and in February the postseason. The season's full week list and the
+    current week ride along so a client can build year/week selectors.
     """
     from datetime import datetime, timezone
 
     now = now or datetime.now(timezone.utc)
     year = season_year(now)
     errors: list[dict] = []
+    weeks = calendar_weeks(api_key, year, errors)
+    current = _week_around(weeks, now)
 
-    weeks = _get(api_key, "/calendar", {"year": year}, "Calendar", errors) or []
-
-    def parse(stamp):
-        try:
-            return datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-
-    for w in weeks:
-        w["_start"], w["_end"] = parse(w.get("startDate")), parse(w.get("endDate"))
-    weeks = [w for w in weeks if w["_start"] and w["_end"]]
-    weeks.sort(key=lambda w: w["_start"])
-
-    current = next((i for i, w in enumerate(weeks) if w["_start"] <= now <= w["_end"]), None)
-    if current is None:
-        upcoming_weeks = [w for w in weeks if w["_start"] > now][:2]
-        recent_weeks = [w for w in weeks if w["_end"] < now][-2:]
-    else:
-        upcoming_weeks = weeks[current:current + 2]
-        recent_weeks = weeks[max(0, current - 2):current + 1]
-
-    def fetch_week(w):
-        return _get(api_key, "/games",
-                    {"year": year, "week": w.get("week"),
-                     "seasonType": w.get("seasonType", "regular"),
-                     "classification": "fbs"},
-                    f"Games (week {w.get('week')})", errors) or []
-
-    seen: set = set()
     upcoming: list[dict] = []
     recent: list[dict] = []
-    for w in upcoming_weeks + recent_weeks:
-        key = (w.get("seasonType"), w.get("week"))
-        if key in seen:
-            continue
-        seen.add(key)
-        for g in fetch_week(w):
-            row = {
-                "id": g.get("id"),
-                "season": g.get("season"),
-                "week": g.get("week"),
-                "season_type": g.get("seasonType"),
-                "start": g.get("startDate"),
-                "start_time_tbd": bool(g.get("startTimeTBD")),
-                "completed": bool(g.get("completed")),
-                "neutral_site": bool(g.get("neutralSite")),
-                "venue": g.get("venue"),
-                "home": g.get("homeTeam"),
-                "home_conference": g.get("homeConference"),
-                "home_points": g.get("homePoints"),
-                "away": g.get("awayTeam"),
-                "away_conference": g.get("awayConference"),
-                "away_points": g.get("awayPoints"),
-            }
-            if not row["id"] or not row["home"] or not row["away"]:
+    if current is not None:
+        seen: set = set()
+        for w in weeks[max(0, current - 2):current + 2]:
+            key = (w["season_type"], w["week"])
+            if key in seen:
                 continue
-            started = parse(row["start"])
-            if row["completed"]:
-                recent.append(row)
-            elif started is None or started >= now:
-                upcoming.append(row)
+            seen.add(key)
+            for row in games_for(api_key, year, w["week"], w["season_type"], errors):
+                started = _parse_stamp(row["start"])
+                if row["completed"]:
+                    recent.append(row)
+                elif started is None or started >= now:
+                    upcoming.append(row)
+        upcoming.sort(key=lambda r: (r["start"] or "", r["home"]))
+        recent.sort(key=lambda r: (r["start"] or "", r["home"]), reverse=True)
 
-    upcoming.sort(key=lambda r: (r["start"] or "", r["home"]))
-    recent.sort(key=lambda r: (r["start"] or "", r["home"]), reverse=True)
-    return {"season": year, "upcoming": upcoming, "recent": recent, "errors": errors}
+    return {
+        "season": year,
+        "weeks": _strip_weeks(weeks),
+        "current": ({"week": weeks[current]["week"],
+                     "season_type": weeks[current]["season_type"]}
+                    if current is not None else None),
+        "selected": None,
+        "upcoming": upcoming,
+        "recent": recent,
+        "errors": errors,
+    }
+
+
+def week_games(api_key: str, year: int, week: int | None = None,
+               season_type: str | None = None, now=None) -> dict:
+    """One explicit season/week, split into upcoming games and finals.
+
+    Prior seasons are entirely finals; future weeks entirely upcoming. When no week is
+    named, the current season defaults to the week around today and any other season
+    to its first week.
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    errors: list[dict] = []
+    weeks = calendar_weeks(api_key, year, errors)
+
+    if week is None:
+        idx = _week_around(weeks, now) if year == season_year(now) else 0
+        if idx is not None and weeks:
+            week = weeks[idx]["week"]
+            season_type = season_type or weeks[idx]["season_type"]
+        else:
+            week = 1
+    if not season_type:
+        match = next((w for w in weeks if w["week"] == week), None)
+        season_type = match["season_type"] if match else "regular"
+
+    rows = games_for(api_key, year, week, season_type, errors)
+    upcoming = [r for r in rows if not r["completed"]]
+    recent = sorted((r for r in rows if r["completed"]),
+                    key=lambda r: (r["start"] or "", r["home"]), reverse=True)
+
+    current = _week_around(weeks, now) if year == season_year(now) else None
+    return {
+        "season": year,
+        "weeks": _strip_weeks(weeks),
+        "current": ({"week": weeks[current]["week"],
+                     "season_type": weeks[current]["season_type"]}
+                    if current is not None else None),
+        "selected": {"week": week, "season_type": season_type},
+        "upcoming": upcoming,
+        "recent": recent,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
