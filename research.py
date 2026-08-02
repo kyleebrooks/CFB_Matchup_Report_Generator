@@ -479,6 +479,8 @@ def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, 
         }
 
     def _roto(items: list[dict]) -> dict:
+        import injuries as injuries_mod
+
         # Each stored item carries the publisher and URL it was actually collected from,
         # so cite that rather than attributing everything to one aggregator.
         for it in items:
@@ -488,9 +490,13 @@ def assemble_sections(research: dict, rotowire: dict, registry: SourceRegistry, 
             it["citation"] = f"[{idx}]" if idx else "[2]"
         return {
             "source": ("Stored injury feed — items collected for this team over the last "
-                       f"{config.ROTOWIRE_WINDOW_DAYS} days and kept in the local database"),
-            "window_days": config.ROTOWIRE_WINDOW_DAYS,
+                       f"{config.INJURY_WINDOW_DAYS} days and kept in the local database"),
+            "window_days": config.INJURY_WINDOW_DAYS,
             "no_data": not items,
+            # One current status per player, latest dated word wins — the timeline
+            # below it stays intact, but the model no longer has to reconcile a
+            # Tuesday "Questionable" against a Friday "Out" on its own.
+            "current_availability": injuries_mod.resolve_availability(items),
             "items": items,
         }
 

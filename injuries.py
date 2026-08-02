@@ -35,6 +35,10 @@ REFRESH_TABLE = 'feed_refresh'
 # Providers are registered here so a structured source (ESPN, a licensed Rotowire feed,
 # conference availability reports) can be added later without touching any caller.
 PROVIDER_RESEARCH = 'research'
+PROVIDER_ESPN = 'espn'
+
+# feed_refresh keys that are not teams (the sweep claim row). Kept out of coverage math.
+SYSTEM_KEY_PREFIX = '_'
 
 _locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
@@ -60,6 +64,7 @@ NEW_COLUMNS = (
     ('news_date', 'TEXT'),     # ISO date, immune to date_text formatting drift
     ('fetched_at', 'TEXT'),
     ('provider', 'TEXT'),
+    ('confidence', 'TEXT'),    # high/medium/low; low when the item could not be dated
 )
 
 
@@ -151,15 +156,18 @@ def matches_report_query(text: str) -> bool:
 
 
 def _news_date(published: str):
-    """Resolve a finding's publish date. Undateable items are treated as today.
+    """Resolve a finding's publish date. Returns (date, dated).
 
-    The model is told to discard anything it cannot date, so an unparseable value here
-    means the item is current but loosely worded ("Monday", "this morning").
+    Undateable items are stamped today so they enter the read window — the model is
+    told to discard anything it cannot date, so an unparseable value usually means
+    "current but loosely worded" ("Monday", "this morning"). `dated=False` marks the
+    guess, and store() downgrades such rows to low confidence rather than letting an
+    assumed date masquerade as verified freshness.
     """
     parsed = parse_date_text(published)
     if parsed and parsed <= datetime.now().date():
-        return parsed
-    return datetime.now().date()
+        return parsed, True
+    return datetime.now().date(), False
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +199,11 @@ def store(team_short: str, team_full: str, findings: list[dict],
 
                 player = (f.get('player') or '').strip()
                 team = (f.get('team') or '').strip() or team_full or team_short
-                day = _news_date(f.get('published') or '')
+                day, dated = _news_date(f.get('published') or '')
+                confidence = (f.get('confidence') or '').strip().lower() or 'medium'
+                if not dated:
+                    # An assumed date must not read as verified freshness.
+                    confidence = 'low'
                 values = {
                     'player_name': player,
                     'headline': headline,
@@ -207,6 +219,7 @@ def store(team_short: str, team_full: str, findings: list[dict],
                     'news_date': day.isoformat(),
                     'fetched_at': now,
                     'provider': provider,
+                    'confidence': confidence,
                 }
 
                 existing = conn.execute(
@@ -216,11 +229,11 @@ def store(team_short: str, team_full: str, findings: list[dict],
                     conn.execute(
                         f"UPDATE {TABLE} SET news_text=?, analysis_text=?, status=?, "
                         f"source_url=?, source_name=?, position=?, date_text=?, "
-                        f"news_date=?, fetched_at=?, provider=? WHERE id=?",
+                        f"news_date=?, fetched_at=?, provider=?, confidence=? WHERE id=?",
                         (values['news_text'], values['analysis_text'], values['status'],
                          values['source_url'], values['source_name'], values['position'],
                          values['date_text'], values['news_date'], now, provider,
-                         existing[0]))
+                         values['confidence'], existing[0]))
                     result['refreshed'] += 1
                 else:
                     cols = ','.join(values)
@@ -305,9 +318,29 @@ def _job(team_full: str) -> dict:
     }
 
 
+def _collect_espn(team_short: str, team_full: str) -> dict:
+    """Pull ESPN's structured designations into the feed. Free, and never raises."""
+    if not config.INJURY_ESPN_ENABLED:
+        return {'items': 0, 'inserted': 0, 'refreshed': 0}
+    try:
+        import espn_injuries
+        findings = espn_injuries.fetch_team_injuries(team_short, team_full)
+        if not findings:
+            return {'items': 0, 'inserted': 0, 'refreshed': 0}
+        return store(team_short, team_full, findings, provider=PROVIDER_ESPN)
+    except Exception as e:
+        logging.warning(f"ESPN injury lookup for {team_full} failed (non-fatal): {e}")
+        return {'items': 0, 'inserted': 0, 'refreshed': 0}
+
+
 def refresh_team(team_short: str, team_full: str = '', settings: dict | None = None,
                  api_key: str | None = None) -> dict:
-    """Fetch this team's current injuries and store them. Never raises."""
+    """Fetch this team's current injuries and store them. Never raises.
+
+    Two sources per refresh: ESPN's structured designation list (free, deterministic)
+    and a web-research pass (broad, catches what a structured feed hasn't listed yet).
+    ESPN failing never blocks research, and vice versa.
+    """
     import research
 
     team_full = team_full or team_short
@@ -317,19 +350,29 @@ def refresh_team(team_short: str, team_full: str = '', settings: dict | None = N
            'provider': PROVIDER_RESEARCH}
 
     with _team_lock(key):
+        espn = _collect_espn(team_short, team_full)
+        out['espn_items'] = espn['items']
+
         try:
             api_key = api_key or db.resolve_openrouter_key()
         except Exception as e:
             out['error'] = f'Could not read the OpenRouter key: {e}'
-            record_refresh(key, team_full, False, error=out['error'])
+            record_refresh(key, team_full, False, items=espn['items'],
+                           inserted=espn['inserted'], error=out['error'])
             return out
         if not api_key:
             out['error'] = ("No OpenRouter key. Add an 'openrouter' row to API_KEYS "
                             "or set OPENROUTER_API_KEY.")
-            record_refresh(key, team_full, False, error=out['error'])
+            record_refresh(key, team_full, False, items=espn['items'],
+                           inserted=espn['inserted'], error=out['error'])
             return out
 
-        settings = settings or config.default_settings()
+        # Injury collection digs deeper than the general research default: the
+        # designation that matters is often in beat reporting, not the top results.
+        settings = dict(settings or config.default_settings())
+        settings['search_max_results'] = max(
+            int(settings.get('search_max_results') or 0),
+            config.INJURY_SEARCH_MAX_RESULTS)
         import cfbd
         ctx = research.build_context(team_full, team_full, team_short, team_short,
                                      cfbd.season_year(datetime.now()), None)
@@ -340,27 +383,43 @@ def refresh_team(team_short: str, team_full: str = '', settings: dict | None = N
 
         if bucket.get('error'):
             out['error'] = bucket['error']
-            record_refresh(key, team_full, False, error=out['error'])
+            # ESPN may still have delivered; record the failure so retries come soon,
+            # but keep its counts visible.
+            record_refresh(key, team_full, False, items=espn['items'],
+                           inserted=espn['inserted'], error=out['error'])
             return out
 
         stored = store(team_short, team_full, bucket.get('findings') or [])
-        out.update(ok=True, items=stored['items'], inserted=stored['inserted'],
-                   refreshed=stored['refreshed'],
+        items = stored['items'] + espn['items']
+        inserted = stored['inserted'] + espn['inserted']
+        out.update(ok=True, items=items, inserted=inserted,
+                   refreshed=stored['refreshed'] + espn['refreshed'],
                    notes=(bucket.get('notes') or '')[:300])
-        record_refresh(key, team_full, True, stored['items'], stored['inserted'])
-        logging.info(f"Injury feed refreshed for {team_full}: {stored['items']} items, "
-                     f"{stored['inserted']} new")
+        record_refresh(key, team_full, True, items, inserted)
+        logging.info(f"Injury feed refreshed for {team_full}: {items} items "
+                     f"({espn['items']} from ESPN), {inserted} new")
         return out
 
 
-def record_findings(team_short: str, team_full: str, findings: list[dict]) -> dict:
-    """Persist injury findings a report already paid for. This is the free path."""
+def record_findings(team_short: str, team_full: str, findings: list[dict],
+                    succeeded: bool = True, error: str = '') -> dict:
+    """Persist injury findings a report already paid for. This is the free path.
+
+    A successful research pass that found NOTHING is still a refresh — the team is
+    healthy and the fact is fresh — so it marks the cache and stops ensure_fresh()
+    from paying for an identical call minutes later. A FAILED pass must never mark
+    the team fresh: it records the failure so the short retry window applies.
+    """
     key = team_key(team_short, team_full)
     try:
         stored = store(team_short, team_full, findings)
-        if stored['items']:
+        if succeeded:
             record_refresh(key, team_full or team_short, True,
                            stored['items'], stored['inserted'])
+        else:
+            record_refresh(key, team_full or team_short, False,
+                           stored['items'], stored['inserted'],
+                           error=(error or 'research call failed')[:400])
         return stored
     except Exception as e:
         logging.warning(f"Could not persist injury findings for {team_full}: {e}")
@@ -372,21 +431,26 @@ def ensure_fresh(team_short: str, team_full: str = '', settings: dict | None = N
     """Return this team's feed rows, refreshing first only if the cache has expired.
 
     A refresh failure is never fatal: stale rows beat no rows, and the report's own live
-    research call covers the same ground independently.
+    research call covers the same ground independently. A cache entry whose last attempt
+    FAILED only suppresses retries for the short retry window, not the full TTL —
+    stale-with-an-error is the one state worth paying to escape quickly.
     """
     team_full = team_full or team_short
     ttl = config.INJURY_FEED_TTL_HOURS if ttl_hours is None else ttl_hours
     key = team_key(team_short, team_full)
 
-    age = age_hours(last_refresh(key))
-    if age is None or age >= ttl:
+    entry = last_refresh(key)
+    age = age_hours(entry)
+    effective_ttl = ttl if (entry or {}).get('ok') else min(ttl, config.INJURY_RETRY_HOURS)
+    if age is None or age >= effective_ttl:
         try:
             refresh_team(team_short, team_full, settings, api_key)
         except Exception as e:
             logging.warning(f"Injury refresh for {team_full} failed: {e}")
 
     try:
-        return db.fetch_rotowire_for_team(team_short, team_full)
+        return db.fetch_rotowire_for_team(team_short, team_full,
+                                          days=config.INJURY_WINDOW_DAYS)
     except Exception as e:
         logging.warning(f"Injury feed lookup for {team_full} failed: {e}")
         return []
@@ -434,6 +498,226 @@ def sweep(teams: list[dict], settings: dict | None = None, force: bool = False,
 
 
 # ---------------------------------------------------------------------------
+# Per-player availability — the latest word wins
+# ---------------------------------------------------------------------------
+def resolve_availability(items: list[dict]) -> list[dict]:
+    """Collapse feed rows to one current status per player.
+
+    The raw feed keeps the whole timeline ("Questionable" Tuesday, "Out" Friday), which
+    is the right thing to store but the wrong thing to make a report model reconcile.
+    This picks each player's most recent dated word — preferring rows that actually
+    carry a designation — so the report gets a clean availability table alongside the
+    timeline.
+    """
+    by_player: dict = {}
+    for it in items or []:
+        player = (it.get('player') or '').strip()
+        if not player:
+            continue
+        key = player.lower()
+        day = (it.get('news_date') or '').strip()
+        if not day:
+            parsed = parse_date_text(it.get('date') or '')
+            day = parsed.isoformat() if parsed else ''
+        candidate = {
+            'player': player,
+            'position': (it.get('position') or '').strip(),
+            'status': (it.get('status') or '').strip(),
+            'as_of': day,
+            'headline': (it.get('headline') or '').strip(),
+            'confidence': (it.get('confidence') or '').strip() or 'medium',
+            'provider': (it.get('provider') or '').strip() or PROVIDER_RESEARCH,
+            'source_name': (it.get('source_name') or '').strip(),
+        }
+        held = by_player.get(key)
+        if held is None:
+            by_player[key] = candidate
+            continue
+        # Newer wins; on the same day, a row WITH a designation beats one without.
+        if (candidate['as_of'], bool(candidate['status'])) > \
+           (held['as_of'], bool(held['status'])):
+            by_player[key] = candidate
+    out = sorted(by_player.values(), key=lambda p: (p['as_of'], p['player']), reverse=True)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The scheduled game-aware sweep
+# ---------------------------------------------------------------------------
+SWEEP_KEY = '_sweep'
+
+
+def sweep_slots() -> list[tuple[int, int]]:
+    """Parse INJURY_SWEEP_SLOTS ('dow:hour_utc,...', 0=Mon) into (dow, hour) pairs."""
+    slots = []
+    for part in (config.INJURY_SWEEP_SLOTS or '').split(','):
+        part = part.strip()
+        if not part or ':' not in part:
+            continue
+        try:
+            dow, hour = (int(x) for x in part.split(':', 1))
+        except ValueError:
+            continue
+        if 0 <= dow <= 6 and 0 <= hour <= 23:
+            slots.append((dow, hour))
+    return slots
+
+
+def _claim_sweep(now: datetime, guard_hours: float = 20.0) -> bool:
+    """Atomically claim this sweep slot in the shared feed database.
+
+    Same idea as the report scheduler's claim: whichever worker lands the guarded
+    UPDATE first wins, so several gunicorn workers never sweep concurrently.
+    """
+    stamp = now.replace(tzinfo=timezone.utc).isoformat(timespec='seconds') \
+        if now.tzinfo is None else now.isoformat(timespec='seconds')
+    try:
+        conn = _connect()
+        try:
+            with conn:
+                row = conn.execute(
+                    f'SELECT fetched_at FROM {REFRESH_TABLE} WHERE team_key=?',
+                    (SWEEP_KEY,)).fetchone()
+                if row is None:
+                    cur = conn.execute(
+                        f'INSERT OR IGNORE INTO {REFRESH_TABLE} '
+                        f'(team_key, team_name, provider, fetched_at, ok, items, '
+                        f'inserted, error) VALUES (?,?,?,?,1,0,0,?)',
+                        (SWEEP_KEY, 'Scheduled injury sweep', PROVIDER_RESEARCH,
+                         stamp, ''))
+                    return cur.rowcount == 1
+                age = age_hours({'fetched_at': row['fetched_at']})
+                if age is not None and age < guard_hours:
+                    return False
+                cur = conn.execute(
+                    f'UPDATE {REFRESH_TABLE} SET fetched_at=? '
+                    f'WHERE team_key=? AND fetched_at=?',
+                    (stamp, SWEEP_KEY, row['fetched_at']))
+                return cur.rowcount == 1
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.warning(f"Sweep claim failed; skipping this slot: {e}")
+        return False
+
+
+def slate_teams(lookahead_days: int | None = None) -> list[dict]:
+    """Teams in upcoming Top-25 games: both sides of any game inside the lookahead
+    window where either side is AP-ranked. The ranked team's opponent matters exactly
+    as much to that matchup, so it is swept too."""
+    import weekly
+
+    api_key = db.resolve_cfbd_key()
+    if not api_key:
+        return []
+    lookahead = (config.INJURY_SWEEP_LOOKAHEAD_DAYS
+                 if lookahead_days is None else lookahead_days)
+    data = weekly.build_week_data(api_key, completed=False)
+    horizon = datetime.now(timezone.utc) + timedelta(days=lookahead)
+
+    seen, teams = set(), []
+    for g in data['games']:
+        if not (g.get('home_rank') or g.get('away_rank')):
+            continue
+        start = None
+        raw = (g.get('start') or '').replace('Z', '+00:00')
+        try:
+            start = datetime.fromisoformat(raw) if raw else None
+        except ValueError:
+            start = None
+        if start and start > horizon:
+            continue
+        for side in ('home', 'away'):
+            name = g.get(side)
+            if name and name not in seen:
+                seen.add(name)
+                teams.append({'short': name, 'full': name,
+                              'kickoff': g.get('start') or ''})
+    return teams
+
+
+def kickoff_readiness(teams: list[dict], now: datetime | None = None) -> list[dict]:
+    """Which of these teams would go into a game with a failed or stale feed?"""
+    now = now or datetime.now(timezone.utc)
+    problems = []
+    for team in teams:
+        raw = (team.get('kickoff') or '').replace('Z', '+00:00')
+        try:
+            kickoff = datetime.fromisoformat(raw) if raw else None
+        except ValueError:
+            kickoff = None
+        if not kickoff:
+            continue
+        hours_out = (kickoff - now).total_seconds() / 3600.0
+        if not 0 <= hours_out <= config.KICKOFF_ALERT_HOURS:
+            continue
+        entry = last_refresh(team_key(team['short'], team.get('full', '')))
+        age = age_hours(entry)
+        if entry is None or age is None:
+            problems.append({'team': team['short'], 'hours_to_kickoff': round(hours_out, 1),
+                             'problem': 'never collected'})
+        elif not entry.get('ok'):
+            problems.append({'team': team['short'], 'hours_to_kickoff': round(hours_out, 1),
+                             'problem': f"last refresh FAILED: {(entry.get('error') or '')[:80]}"})
+        elif age >= config.INJURY_FEED_TTL_HOURS * 2:
+            problems.append({'team': team['short'], 'hours_to_kickoff': round(hours_out, 1),
+                             'problem': f'feed is {round(age, 1)}h old'})
+    return problems
+
+
+def scheduled_sweep(now: datetime | None = None) -> dict | None:
+    """The game-aware sweep the scheduler runs. Returns a summary, or None if idle.
+
+    Fires only in a configured slot, claims the slot atomically, then refreshes every
+    team in an upcoming Top-25 game whose feed has gone stale — and finishes by
+    flagging any near-kickoff team the feed is still not ready for.
+    """
+    if not config.INJURY_SWEEP_ENABLED:
+        return None
+    now = now or datetime.utcnow()
+    if (now.weekday(), now.hour) not in sweep_slots():
+        return None
+    if not _claim_sweep(now):
+        return None
+
+    summary = {'teams': 0, 'swept': 0, 'skipped': 0, 'failed': 0,
+               'inserted': 0, 'not_ready': []}
+    try:
+        teams = slate_teams()
+        summary['teams'] = len(teams)
+        if teams:
+            results = sweep(teams)
+            for r in results:
+                if r.get('skipped'):
+                    summary['skipped'] += 1
+                elif r.get('ok'):
+                    summary['swept'] += 1
+                    summary['inserted'] += r.get('inserted', 0)
+                else:
+                    summary['failed'] += 1
+            summary['not_ready'] = kickoff_readiness(teams)
+            for p in summary['not_ready']:
+                logging.warning(
+                    f"Injury feed NOT READY for {p['team']} "
+                    f"({p['hours_to_kickoff']}h to kickoff): {p['problem']}")
+        note = (f"{summary['swept']} swept, {summary['skipped']} fresh, "
+                f"{summary['failed']} failed of {summary['teams']} teams; "
+                f"{summary['inserted']} new rows")
+        if summary['not_ready']:
+            note += ("; NOT READY: "
+                     + ', '.join(p['team'] for p in summary['not_ready']))
+        record_refresh(SWEEP_KEY, 'Scheduled injury sweep', not summary['failed']
+                       and not summary['not_ready'], summary['teams'],
+                       summary['inserted'], error=note[:400])
+        logging.info(f"Scheduled injury sweep: {note}")
+    except Exception as e:
+        logging.exception("Scheduled injury sweep failed")
+        record_refresh(SWEEP_KEY, 'Scheduled injury sweep', False, error=str(e)[:400])
+        summary['error'] = str(e)
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Freshness reporting
 # ---------------------------------------------------------------------------
 def fbs_teams(year: int | None = None) -> list[dict]:
@@ -477,6 +761,8 @@ def coverage(limit: int = 25) -> dict:
 
     for row in rows:
         entry = dict(row)
+        if (entry.get('team_key') or '').startswith(SYSTEM_KEY_PREFIX):
+            continue          # the sweep claim row is bookkeeping, not a team
         entry['age_hours'] = age_hours(entry)
         out['teams'] += 1
         if not entry['ok']:
@@ -728,6 +1014,21 @@ def diagnose() -> dict:
         failed = [r['team_name'] for r in cov['rows'] if not r['ok']][:5]
         report['verdict'].append(
             f"{cov['failed']} team refreshes failed, including: {', '.join(failed)}")
+
+    sweep_row = last_refresh(SWEEP_KEY)
+    report['last_sweep'] = sweep_row
+    if config.INJURY_SWEEP_ENABLED:
+        sweep_age = age_hours(sweep_row)
+        if sweep_row:
+            when = f"{round(sweep_age, 1)}h ago" if sweep_age is not None else 'unknown'
+            line = f"Last scheduled sweep {when}: {sweep_row.get('error') or 'ok'}"
+            if not sweep_row.get('ok'):
+                line += '  <- needs attention'
+            report['verdict'].append(line)
+        elif sweep_slots():
+            report['verdict'].append(
+                'The scheduled Top-25 sweep has never run — it fires from the report '
+                'scheduler; check that the service is running with SCHEDULES_ENABLED.')
 
     if not cov.get('teams'):
         report['verdict'].append(

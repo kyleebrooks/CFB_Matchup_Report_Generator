@@ -88,6 +88,22 @@ ROTOWIRE_STALE_DAYS = int(os.getenv('ROTOWIRE_STALE_DAYS', '3'))
 # How long a team's injury rows stay usable before a report triggers a fresh lookup.
 # This is the cost dial: lower means more up-to-the-minute, more search calls.
 INJURY_FEED_TTL_HOURS = float(os.getenv('INJURY_FEED_TTL_HOURS', '6'))
+# A failed refresh should not block retries for the whole TTL — stale-with-an-error is
+# the one state worth paying to escape quickly.
+INJURY_RETRY_HOURS = float(os.getenv('INJURY_RETRY_HOURS', '1'))
+# Injury collection digs deeper than general research: designations hide in beat
+# reporting that rarely tops the results.
+INJURY_SEARCH_MAX_RESULTS = int(os.getenv('INJURY_SEARCH_MAX_RESULTS', '8'))
+# ESPN's public injury listing — a free, structured second source alongside research.
+INJURY_ESPN_ENABLED = os.getenv('INJURY_ESPN_ENABLED', '1') not in ('0', 'false', 'no')
+# The scheduled game-aware sweep: "dow:hour_utc" slots (0=Mon). The defaults land after
+# the midweek conference availability reports and on gameday morning (US time).
+INJURY_SWEEP_ENABLED = os.getenv('INJURY_SWEEP_ENABLED', '1') not in ('0', 'false', 'no')
+INJURY_SWEEP_SLOTS = os.getenv('INJURY_SWEEP_SLOTS', '2:23,5:13')
+# Which games the sweep cares about: kickoffs inside this many days.
+INJURY_SWEEP_LOOKAHEAD_DAYS = int(os.getenv('INJURY_SWEEP_LOOKAHEAD_DAYS', '4'))
+# Flag any swept team whose feed is still failed/stale this close to kickoff.
+KICKOFF_ALERT_HOURS = float(os.getenv('KICKOFF_ALERT_HOURS', '48'))
 # Rough US-dollar cost of one web-search-backed research call, used only to warn before
 # a full-FBS sweep. OpenRouter bills the Exa engine at about $4 per 1000 results.
 SEARCH_COST_PER_CALL = float(

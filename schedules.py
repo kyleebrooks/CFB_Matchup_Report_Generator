@@ -372,7 +372,30 @@ def tick(now: datetime | None = None) -> list[str]:
                 predictions.grade_pending(key)
         except Exception as e:
             logging.debug(f"Grading pass skipped ({e})")
+
+    # Housekeeping: the game-aware injury sweep. Slot-gated and claimed inside the
+    # injuries module; a due sweep runs in its own thread so a few minutes of
+    # research calls never delay the next scheduling tick.
+    try:
+        import injuries
+        if injuries.scheduled_sweep is not None and config_sweep_due(now):
+            threading.Thread(target=injuries.scheduled_sweep, args=(now,),
+                             daemon=True, name='injury-sweep').start()
+    except Exception as e:
+        logging.debug(f"Injury sweep check skipped ({e})")
     return results
+
+
+def config_sweep_due(now: datetime | None = None) -> bool:
+    """Cheap pre-check so tick() only spawns a sweep thread in a configured slot.
+    The real claim (atomic, once per slot across workers) happens inside
+    injuries.scheduled_sweep."""
+    import config
+    import injuries
+    if not config.INJURY_SWEEP_ENABLED:
+        return False
+    now = now or datetime.utcnow()
+    return (now.weekday(), now.hour) in injuries.sweep_slots()
 
 
 _last_grade = 0.0

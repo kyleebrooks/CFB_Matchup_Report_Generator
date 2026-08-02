@@ -167,10 +167,14 @@ def generate(
 
     # The injury research calls above already found this team's injuries, so persisting
     # them into the feed costs nothing — the feed fills in as reports are generated.
+    # The bucket's error state rides along: a successful empty pass marks the team
+    # fresh (no duplicate paid call below), a failed one leaves it retryable.
     for scope, short, full in (("home", home_short, home_full),
                                ("away", away_short, away_full)):
         bucket = research_raw.get(f"{scope}_injuries") or {}
-        injuries.record_findings(short, full, bucket.get("findings") or [])
+        injuries.record_findings(short, full, bucket.get("findings") or [],
+                                 succeeded=not bucket.get("error"),
+                                 error=bucket.get("error") or "")
 
     try:
         rotowire = injuries.ensure_fresh_pair(home_short, home_full,
