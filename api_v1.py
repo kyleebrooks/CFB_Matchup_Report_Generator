@@ -350,6 +350,51 @@ def list_teams():
     return jsonify({'teams': teams, 'count': len(teams), 'cached': False}), 200
 
 
+_GAMES_CACHE: dict = {}
+
+
+@bp.route('/games', methods=['GET'])
+@require_account
+def list_games():
+    """The games a client can offer in a picker.
+
+    Two windows, both derived from the CFBD calendar around today: `upcoming` (this
+    week and next, for the matchup selector) and `recent` (the last two weeks'
+    finals, for the Full Game Recap selector). Cached for ten minutes — scores and
+    schedules move faster than the team list, but not faster than that.
+    """
+    global _GAMES_CACHE
+    now = time.time()
+    cached = _GAMES_CACHE.get('windows')
+    if cached and now - cached['at'] < 600:
+        payload = dict(cached['data'])
+        payload['cached'] = True
+        return jsonify(payload), 200
+
+    import cfbd
+    import db as db_mod
+
+    api_key = db_mod.resolve_cfbd_key()
+    if not api_key:
+        return _error('No CollegeFootballData key configured on the service.', 503)
+
+    windows = cfbd.schedule_windows(api_key)
+    if not windows['upcoming'] and not windows['recent'] and windows['errors']:
+        first = windows['errors'][0]
+        return _error('CollegeFootballData request failed.', 502,
+                      detail=f"HTTP {first['status']}: {str(first['body'])[:200]}")
+
+    payload = {
+        'season': windows['season'],
+        'upcoming': windows['upcoming'],
+        'recent': windows['recent'],
+        'count': len(windows['upcoming']) + len(windows['recent']),
+        'cached': False,
+    }
+    _GAMES_CACHE['windows'] = {'at': now, 'data': payload}
+    return jsonify(payload), 200
+
+
 # ---------------------------------------------------------------------------
 # Account self-service
 # ---------------------------------------------------------------------------

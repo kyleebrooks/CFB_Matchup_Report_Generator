@@ -67,10 +67,15 @@ def _describe(path: str, name: str) -> dict:
         size, modified = stat.st_size, datetime.fromtimestamp(stat.st_mtime)
     except OSError:
         size, modified = 0, None
-    # Filenames are "{home}_{away}_{Month D, YYYY}.pdf" or "team_{team}_{Month D, YYYY}.pdf".
+    # Filenames are "{home}_{away}_{Month D, YYYY}.pdf", "team_{team}_..." or
+    # "recap_{home}_{away}_...".
     stem = name[:-4] if name.lower().endswith('.pdf') else name
-    report_type = 'team' if stem.startswith('team_') else 'matchup'
-    subject = stem[5:] if report_type == 'team' else stem
+    if stem.startswith('team_'):
+        report_type, subject = 'team', stem[5:]
+    elif stem.startswith('recap_'):
+        report_type, subject = 'full_game_recap', stem[6:]
+    else:
+        report_type, subject = 'matchup', stem
     subject = re.sub(r'_[A-Z][a-z]+ \d{1,2}, \d{4}$', '', subject).replace('_', ' ')
     return {
         'filename': name,

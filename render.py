@@ -124,6 +124,9 @@ CSS = """
   .meta p { margin: 2pt 0; }
 """
 
+# Longest edge a watermark is embedded at. ~1600px across a letter page is 200+ DPI.
+WATERMARK_MAX_PX = int(os.getenv('WATERMARK_MAX_PX', '1600'))
+
 _HEADING_RE = re.compile(r"<h[1-3][^>]*>", re.IGNORECASE)
 
 # A trailing "Sources"/"References" heading the model wrote anyway, despite being told not
@@ -527,6 +530,20 @@ def prepare_watermark(image_path: str):
         )
 
     out = Image.merge('RGBA', (*src.convert('RGB').split(), darkness))
+
+    # Clamp the resolution. The stamp spans ~92% of a letter page, so ~1600px on the
+    # long edge is already 200+ DPI — anything beyond that adds nothing visible but is
+    # embedded in EVERY page of EVERY report. Whoever later rasterises those pages
+    # (the CFBReports site does, per view) must decode the full image each time:
+    # a 4000px watermark cost ~60 MB per page render and, cached by the PDF library,
+    # OOM-killed the site's 512 MB container the moment a report was viewed.
+    if max(out.size) > WATERMARK_MAX_PX:
+        before = out.size
+        out.thumbnail((WATERMARK_MAX_PX, WATERMARK_MAX_PX), Image.LANCZOS)
+        logging.info(f"Watermark {os.path.basename(image_path)} downscaled "
+                     f"{before[0]}x{before[1]} -> {out.size[0]}x{out.size[1]} "
+                     f"for embedding.")
+
     buf = io.BytesIO()
     out.save(buf, format='PNG', optimize=True)
     buf.seek(0)
