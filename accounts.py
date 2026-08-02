@@ -339,6 +339,10 @@ def rotate_key(account_id: int) -> tuple[dict, str]:
 # ---------------------------------------------------------------------------
 _EFFORTS = ('low', 'medium', 'high')
 _ENGINES = ('exa', 'native', '')
+_FLOAT_BOUNDS = {
+    'watermark_opacity': (0.01, 1.0),
+    'watermark_scale': (0.1, 1.0),
+}
 _INT_BOUNDS = {
     'search_max_results': (1, 25),          # OpenRouter's documented Exa range
     'research_max_tokens': (1000, 200000),
@@ -385,6 +389,16 @@ def validate_settings(settings: dict) -> dict:
             if effort not in _EFFORTS:
                 raise AccountError(f"'{key}' must be one of: {', '.join(_EFFORTS)}")
             clean[key] = effort
+
+        elif key in _FLOAT_BOUNDS:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                raise AccountError(f"'{key}' must be a number")
+            low, high = _FLOAT_BOUNDS[key]
+            if not low <= number <= high:
+                raise AccountError(f"'{key}' must be between {low} and {high}")
+            clean[key] = number
 
         else:
             try:

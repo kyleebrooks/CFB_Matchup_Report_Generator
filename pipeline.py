@@ -275,7 +275,13 @@ def generate(
     stamp = watermark or config.WATERMARK_PATH
     if os.path.exists(stamp):
         try:
-            render.add_pdf_watermark(tmp_path, stamp)
+            render.add_pdf_watermark(
+                tmp_path, stamp,
+                opacity=float(settings.get('watermark_opacity',
+                                           config.WATERMARK_OPACITY)),
+                scale=float(settings.get('watermark_scale',
+                                         config.WATERMARK_SCALE)),
+            )
         except Exception as e:
             logging.warning(f"Watermark step failed; delivering report without watermark: {e}")
     else:

@@ -115,6 +115,12 @@ ADMIN_API_KEY = os.getenv('ADMIN_API_KEY')
 WATERMARKS_DIR = os.getenv('WATERMARKS_DIR', os.path.join(BASE_DIR, 'watermarks'))
 MAX_WATERMARK_BYTES = int(os.getenv('MAX_WATERMARK_BYTES', str(5 * 1024 * 1024)))
 ALLOWED_WATERMARK_TYPES = ('image/png', 'image/jpeg', 'image/webp')
+# How strongly the watermark is stamped. The default suits a solid, full-contrast logo:
+# the renderer does the fading. An image that is ALREADY faint needs a higher value —
+# 0.09 on top of a 5%-grey source leaves nothing visible at all.
+WATERMARK_OPACITY = float(os.getenv('WATERMARK_OPACITY', '0.09'))
+# Fraction of the page the mark spans, longest edge.
+WATERMARK_SCALE = float(os.getenv('WATERMARK_SCALE', '0.92'))
 
 # Settings an account is allowed to override. Anything else in a PATCH is rejected
 # rather than silently ignored.
@@ -127,6 +133,8 @@ ACCOUNT_SETTING_KEYS = (
     'report_effort',
     'research_max_tokens',
     'report_max_tokens',
+    'watermark_opacity',
+    'watermark_scale',
 )
 
 # Optional guard rail: comma-separated allowlist of model ids accounts may select.
@@ -146,6 +154,8 @@ def default_settings() -> dict:
         'report_effort': REPORT_EFFORT,
         'research_max_tokens': RESEARCH_MAX_TOKENS,
         'report_max_tokens': REPORT_MAX_TOKENS,
+        'watermark_opacity': WATERMARK_OPACITY,
+        'watermark_scale': WATERMARK_SCALE,
     }
 
 

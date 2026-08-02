@@ -172,6 +172,8 @@ curl -sS -X PATCH https://HOST/v1/account/settings \
 | `research_effort` | `low` \| `medium` \| `high` | `medium` | |
 | `report_effort` | `low` \| `medium` \| `high` | `high` | |
 | `research_max_tokens` | 1000–200000 | `8000` | |
+| `watermark_opacity` | 0.01-1.0. How strongly the watermark is stamped. The default 0.09 suits a solid, full-contrast image — the renderer does the fading. Raise it toward 1.0 for an image that is already faint |
+| `watermark_scale` | 0.1-1.0. Fraction of the page the mark spans |
 | `report_max_tokens` | 2000–400000 | `96000` | Reasoning models bill thinking against this. Too low → empty output. |
 
 Invalid values are rejected with `400` and an explanation; nothing is silently ignored.
