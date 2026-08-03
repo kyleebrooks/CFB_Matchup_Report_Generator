@@ -85,7 +85,16 @@ def _describe(path: str, name: str) -> dict:
             break
     else:
         report_type, subject = 'matchup', stem
-    subject = re.sub(r'_[A-Z][a-z]+ \d{1,2}, \d{4}$', '', subject).replace('_', ' ')
+    subject = re.sub(r'_[A-Z][a-z]+ \d{1,2}, \d{4}$', '', subject)
+    # Matchup and recap filenames carry the GAME date (ISO) before the generation
+    # date, because the same teams can meet twice a season. Split it out so the
+    # subject stays clean and consumers get an explicit identifier.
+    game_date = None
+    m = re.search(r'_(\d{4}-\d{2}-\d{2})$', subject)
+    if m:
+        game_date = m.group(1)
+        subject = subject[:m.start()]
+    subject = subject.replace('_', ' ')
     return {
         'filename': name,
         'path': path,
@@ -93,6 +102,7 @@ def _describe(path: str, name: str) -> dict:
         'modified': modified,
         'report_type': report_type,
         'subject': subject.strip() or stem,
+        'game_date': game_date,
     }
 
 

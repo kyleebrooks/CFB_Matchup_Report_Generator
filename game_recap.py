@@ -479,7 +479,12 @@ def generate(
     today = datetime.now()
     # "_vs_" in the filename, not a bare underscore: school names contain spaces
     # ("Ohio State"), and downstream subject parsing needs an unambiguous divider.
+    # The game DATE rides along too — the same two teams can meet twice in a season,
+    # and each meeting deserves its own recap.
     safe = "".join(ch for ch in f"{home}_vs_{away}" if ch.isalnum() or ch in " -_").strip()
+    game_date_iso = str(game.get("startDate") or "")[:10]
+    if game_date_iso:
+        safe = f"{safe}_{game_date_iso}"
     out_dir = report_dir or config.REPORTS_DIR
     os.makedirs(out_dir, exist_ok=True)
     filename = f"recap_{safe}_{db.format_friendly_date(today)}.pdf"
