@@ -796,11 +796,46 @@ TEAM_CHART_SPECS = [
     ("team_players", "Top Individual Impact",
      "The players who have actually moved the needle this season. Cross-reference against "
      "the injury and roster sections."),
+    ("team_road", "The Road Ahead",
+     "Projected margin for every remaining game, from the SP+/FPI/Elo consensus with "
+     "home-field advantage — the same baseline the matchup reports use. Bars below "
+     "zero are games the ratings say this team should lose."),
 ]
 
 
-def build_team_charts(stats, percentiles, team_meta, team_label, games) -> list[dict]:
-    """Render the four single-team charts. Failures become styled placeholders."""
+def chart_team_road(outlook, team_label, color, alt):
+    """Projected margin per remaining game; negative bars are projected losses."""
+    games = [g for g in (outlook or {}).get("games") or []
+             if g.get("projected_margin") is not None]
+    if len(games) < 2:
+        return None
+    labels = []
+    for g in games:
+        site = {"home": "vs", "away": "at", "neutral": "n."}.get(g.get("site"), "vs")
+        rank = f" (#{g['opponent_sp_rank']} SP+)" if g.get("opponent_sp_rank") and \
+            g["opponent_sp_rank"] <= 25 else ""
+        labels.append(f"Wk {g.get('week') or '?'} {site} {g.get('opponent')}{rank}")
+    values = [float(g["projected_margin"]) for g in games]
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    bars = ax.bar(range(len(games)), values,
+                  color=[color if v >= 0 else alt for v in values], zorder=3)
+    ax.bar_label(bars, labels=[f"{v:+.1f}" for v in values], padding=2,
+                 fontsize=8, color=config.CHART_TEXT)
+    ax.axhline(0, color=config.CHART_TEXT, linewidth=0.8)
+    ax.set_xticks(range(len(games)))
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7.5)
+    ax.set_ylabel(f"projected margin for {team_label}")
+    _grid(ax)
+    fig.suptitle("The Road Ahead", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_team_charts(stats, percentiles, team_meta, team_label, games,
+                      outlook=None) -> list[dict]:
+    """Render the five single-team charts. Failures become styled placeholders."""
     if not CHARTS_AVAILABLE:
         raise ChartsUnavailable(
             f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
@@ -822,6 +857,7 @@ def build_team_charts(stats, percentiles, team_meta, team_label, games) -> list[
         "team_radar": lambda: chart_team_radar(percentiles, team_label, color),
         "team_form": lambda: chart_team_form(stats.get("Team PPA"), team_label, color, alt),
         "team_players": lambda: chart_team_players(stats.get("Player PPA"), team_label, color),
+        "team_road": lambda: chart_team_road(outlook, team_label, color, alt),
     }
 
     out: list[dict] = []
@@ -855,6 +891,10 @@ RECAP_CHART_SPECS = [
      "score. Higher is better on every axis."),
     ("recap_players", "Top Individual Impact",
      "The players who moved the game most, by total PPA across their touches."),
+    ("recap_playtypes", "Play-Type Success",
+     "Success rate for every play type either offense ran at least three times, side "
+     "by side. The gap between a team's rush and dropback bars is the story of its "
+     "play-calling night."),
 ]
 
 
@@ -1019,8 +1059,51 @@ def chart_recap_players(box, game, home_c, away_c):
     return _encode(fig)
 
 
-def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict) -> list[dict]:
-    """Render the four game-recap charts. Failures become styled placeholders."""
+def chart_recap_playtypes(playtypes, game, home_c, away_c):
+    """Success rate by play type, both offenses side by side."""
+    home, away = game.get("homeTeam"), game.get("awayTeam")
+    if not playtypes or home not in playtypes or away not in playtypes:
+        return None
+
+    def rows(team):
+        return {r["type"]: r for r in playtypes[team].get("offense_by_type") or []
+                if r.get("plays", 0) >= 3}
+
+    home_rows, away_rows = rows(home), rows(away)
+    types = sorted(set(home_rows) | set(away_rows),
+                   key=lambda t: -((home_rows.get(t) or {}).get("plays", 0)
+                                   + (away_rows.get(t) or {}).get("plays", 0)))[:7]
+    if len(types) < 2:
+        return None
+
+    import numpy as np
+    y = np.arange(len(types))
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    hv = [(home_rows.get(t) or {}).get("success_rate") or 0 for t in types]
+    av = [(away_rows.get(t) or {}).get("success_rate") or 0 for t in types]
+    bars_h = ax.barh(y + 0.2, hv, height=0.38, color=home_c, zorder=3, label=home)
+    bars_a = ax.barh(y - 0.2, av, height=0.38, color=away_c, zorder=3, label=away)
+    for bars, vals, side in ((bars_h, hv, home_rows), (bars_a, av, away_rows)):
+        labels = [f"{v:.0f}%  ({(side.get(t) or {}).get('plays', 0)})"
+                  for v, t in zip(vals, types)]
+        ax.bar_label(bars, labels=labels, padding=3, fontsize=7.5,
+                     color=config.CHART_TEXT)
+    ax.set_yticks(y)
+    ax.set_yticklabels(types, fontsize=8.5)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 108)
+    ax.set_xlabel("success rate, % (plays run in parentheses)")
+    _grid(ax, axis="x")
+    ax.legend(loc="lower right", fontsize=8.5, frameon=False)
+    fig.suptitle("Play-Type Success", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
+                       playtypes: dict | None = None) -> list[dict]:
+    """Render the five game-recap charts. Failures become styled placeholders."""
     if not CHARTS_AVAILABLE:
         raise ChartsUnavailable(
             f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
@@ -1035,6 +1118,7 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict) -> list[di
         "recap_drives": lambda: chart_recap_drives(recap.get("drives"), game, home_c, away_c),
         "recap_box": lambda: chart_recap_box(recap.get("box"), game, home_c, away_c),
         "recap_players": lambda: chart_recap_players(recap.get("box"), game, home_c, away_c),
+        "recap_playtypes": lambda: chart_recap_playtypes(playtypes, game, home_c, away_c),
     }
 
     out: list[dict] = []
