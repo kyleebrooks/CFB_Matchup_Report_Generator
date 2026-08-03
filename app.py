@@ -75,6 +75,7 @@ def add_cors(resp):
 
 logging.basicConfig(level=logging.INFO)
 
+
 os.makedirs(config.REPORTS_DIR, exist_ok=True)
 os.makedirs(config.WATERMARKS_DIR, exist_ok=True)
 
@@ -106,17 +107,26 @@ def _extract_api_key():
     return request.args.get("api_key") or body.get("api_key") or request.form.get("api_key")
 
 
-# JSON error handler for easier debugging
+# Every consumer of this service speaks JSON — the website, the legacy AFPLNA site,
+# curl in the runbooks. Flask's default error pages are HTML, and an HTML body on an
+# API endpoint turns into "Unexpected token '<'" in whatever parses the response. So
+# EVERY error answers as JSON: HTTP errors (404s, aborts) as much as route crashes.
 @app.errorhandler(Exception)
 def handle_any_error(e):
     if isinstance(e, HTTPException):
-        return e
-    logging.exception("Unhandled error")
+        return jsonify({"error": e.name, "detail": e.description}), e.code
+    logging.exception(f"Unhandled error on {request.method} {request.path}")
     return jsonify({
         "error": "Server error",
         "type": e.__class__.__name__,
         "detail": str(e),
     }), 500
+
+
+@app.errorhandler(404)
+def handle_404(_e):
+    return jsonify({"error": "Not found",
+                    "detail": f"No route for {request.path}"}), 404
 
 
 # ---------------------------
