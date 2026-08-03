@@ -45,6 +45,14 @@ SECTIONS = [
      "short account of how it actually went. Then cover the UPCOMING games with a brief "
      "look at each opponent and what the matchup asks of this team. Use the supplied "
      "schedule data for every result and date — never invent one."),
+    ("The Road Ahead", None,
+     "Project the rest of the season from the remaining-schedule outlook data: a table of "
+     "every remaining game with its projected margin and win probability, then the "
+     "projected final record, the likeliest stumble, and the stretch that decides the "
+     "season. Where the graded prediction record for this team's games is present, "
+     "summarise honestly how projections on this team have fared. Every margin, "
+     "probability and record comes from the data [1] — never invent one, and remind the "
+     "reader these are ratings-based estimates, not promises."),
     ("Practice Notes", "practice",
      "Practice and scrimmage reporting: who is standing out, who is limited, install and "
      "game-plan notes, position battles."),
@@ -233,6 +241,130 @@ SYSTEM_PROMPT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# The road ahead: ratings context and remaining-schedule projections
+# ---------------------------------------------------------------------------
+def _rank_of(rows: list, team: str, field: str) -> tuple:
+    """(value, national rank) for one team in a league rating table."""
+    scored = [(r.get("team"), r.get(field)) for r in rows or []
+              if r.get("team") and r.get(field) is not None]
+    scored.sort(key=lambda t: -float(t[1]))
+    for i, (name, value) in enumerate(scored, 1):
+        if name == team:
+            return round(float(value), 2), i
+    return None, None
+
+
+def _ratings_context(league: dict, team_short: str) -> dict:
+    sp, sp_rank = _rank_of(league.get("sp"), team_short, "rating")
+    fpi, fpi_rank = _rank_of(league.get("fpi"), team_short, "fpi")
+    elo, elo_rank = _rank_of(league.get("elo"), team_short, "elo")
+    return {
+        "sp_plus": {"rating": sp, "national_rank": sp_rank},
+        "fpi": {"rating": fpi, "national_rank": fpi_rank},
+        "elo": {"rating": elo, "national_rank": elo_rank},
+    }
+
+
+def _road_ahead(league: dict, team_short: str, upcoming: list[dict],
+                records: list) -> dict:
+    """Every remaining game projected from the league rating tables.
+
+    Reuses the weekly publication's ratings-consensus margin (SP+/FPI/Elo mean with
+    home-field advantage) so the team report, the weekly slate and the matchup
+    baseline all speak with one voice about the same game.
+    """
+    import predict
+    import weekly
+
+    tables = {"sp": weekly._table(league.get("sp"), "team"),
+              "fpi": weekly._table(league.get("fpi"), "team"),
+              "elo": weekly._table(league.get("elo"), "team")}
+    sp_table = league.get("sp") or []
+
+    games, win_probs = [], []
+    for g in upcoming:
+        opponent = g.get("opponent")
+        if not opponent:
+            continue
+        neutral = bool(g.get("neutral"))
+        if g.get("home"):
+            margin = weekly._quick_margin(team_short, opponent, tables, neutral)
+        else:
+            away_view = weekly._quick_margin(opponent, team_short, tables, neutral)
+            margin = -away_view if away_view is not None else None
+        prob = (round(predict.win_probability(margin) * 100, 1)
+                if margin is not None else None)
+        if prob is not None:
+            win_probs.append(prob)
+        _opp_sp, opp_rank = _rank_of(sp_table, opponent, "rating")
+        games.append({
+            "week": g.get("week"),
+            "date": g.get("start_date"),
+            "opponent": opponent,
+            "site": "neutral" if neutral else ("home" if g.get("home") else "away"),
+            "opponent_sp_rank": opp_rank,
+            "projected_margin": margin,
+            "win_probability_pct": prob,
+        })
+
+    total = (records or [{}])[0].get("total") or {}
+    wins_now = int(total.get("wins") or 0)
+    losses_now = int(total.get("losses") or 0)
+    expected_more = round(sum(win_probs) / 100, 1) if win_probs else None
+    return {
+        "method": ("Projected margins are the mean of the SP+, FPI and Elo rating "
+                   "gaps with home-field advantage applied — the same baseline the "
+                   "matchup reports use. Win probabilities follow from that margin."),
+        "games": games,
+        "current_record": f"{wins_now}-{losses_now}",
+        "expected_remaining_wins": expected_more,
+        "projected_final_wins": (round(wins_now + expected_more, 1)
+                                 if expected_more is not None else None),
+        "games_without_a_projection": sum(1 for g in games
+                                          if g["projected_margin"] is None),
+    }
+
+
+def _our_record_on_team(team_short: str, year) -> dict:
+    """The graded prediction history for this team's games. Fail-soft: the report
+    must not care whether the prediction store is reachable."""
+    try:
+        import predictions
+        rows = [r for r in predictions.history(season=year, graded_only=True)
+                if team_short in (r.get("home_short"), r.get("away_short"))]
+    except Exception as e:
+        logging.debug(f"Prediction record unavailable for {team_short}: {e}")
+        return {"available": False, "graded_predictions": 0}
+    if not rows:
+        return {"available": False, "graded_predictions": 0}
+
+    calls = []
+    for r in rows:
+        as_home = r.get("home_short") == team_short
+        predicted = r.get("consensus_margin")
+        actual = r.get("actual_margin")
+        calls.append({
+            "run_date": r.get("run_date"),
+            "opponent": r.get("away_short") if as_home else r.get("home_short"),
+            "predicted_margin": (round(float(predicted), 1) * (1 if as_home else -1)
+                                 if predicted is not None else None),
+            "actual_margin": (int(actual) * (1 if as_home else -1)
+                              if actual is not None else None),
+            "margin_error": r.get("margin_error"),
+            "winner_correct": bool(r.get("winner_correct")),
+        })
+    errors = [c["margin_error"] for c in calls if c["margin_error"] is not None]
+    return {
+        "available": True,
+        "graded_predictions": len(calls),
+        "winners_called": sum(1 for c in calls if c["winner_correct"]),
+        "mean_abs_margin_error": (round(sum(errors) / len(errors), 2)
+                                  if errors else None),
+        "calls": calls[:12],
+    }
+
+
 def _build_prompt(ctx, bundle, charts, registry) -> str:
     team = ctx["team_full"]
     sections = "\n".join(
@@ -408,10 +540,18 @@ def generate(
     registry = research.seed_registry()
     sections = _assemble(raw, rotowire, registry, ctx, settings)
 
+    # The road ahead: ratings context, per-game projections for what remains, and the
+    # site's own graded record on this team. All computed here, all fail-soft.
+    league = data.get("league") or {}
+    ratings_context = _ratings_context(league, team_short)
+    outlook = _road_ahead(league, team_short, upcoming, data.get("records") or [])
+    our_record = _our_record_on_team(team_short, year)
+
     # --- Stage 3: visuals ----------------------------------------------------
     step("charts")
     try:
-        chart_set = charts_mod.build_team_charts(stats, percentiles, meta, team_short, games)
+        chart_set = charts_mod.build_team_charts(stats, percentiles, meta, team_short,
+                                                 games, outlook=outlook)
     except charts_mod.ChartsUnavailable as e:
         raise PipelineError("Charting library missing on the server", str(e), 500)
 
@@ -428,8 +568,11 @@ def generate(
             "generated_at_utc": ctx["now_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
         "record": data.get("records") or [],
+        "ratings_context": ratings_context,
         "scoring_profile": profile,
         "schedule": {"completed": played, "upcoming": upcoming},
+        "remaining_schedule_outlook": outlook,
+        "our_prediction_record_on_this_team": our_record,
         "statistics_cfbd": pruned,
         "national_percentiles": percentiles,
         "news_and_research": sections,

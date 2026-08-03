@@ -119,6 +119,8 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
     # League-wide pulls power the percentile scaling used by the radar/mismatch charts.
     jobs["league::advanced"] = ("/stats/season/advanced", {"year": year}, "League Advanced Stats")
     jobs["league::sp"] = ("/ratings/sp", {"year": year}, "League SP Ratings")
+    jobs["league::fpi"] = ("/ratings/fpi", {"year": year}, "League FPI Ratings")
+    jobs["league::elo"] = ("/ratings/elo", {"year": year}, "League Elo Ratings")
     jobs["meta::teams"] = ("/teams/fbs", {"year": year}, "FBS Teams")
     jobs["meta::talent"] = ("/talent", {"year": year}, "Team Talent")
     jobs["games::A"] = ("/games", {"year": year, "team": home_short}, f"Games ({home_short})")
@@ -191,6 +193,8 @@ def fetch_team(api_key: str, year: int, team: str) -> dict:
 
     jobs["league::advanced"] = ("/stats/season/advanced", {"year": year}, "League Advanced Stats")
     jobs["league::sp"] = ("/ratings/sp", {"year": year}, "League SP Ratings")
+    jobs["league::fpi"] = ("/ratings/fpi", {"year": year}, "League FPI Ratings")
+    jobs["league::elo"] = ("/ratings/elo", {"year": year}, "League Elo Ratings")
     jobs["meta::teams"] = ("/teams/fbs", {"year": year}, "FBS Teams")
     jobs["meta::talent"] = ("/talent", {"year": year}, "Team Talent")
     jobs["games"] = ("/games", {"year": year, "team": team}, f"Games ({team})")
@@ -221,7 +225,9 @@ def fetch_team(api_key: str, year: int, team: str) -> dict:
         "total_requests": len(jobs),
         "stats": stats,
         "league": {"advanced": results.get("league::advanced") or [],
-                   "sp": results.get("league::sp") or []},
+                   "sp": results.get("league::sp") or [],
+                   "fpi": results.get("league::fpi") or [],
+                   "elo": results.get("league::elo") or []},
         "teams": results.get("meta::teams") or [],
         "games": results.get("games") or [],
         "records": results.get("records") or [],
