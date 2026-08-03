@@ -268,6 +268,7 @@ def list_stored_reports():
             'filename': r['filename'],
             'report_type': r['report_type'],
             'subject': r['subject'],
+            'game_date': r.get('game_date'),
             'bytes': r['bytes'],
             'generated_at': r['modified'].isoformat() if r['modified'] else None,
             'url': f"/v1/reports/stored/{quote(r['filename'])}",

@@ -149,6 +149,24 @@ def generate(
 
     stats = cfbd_data["stats"]
 
+    # The scheduled meeting this preview is about. Found here (not just at the
+    # prediction-bookkeeping step) because the game DATE belongs in the filename:
+    # two teams can meet twice in a season, and "Georgia vs Alabama" alone cannot
+    # tell a September game from the rematch in December.
+    upcoming_game = next(
+        (g for g in (cfbd_data["games"]["teamA"] or [])
+         if not cfbd.pick(g, "completed", default=False)
+         and cfbd.pick(g, "awayTeam", "away_team") in (away_short, away_full)
+         and cfbd.pick(g, "homeTeam", "home_team") in (home_short, home_full)),
+        None)
+    game_date_iso = str(cfbd.pick(upcoming_game or {}, "startDate", "start_date",
+                                  default="") or "")[:10]
+    if game_date_iso:
+        filename = (f"{home_short}_{away_short}_{game_date_iso}_"
+                    f"{db.format_friendly_date(today)}.pdf")
+        filepath = os.path.join(out_dir, filename)
+        tmp_path = filepath + ".building"
+
     # --- Stage 2: assembly ---------------------------------------------------
     step("assemble")
     home_meta = cfbd.team_meta(cfbd_data["teams"], home_short)
@@ -296,22 +314,18 @@ def generate(
     else:
         logging.warning(f"Watermark image not found at {stamp}; skipping watermark.")
 
-    # Swap in the finished file, then retire any older report for this matchup.
+    # Swap in the finished file, then retire any older report for THIS meeting.
+    # Two meetings of the same teams in one season carry different game dates in
+    # their filenames, so the September report survives the December rematch.
     os.replace(tmp_path, filepath)
     cleanup_old_reports(home_short, away_short, keep_filename=filename,
-                        report_dir=out_dir)
+                        report_dir=out_dir, game_date=game_date_iso)
 
     # File the prediction for the permanent record — run date, the full baseline,
     # the market at this moment, and which report model wrote it — so it can be
     # graded against the final score and audited later. Never fatal.
     try:
         import predictions
-        upcoming_game = next(
-            (g for g in (cfbd_data["games"]["teamA"] or [])
-             if not cfbd.pick(g, "completed", default=False)
-             and cfbd.pick(g, "awayTeam", "away_team") in (away_short, away_full)
-             and cfbd.pick(g, "homeTeam", "home_team") in (home_short, home_full)),
-            None)
         predictions.record(
             account_id=account_id,
             baseline=baseline,
@@ -345,14 +359,29 @@ def generate(
 
 
 def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | None = None,
-                        report_dir: str | None = None) -> None:
+                        report_dir: str | None = None, game_date: str = '') -> None:
+    """Retire superseded reports for one matchup.
+
+    When the new report carries a game date, only reports for THAT meeting (same
+    date, or legacy dateless files) are retired — a rematch must not delete the
+    first meeting's report. A dateless new report keeps the old blanket behaviour.
+    """
     import glob
+    import re
 
     pattern = os.path.join(report_dir or config.REPORTS_DIR,
                            f"{home_short}_{away_short}_*.pdf")
+    prefix = f"{home_short}_{away_short}_"
     for path in glob.glob(pattern):
-        if not keep_filename or os.path.basename(path) != keep_filename:
-            try:
-                os.remove(path)
-            except Exception as e:
-                logging.warning(f"Could not delete old report {path}: {e}")
+        name = os.path.basename(path)
+        if keep_filename and name == keep_filename:
+            continue
+        if game_date:
+            rest = name[len(prefix):]
+            m = re.match(r'(\d{4}-\d{2}-\d{2})_', rest)
+            if m and m.group(1) != game_date:
+                continue          # a different meeting of the same teams — keep it
+        try:
+            os.remove(path)
+        except Exception as e:
+            logging.warning(f"Could not delete old report {path}: {e}")
