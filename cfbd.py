@@ -6,8 +6,10 @@ camelCase/snake_case drift, and pruned before they reach the report model.
 """
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import requests
 
@@ -248,8 +250,53 @@ def team_meta(teams: list, school: str) -> dict:
                 "alt_color": (pick(t, "alternateColor", "alt_color") or "").strip(),
                 "conference": pick(t, "conference", default=""),
                 "mascot": pick(t, "mascot", default=""),
+                "classification": (pick(t, "classification", default="") or "").lower(),
+                "found": True,
             }
-    return {"school": school, "logo": "", "color": "", "alt_color": "", "conference": "", "mascot": ""}
+    return {"school": school, "logo": "", "color": "", "alt_color": "",
+            "conference": "", "mascot": "", "classification": "", "found": False}
+
+
+# The full college roster — every division, not just FBS. One fetch a day covers
+# every FCS opponent's logo and colors; nothing here is per-report.
+_ALL_TEAMS_CACHE: dict = {"year": None, "at": 0.0, "rows": []}
+_ALL_TEAMS_TTL = 24 * 3600
+_ALL_TEAMS_LOCK = threading.Lock()
+
+
+def all_teams(api_key: str, year: int | None = None,
+              errors: list | None = None) -> list:
+    """CFBD's complete team list (FBS, FCS, II, III), cached in-process for a day."""
+    year = year or season_year(datetime.now())
+    with _ALL_TEAMS_LOCK:
+        if (_ALL_TEAMS_CACHE["rows"] and _ALL_TEAMS_CACHE["year"] == year
+                and time.time() - _ALL_TEAMS_CACHE["at"] < _ALL_TEAMS_TTL):
+            return _ALL_TEAMS_CACHE["rows"]
+    rows = _get(api_key, "/teams", {"year": year}, "All teams", errors) or []
+    if rows:
+        with _ALL_TEAMS_LOCK:
+            _ALL_TEAMS_CACHE.update(year=year, at=time.time(), rows=rows)
+    return rows
+
+
+def resolve_team_meta(api_key: str, teams: list, school: str,
+                      year: int | None = None) -> dict:
+    """team_meta, with the full roster as a fallback for non-FBS schools.
+
+    Reports routinely involve an FCS opponent, and the FBS-only list the report
+    already fetched knows nothing about them — which is why those reports shipped
+    with a blank logo and default chart colors. The fallback costs one cached
+    request per day, and only fires when the school is genuinely not FBS.
+    """
+    meta = team_meta(teams, school)
+    if meta["found"]:
+        return meta
+    try:
+        fallback = team_meta(all_teams(api_key, year), school)
+    except Exception as e:
+        logging.warning(f"Full-roster lookup for {school} failed: {e}")
+        return meta
+    return fallback if fallback["found"] else meta
 
 
 # ---------------------------------------------------------------------------

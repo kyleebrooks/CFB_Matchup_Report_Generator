@@ -308,15 +308,19 @@ def delete_stored_report(filename):
 @bp.route('/teams', methods=['GET'])
 @require_account
 def list_teams():
-    """FBS teams for the current season, for populating a client's team pickers.
+    """Teams for the season, for populating a client's team pickers.
 
-    Cached for an hour: the roster of FBS programs changes a handful of times a year,
-    and every consumer would otherwise hit CFBD on every page load.
+    FBS by default; `?include=fcs` appends the FCS division too, so a client can
+    offer the opponents FBS schools actually schedule. Cached for an hour: rosters
+    change a handful of times a year, and every consumer would otherwise hit CFBD
+    on every page load.
     """
     global _TEAMS_CACHE
     year = request.args.get('year', type=int)
+    include_fcs = (request.args.get('include') or '').strip().lower() == 'fcs'
+    cache_key = (year, include_fcs)
     now = time.time()
-    cached = _TEAMS_CACHE.get(year)
+    cached = _TEAMS_CACHE.get(cache_key)
     if cached and now - cached['at'] < 3600:
         return jsonify({'teams': cached['teams'], 'count': len(cached['teams']),
                         'cached': True}), 200
@@ -328,27 +332,38 @@ def list_teams():
     if not api_key:
         return _error('No CollegeFootballData key configured on the service.', 503)
     errors: list[dict] = []
-    rows = cfbd._get(api_key, '/teams/fbs',
-                     {'year': year or cfbd.season_year(datetime.now())},
-                     'FBS teams', errors)
+    season = year or cfbd.season_year(datetime.now())
+    rows = cfbd._get(api_key, '/teams/fbs', {'year': season}, 'FBS teams', errors)
     if errors:
         return _error('CollegeFootballData request failed.', 502,
                       detail=f"HTTP {errors[0]['status']}: {errors[0]['body'][:200]}")
 
-    teams = []
-    for row in rows or []:
+    def shape(row, classification):
         school = (row.get('school') or '').strip()
         if not school:
-            continue
+            return None
         mascot = (row.get('mascot') or '').strip()
-        teams.append({
+        return {
             'school': school,
             'mascot': mascot,
             'full_name': f'{school} {mascot}'.strip(),
             'conference': (row.get('conference') or '').strip(),
-        })
+            'classification': classification,
+        }
+
+    teams = [t for t in (shape(r, 'fbs') for r in rows or []) if t]
+    if include_fcs:
+        # The full roster is a fail-soft extra: a hiccup here still returns FBS.
+        try:
+            fcs_rows = [r for r in cfbd.all_teams(api_key, season, errors)
+                        if (r.get('classification') or '').lower() == 'fcs']
+            seen = {t['school'] for t in teams}
+            teams += [t for t in (shape(r, 'fcs') for r in fcs_rows)
+                      if t and t['school'] not in seen]
+        except Exception as e:
+            logging.warning(f'FCS roster unavailable; returning FBS only: {e}')
     teams.sort(key=lambda t: t['school'].lower())
-    _TEAMS_CACHE[year] = {'at': now, 'teams': teams}
+    _TEAMS_CACHE[cache_key] = {'at': now, 'teams': teams}
     return jsonify({'teams': teams, 'count': len(teams), 'cached': False}), 200
 
 

@@ -515,7 +515,7 @@ def generate(
     # --- Stage 2: assembly ---------------------------------------------------
     step("assemble")
     stats = data["stats"]
-    meta = cfbd.team_meta(data["teams"], team_short)
+    meta = cfbd.resolve_team_meta(cfbd_api_key, data["teams"], team_short, year)
     games = cfbd.normalize_games(data["games"], team_short)
     played = [g for g in games if g["completed"]]
     upcoming = [g for g in games if not g["completed"]]

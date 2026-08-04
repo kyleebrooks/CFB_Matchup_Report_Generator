@@ -169,8 +169,10 @@ def generate(
 
     # --- Stage 2: assembly ---------------------------------------------------
     step("assemble")
-    home_meta = cfbd.team_meta(cfbd_data["teams"], home_short)
-    away_meta = cfbd.team_meta(cfbd_data["teams"], away_short)
+    # Full-roster fallback: an FCS opponent is not in the FBS list the fetch
+    # brought back, and without this its logo and colors were simply blank.
+    home_meta = cfbd.resolve_team_meta(cfbd_api_key, cfbd_data["teams"], home_short, year)
+    away_meta = cfbd.resolve_team_meta(cfbd_api_key, cfbd_data["teams"], away_short, year)
 
     home_games = cfbd.normalize_games(cfbd_data["games"]["teamA"], home_short)
     away_games = cfbd.normalize_games(cfbd_data["games"]["teamB"], away_short)
@@ -214,6 +216,21 @@ def generate(
     except charts_mod.ChartsUnavailable as e:
         raise PipelineError("Charting library missing on the server", str(e), 500)
 
+    # When a side is not an FBS program, say so explicitly in the data: the model
+    # should explain thin efficiency sections rather than write around silent gaps,
+    # and the reader should know why the projection leans on the market line.
+    coverage_notes = []
+    for meta, full in ((home_meta, home_full), (away_meta, away_full)):
+        cls = (meta.get("classification") or "").lower()
+        if meta.get("found") and cls and cls != "fbs":
+            article = "an" if cls.startswith(("f", "i")) else "a"
+            coverage_notes.append(
+                f"{full} is {article} {cls.upper()} program. CFBD publishes no FBS power "
+                f"ratings and only limited advanced statistics for {cls.upper()} "
+                f"teams, so ratings-based projections lean on the market line and "
+                f"several statistical sections will be thinner for this side. "
+                f"State this plainly once rather than treating it as missing data.")
+
     bundle = {
         "matchup": {
             "home_team": home_full,
@@ -222,6 +239,7 @@ def generate(
             "away_team": away_full,
             "away_short": away_short,
             "away_conference": away_meta.get("conference"),
+            "data_coverage_notes": coverage_notes,
             "season": year,
             "kickoff": kickoff or "",
             "generated_at_utc": ctx["now_utc"].strftime("%Y-%m-%dT%H:%M:%SZ"),

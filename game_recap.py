@@ -473,8 +473,8 @@ def generate(
 
     home, away = game.get("homeTeam") or "Home", game.get("awayTeam") or "Away"
     year = game.get("season")
-    home_meta = cfbd.team_meta(recap.get("teams") or [], home)
-    away_meta = cfbd.team_meta(recap.get("teams") or [], away)
+    home_meta = cfbd.resolve_team_meta(cfbd_api_key, recap.get("teams") or [], home, year)
+    away_meta = cfbd.resolve_team_meta(cfbd_api_key, recap.get("teams") or [], away, year)
 
     today = datetime.now()
     # "_vs_" in the filename, not a bare underscore: school names contain spaces
