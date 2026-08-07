@@ -109,19 +109,68 @@ def _distance(a: str, b: str) -> float:
     return math.sqrt(sum((x - y) ** 2 for x, y in zip(ra, rb)))
 
 
-def resolve_colors(home_meta: dict, away_meta: dict) -> tuple[str, str]:
-    """Use each school's official color, falling back when missing or too similar."""
-    home = _norm_hex(home_meta.get("color")) if _hex_ok(home_meta.get("color")) else config.CHART_FALLBACK_HOME
-    away = _norm_hex(away_meta.get("color")) if _hex_ok(away_meta.get("color")) else config.CHART_FALLBACK_AWAY
+def _luminance(hex_color: str) -> float:
+    r, g, b = _rgb(hex_color)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
 
+
+def _shade(hex_color: str, factor: float) -> str:
+    """Darken (<1) or lighten (>1) a color while keeping its hue recognisable."""
+    r, g, b = _rgb(hex_color)
+    if factor <= 1:
+        r, g, b = (int(c * factor) for c in (r, g, b))
+    else:
+        blend = min(1.0, factor - 1.0)
+        r, g, b = (int(c + (255 - c) * blend) for c in (r, g, b))
+    return f"#{max(0, min(255, r)):02x}{max(0, min(255, g)):02x}{max(0, min(255, b)):02x}"
+
+
+def _visible(hex_color: str) -> str:
+    """The color, darkened just enough to survive a white page. A school whose
+    primary is white/cream (or whose alt got picked) must never paint invisible bars."""
+    color = _norm_hex(hex_color)
+    while _luminance(color) > 0.82:
+        darker = _shade(color, 0.8)
+        if darker == color:            # pure white cannot darken multiplicatively
+            return config.CHART_MUTED
+        color = darker
+    return color
+
+
+def resolve_colors(home_meta: dict, away_meta: dict) -> tuple[str, str]:
+    """Each school's ACTUAL base color, kept whenever possible.
+
+    The old behaviour swapped a team to a generic navy/red the moment the two
+    colors were similar — so Georgia vs Alabama rendered in stock colors and the
+    charts stopped looking like either school. Now similarity is resolved by
+    shading the away color (still recognisably theirs) or by its alternate, and a
+    too-light color is darkened rather than replaced. Generic fallbacks are the
+    last resort, not the first."""
+    home = _visible(home_meta.get("color")) if _hex_ok(home_meta.get("color")) \
+        else config.CHART_FALLBACK_HOME
+    away = _visible(away_meta.get("color")) if _hex_ok(away_meta.get("color")) \
+        else config.CHART_FALLBACK_AWAY
+
+    if _distance(home, away) >= 70:
+        return home, away
+
+    # Too similar. Try, in order of how much identity each option keeps:
+    # the away alternate color, a darker shade of away, a lighter shade of away.
+    alt = away_meta.get("alt_color")
+    # Only a REAL alternate color qualifies — most alternates are white/cream, and
+    # force-darkening those yields a washed gray when a rich shade of the school's
+    # own primary is available below.
+    if _hex_ok(alt) and _luminance(_norm_hex(alt)) <= 0.82:
+        alt = _visible(alt)
+        if _distance(home, alt) >= 70:
+            return home, alt
+    for factor in (0.55, 1.55):
+        shaded = _visible(_shade(away, factor))
+        if _distance(home, shaded) >= 70:
+            return home, shaded
+    away = config.CHART_FALLBACK_AWAY
     if _distance(home, away) < 70:
-        alt = away_meta.get("alt_color")
-        if _hex_ok(alt) and _distance(home, _norm_hex(alt)) >= 70:
-            away = _norm_hex(alt)
-        else:
-            away = config.CHART_FALLBACK_AWAY
-            if _distance(home, away) < 70:
-                home = config.CHART_FALLBACK_HOME
+        home = config.CHART_FALLBACK_HOME
     return home, away
 
 
@@ -592,6 +641,91 @@ def chart_win_probability(baseline, home_l, away_l, home_c, away_c):
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
+def chart_verdict(baseline, home_l, away_l, home_c, away_c):
+    """The reveal: a scoreboard-style card for the final prediction.
+
+    Projected score in each school's color, the win-probability split, and the
+    model's spread set against the market — the numbers the whole report builds
+    to, presented like a result rather than buried in prose."""
+    projection = (baseline or {}).get("projected_score") or {}
+    home_pts, away_pts = _f(projection.get("home_score")), _f(projection.get("away_score"))
+    prob = _f((baseline or {}).get("home_win_probability"))
+    if home_pts is None or away_pts is None or prob is None:
+        return None
+    consensus = _f(baseline.get("consensus_margin"))
+    market = _f(baseline.get("market_margin"))
+    total = _f(baseline.get("projected_total"))
+    market_total = _f(baseline.get("market_total"))
+
+    fig, ax = plt.subplots(figsize=(FIG_W, 5.4))
+    ax.axis("off")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+
+    ax.text(0.5, 0.97, "PROJECTED FINAL", ha="center", va="top", fontsize=13,
+            fontweight="bold", color=config.CHART_TEXT)
+
+    # The scoreboard: each side in its own color, the projected winner's panel solid.
+    home_wins = home_pts >= away_pts
+    for x, label, pts, color, wins in ((0.26, home_l, home_pts, home_c, home_wins),
+                                       (0.74, away_l, away_pts, away_c, not home_wins)):
+        panel = plt.Rectangle((x - 0.21, 0.56), 0.42, 0.30,
+                              facecolor=color if wins else "none",
+                              edgecolor=color, linewidth=2.5, zorder=2)
+        ax.add_patch(panel)
+        ax.text(x, 0.795, label, ha="center", va="center", fontsize=12.5,
+                fontweight="bold", color="white" if wins else color, zorder=3)
+        ax.text(x, 0.665, f"{pts:.0f}", ha="center", va="center", fontsize=30,
+                fontweight="bold", color="white" if wins else color, zorder=3)
+    ax.text(0.5, 0.71, "—", ha="center", va="center", fontsize=16,
+            color=config.CHART_MUTED)
+
+    # Win probability, one bar split in team colors.
+    bar_y, bar_h = 0.40, 0.075
+    ax.add_patch(plt.Rectangle((0.05, bar_y), 0.90 * prob, bar_h,
+                               facecolor=home_c, zorder=2))
+    ax.add_patch(plt.Rectangle((0.05 + 0.90 * prob, bar_y), 0.90 * (1 - prob), bar_h,
+                               facecolor=away_c, zorder=2))
+    ax.text(0.05, bar_y + bar_h + 0.015, f"{home_l}  {prob * 100:.0f}%",
+            ha="left", va="bottom", fontsize=10, fontweight="bold", color=home_c)
+    ax.text(0.95, bar_y + bar_h + 0.015, f"{(1 - prob) * 100:.0f}%  {away_l}",
+            ha="right", va="bottom", fontsize=10, fontweight="bold", color=away_c)
+    ax.text(0.5, bar_y - 0.045, "WIN PROBABILITY", ha="center", va="top",
+            fontsize=8, color=config.CHART_MUTED)
+
+    # The chips: spread, market and edge, total.
+    def spread_text(margin):
+        if margin is None:
+            return "—"
+        fav = home_l if margin > 0 else away_l
+        return "PICK 'EM" if abs(margin) < 0.05 else f"{fav} -{abs(margin):.1f}"
+
+    chips = [("MODEL SPREAD", spread_text(consensus))]
+    if market is not None and consensus is not None:
+        edge = consensus - market
+        chips.append(("MARKET", f"{spread_text(market)}  (edge {edge:+.1f})"))
+    if total is not None:
+        text = f"{total:.0f}" + (f"  (market {market_total:.0f})" if market_total else "")
+        chips.append(("PROJECTED TOTAL", text))
+    width = 0.9 / len(chips)
+    for i, (label, value) in enumerate(chips):
+        cx = 0.05 + width * (i + 0.5)
+        ax.add_patch(plt.Rectangle((cx - width / 2 + 0.01, 0.10), width - 0.02, 0.17,
+                                   fill=False, edgecolor=config.CHART_GRID,
+                                   linewidth=1.2, zorder=2))
+        ax.text(cx, 0.225, label, ha="center", va="center", fontsize=7.5,
+                color=config.CHART_MUTED)
+        ax.text(cx, 0.155, value, ha="center", va="center", fontsize=10.5,
+                fontweight="bold", color=config.CHART_TEXT)
+
+    basis = (baseline or {}).get("consensus_basis") or ""
+    if basis:
+        ax.text(0.5, 0.02, f"Consensus margin: {basis}.", ha="center", va="bottom",
+                fontsize=7.5, color=config.CHART_MUTED, style="italic")
+    fig.tight_layout()
+    return _encode(fig)
+
+
 CHART_SPECS = [
     ("power_ratings", "Power Rating Dashboard",
      "SP+, FPI and Elo side by side. SP+ and FPI are points-above-average ratings; the "
@@ -657,6 +791,25 @@ def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, aw
             "caption": caption,
             "img": img,
             "available": available,
+        })
+
+    # The ninth chart is the reveal: it renders WITH the Final Prediction section at
+    # the end of the report (placement="finale"), not in the mid-report gallery.
+    verdict_img = None
+    try:
+        verdict_img = chart_verdict(baseline, home_label, away_label, home_c, away_c)
+    except Exception as e:
+        logging.warning(f"Chart 'verdict' failed to render: {e}")
+    if verdict_img:
+        out.append({
+            "key": "verdict",
+            "title": "The Verdict",
+            "caption": ("The projected final score, win probability and the model's "
+                        "spread against the market — the report's bottom line in one "
+                        "card."),
+            "img": verdict_img,
+            "available": True,
+            "placement": "finale",
         })
     return out
 

@@ -58,9 +58,13 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
         (f"{home_full} vs {away_full} Media Matchup Analysis",
          "What the national and local media, analysts and coaches are saying about this game."),
         ("Final Prediction",
-         "Your overall verdict, a projected final score, and YOUR point spread. Weigh every "
-         "input above: the ratings, the efficiency mismatches, the form trend, the injuries, the "
-         "roster and practice news, and the statistical baseline."),
+         "The reveal. Your overall verdict, a projected final score, and YOUR point spread — "
+         "weigh every input above: the ratings, the efficiency mismatches, the form trend, the "
+         "injuries, the roster and practice news, and the statistical baseline. Write it with "
+         "conviction: name the winner in the first sentence, then justify it. The Verdict "
+         "scoreboard card renders directly below this section with the projected score, win "
+         "probability and model-vs-market spread — let your numbers agree with it exactly, and "
+         "do not repeat it as a table."),
     ]
 
 

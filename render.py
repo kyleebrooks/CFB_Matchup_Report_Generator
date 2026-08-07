@@ -96,6 +96,12 @@ CSS = """
   figure.chart .chart-name { font-weight: bold; color: #16181d;
                              text-transform: uppercase; letter-spacing: 0.5pt;
                              font-size: 8.2pt; }
+  /* The Verdict: the reveal card that closes the report. Heavier frame, its own
+     label bar, page-break protected so the scoreboard never splits. */
+  figure.chart.finale { border: 2pt solid #16181d; padding: 10pt 10pt 8pt;
+                        page-break-inside: avoid; margin-top: 10pt; }
+  figure.chart.finale .chart-name { font-size: 10pt; letter-spacing: 0.08em; }
+
 
   /* A section heading pinned alone at the foot of a page reads as a mistake; keep it
      glued to its opening line. (wkhtmltopdf honours break-inside far more reliably
@@ -224,21 +230,43 @@ def _charts_block(charts: list[dict]) -> str:
     )
 
 
-def inject_charts(body_html: str, charts: list[dict]) -> str:
-    """Place the visual dashboard immediately after the opening section.
+def _finale_block(charts: list[dict]) -> str:
+    figures = []
+    for c in charts:
+        figures.append(
+            f'<figure class="chart finale">'
+            f'<img src="{c["img"]}" alt="{c["title"]}">'
+            f'<figcaption><span class="chart-name">{c["title"].upper()}</span> &middot; '
+            f'{c["caption"]}</figcaption>'
+            f'</figure>'
+        )
+    return "".join(figures)
 
-    Anchoring to the second heading keeps the position identical on every report while
-    letting the Matchup Overview set the stage first. If the model produced no second
-    heading, the dashboard simply leads.
+
+def inject_charts(body_html: str, charts: list[dict]) -> str:
+    """Place the visual dashboard after the opening section — and the reveal at the end.
+
+    Gallery charts anchor to the second heading, so the position is identical on every
+    report while the opening section sets the stage. Charts marked placement="finale"
+    (the Verdict card) render at the very END of the body instead: they belong WITH the
+    final-prediction prose, not buried mid-report.
     """
     if not charts:
         return body_html
-    block = _charts_block(charts)
-    matches = list(_HEADING_RE.finditer(body_html))
-    if len(matches) >= 2:
-        cut = matches[1].start()
-        return body_html[:cut] + block + body_html[cut:]
-    return block + body_html
+    gallery = [c for c in charts if c.get("placement") != "finale"]
+    finale = [c for c in charts if c.get("placement") == "finale"]
+
+    if gallery:
+        block = _charts_block(gallery)
+        matches = list(_HEADING_RE.finditer(body_html))
+        if len(matches) >= 2:
+            cut = matches[1].start()
+            body_html = body_html[:cut] + block + body_html[cut:]
+        else:
+            body_html = block + body_html
+    if finale:
+        body_html = body_html + _finale_block(finale)
+    return body_html
 
 
 def sources_block(registry) -> str:
