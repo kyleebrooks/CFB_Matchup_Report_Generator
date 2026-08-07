@@ -40,19 +40,18 @@ SECTIONS = [
      "efficiency numbers say, and the two or three things that will decide how the rest "
      "of the season goes. Synthesise from everything below — this section has no research "
      "feed of its own."),
-    ("Schedule and Game-by-Game Breakdown", "schedule",
-     "Walk the season in order. For each COMPLETED game give the result, the score, and a "
-     "short account of how it actually went. Then cover the UPCOMING games with a brief "
-     "look at each opponent and what the matchup asks of this team. Use the supplied "
-     "schedule data for every result and date — never invent one."),
-    ("The Road Ahead", None,
-     "Project the rest of the season from the remaining-schedule outlook data: a table of "
-     "every remaining game with its projected margin and win probability, then the "
-     "projected final record, the likeliest stumble, and the stretch that decides the "
-     "season. Where the graded prediction record for this team's games is present, "
-     "summarise honestly how projections on this team have fared. Every margin, "
-     "probability and record comes from the data [1] — never invent one, and remind the "
-     "reader these are ratings-based estimates, not promises."),
+    ("The Season: Played and Projected", "schedule",
+     "One consolidated walk through the whole schedule — no separate season-so-far and "
+     "road-ahead sections, this covers both. FIRST the games already played: a markdown "
+     "table of results (Week, Opponent, H/A, Result, Score) followed by a short account "
+     "of how each game actually went, drawing on the schedule research. THEN the road "
+     "ahead: a table of every remaining game with its projected margin and win "
+     "probability from the remaining-schedule outlook data, the projected final record, "
+     "the likeliest stumble, and the stretch that decides the season. Where the graded "
+     "prediction record for this team's games is present, summarise honestly how "
+     "projections on this team have fared. Every result, margin and probability comes "
+     "from the data [1] — never invent one — and remind the reader the projections are "
+     "ratings-based estimates, not promises."),
     ("Practice Notes", "practice",
      "Practice and scrimmage reporting: who is standing out, who is limited, install and "
      "game-plan notes, position battles."),
@@ -207,7 +206,7 @@ def _assemble(raw: dict, rotowire: list, registry, ctx: dict, settings: dict) ->
         item["citation"] = f"[{idx}]" if idx else "[2]"
 
     return {
-        "schedule_research": {"section_title": "Schedule and Game-by-Game Breakdown",
+        "schedule_research": {"section_title": "The Season: Played and Projected",
                               "inputs": {"live_web_research": bucket("schedule")}},
         "practice_notes": {"section_title": "Practice Notes",
                            "inputs": {"live_web_research": bucket("practice")}},
@@ -399,9 +398,9 @@ FORMATTING
   a statistic — what that statistic actually measures in plain English.
 - Then the key figures (where applicable), then AT LEAST TWO substantial paragraphs of
   analysis. Analysis, not restatement.
-- In the schedule section, use a markdown table for completed results (Week, Opponent,
-  H/A, Result, Score) followed by prose on each game, then a separate list for upcoming
-  opponents.
+- In the schedule section, use TWO markdown tables — completed results (Week, Opponent,
+  H/A, Result, Score) and remaining games (Week, Opponent, Site, Projected Margin, Win
+  Probability) — each followed by its prose.
 - When a section has more than one input bucket, keep them visibly separate with a bolded
   sub-label (e.g. "**Live web research:**" and "**Injury feed:**"). Never blend two
   sources into one undifferentiated list.
