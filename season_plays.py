@@ -22,7 +22,7 @@ import render
 import report as report_mod
 import research
 from pipeline import PipelineError
-from playbook import team_breakdown, _agg, _family, _is_scrimmage
+from playbook import team_breakdown, playcalling_report, _agg, _family, _is_scrimmage
 
 STAGES = {
     "start":  (5,   "Starting up"),
@@ -42,12 +42,14 @@ SECTIONS = [
         "definition once, from the data."
     )),
     ("Play-Type Profile", (
-        "What the offense ran all season and how well each call worked: every play "
-        "type by volume, success rate, yards per play, average PPA where present, "
-        "explosives and stuffs, and the rush-versus-dropback split. Use a table for "
-        "the type-level numbers. Contrast volume with efficiency — the types leaned "
-        "on most are not always the ones that worked, and PPA is the value measure "
-        "that exposes it."
+        "What the offense ran all season and how well each call worked, by play "
+        "group: Rushes (including rushing TDs, scrambles noted), Passes (one group "
+        "— completions, incompletions, passing TDs and interceptions together, with "
+        "the completion detail inside the row) and Sacks — volume, success rate, "
+        "yards per play, average PPA where present, explosives and stuffs, plus the "
+        "rush-versus-dropback split. Use a table for the group-level numbers. "
+        "Contrast volume with efficiency — the calls leaned on most are not always "
+        "the ones that worked, and PPA is the value measure that exposes it."
     )),
     ("The Ground Game: Where the Runs Went", (
         "From the rush-direction data: how the season's designed runs distributed "
@@ -76,6 +78,19 @@ SECTIONS = [
         "Then fourth down: how often the team went for it, conversion rate, and "
         "what that says about the staff's aggressiveness. Red-zone efficiency "
         "closes the section: trips, touchdowns, success rate."
+    )),
+    ("The Play-Caller's Report Card", (
+        "The season-long play-calling grade from the playcalling data: a COMPUTED "
+        "letter grade on the school scale (F- to A+), built from weighted "
+        "components — early-down success, schedule management, third-down "
+        "conversion, explosive-play creation, negative-play avoidance, red-zone "
+        "finishing, and a fourth-down decision adjustment. State the grade in bold "
+        "in the first line, then walk the components that earned it, citing their "
+        "values, and tie each to the tendencies shown elsewhere in this report. "
+        "Include the season negative-play ledger here: every snap that went "
+        "backwards — rushes for loss, sacks, other losses, turnovers — not just the "
+        "sack count. The grade is deterministic: present it as given, explain it, "
+        "never re-derive or soften it."
     )),
     ("The Other Side: What Opponents Did", (
         "The same deep cuts for the defense — everything opposing offenses ran "
@@ -292,6 +307,7 @@ def generate(
             "record": f"{wins}-{losses}",
         },
         "season_breakdown": breakdown,
+        "playcalling": playcalling_report(plays, team_short),
         "game_log": game_log,
         "offense_in_wins_vs_losses": _wins_losses_split(game_log, plays, games, team_short),
         "data_coverage": {

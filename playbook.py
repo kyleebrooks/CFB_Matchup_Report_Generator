@@ -144,11 +144,53 @@ def _agg(plays: list[dict]) -> dict:
     }
 
 
-def _type_rows(plays: list[dict]) -> list[dict]:
-    groups: dict = {}
+def play_group(play: dict) -> str:
+    """The display group a play belongs to.
+
+    CFBD's raw playType splits what a reader thinks of as one thing: receptions,
+    incompletions, passing TDs and interceptions are all outcomes of the same call
+    (grading 'Pass Incompletion' as its own play type is meaningless), and rushing
+    TDs are just rushes that scored. Sacks stay their own group — they are the
+    drive-killers a reader wants counted separately.
+    """
+    pt = (play.get("playType") or "").lower()
+    family = _family(pt)
+    if family == "rush":
+        return "Rushes"
+    if family == "dropback":
+        return "Sacks" if "sack" in pt else "Passes"
+    return "Other"
+
+
+def _group_rows(plays: list[dict]) -> list[dict]:
+    buckets: dict = {}
     for p in plays:
-        groups.setdefault(p.get("playType") or "Unknown", []).append(p)
-    rows = [{"type": ptype, **_agg(group)} for ptype, group in groups.items()]
+        buckets.setdefault(play_group(p), []).append(p)
+
+    def low(p):
+        return (p.get("playType") or "").lower()
+
+    rows = []
+    for name, group in buckets.items():
+        row = {"group": name, **_agg(group)}
+        if name == "Passes":
+            interceptions = sum(1 for p in group if "interception" in low(p))
+            incompletions = sum(1 for p in group if "incompletion" in low(p))
+            completions = len(group) - interceptions - incompletions
+            row.update({
+                "attempts": len(group),
+                "completions": completions,
+                "incompletions": incompletions,
+                "interceptions_thrown": interceptions,
+                "completion_pct": round(completions / len(group) * 100, 1),
+                "touchdowns": sum(1 for p in group if "touchdown" in low(p)),
+            })
+        elif name == "Rushes":
+            row.update({
+                "touchdowns": sum(1 for p in group if "touchdown" in low(p)),
+                "scrambles": sum(1 for p in group if rush_direction(p) == "scramble"),
+            })
+        rows.append(row)
     rows.sort(key=lambda r: -r["plays"])
     return rows
 
@@ -165,18 +207,24 @@ def _family_rows(plays: list[dict]) -> dict:
 
 
 def play_type_breakdown(plays: list, home: str, away: str) -> dict:
-    """Offense and defense play-type effectiveness for both teams of one game."""
+    """Offense and defense play-group effectiveness for both teams of one game."""
     scrimmage = [p for p in plays if _is_scrimmage(p)]
 
     def offense_of(team):
         return [p for p in scrimmage if p.get("offense") == team]
 
-    out = {"definition": SUCCESS_DEFINITION}
+    out = {
+        "definition": SUCCESS_DEFINITION,
+        "note": ("Plays are grouped the way a reader calls them: Passes covers every "
+                 "pass attempt (completions, incompletions, passing TDs, "
+                 "interceptions — with the completion detail inside the row), Rushes "
+                 "includes rushing TDs and notes scrambles, and Sacks stand alone."),
+    }
     for team, opponent in ((home, away), (away, home)):
         out[team] = {
-            "offense_by_type": _type_rows(offense_of(team)),
+            "offense_play_groups": _group_rows(offense_of(team)),
             "offense_rush_vs_dropback": _family_rows(offense_of(team)),
-            "defense_allowed_by_type": _type_rows(offense_of(opponent)),
+            "defense_allowed_play_groups": _group_rows(offense_of(opponent)),
             "defense_rush_vs_dropback_allowed": _family_rows(offense_of(opponent)),
         }
     return out
@@ -266,8 +314,30 @@ def situational_profile(plays: list[dict]) -> dict:
                 if p.get("yardsToGoal") is not None
                 and int(p.get("yardsToGoal") or 100) <= 20]
 
+    # The full negative-play ledger — sacks are only one way a snap goes backwards.
+    negative = [p for p in plays if int(p.get("yardsGained") or 0) < 0]
+    low = lambda p: (p.get("playType") or "").lower()
+    sacks_taken = sum(1 for p in negative if "sack" in low(p))
+    rushes_for_loss = sum(1 for p in negative if _family(p.get("playType")) == "rush")
+    negative_plays = {
+        "plays": len(negative),
+        "rate_pct": round(len(negative) / len(plays) * 100, 1) if plays else None,
+        "yards_lost": sum(int(p.get("yardsGained") or 0) for p in negative),
+        "sacks": sacks_taken,
+        "rushes_for_loss": rushes_for_loss,
+        "other_for_loss": len(negative) - sacks_taken - rushes_for_loss,
+        "turnovers": {
+            "interceptions": sum(1 for p in plays if "interception" in low(p)),
+            "fumbles_lost": sum(1 for p in plays
+                                if _is_turnover(p) and "fumble" in low(p)),
+        },
+        "note": ("A negative play is any scrimmage snap that lost yards; turnovers "
+                 "are counted whatever the yardage said."),
+    }
+
     return {
         "rush_directions": directions,
+        "negative_plays": negative_plays,
         "scrambles": _agg(scrambles) if scrambles else {"plays": 0},
         "passing": passing,
         "by_down": by_down,
@@ -298,7 +368,7 @@ def team_breakdown(plays: list, team: str) -> dict:
 
     def side(rows):
         return {
-            "by_type": _type_rows(rows),
+            "play_groups": _group_rows(rows),
             "rush_vs_dropback": _family_rows(rows),
             "situational": situational_profile(rows),
         }
@@ -329,3 +399,160 @@ def situational_breakdown(plays: list, home: str, away: str) -> dict:
                 [p for p in scrimmage if p.get("offense") == opponent]),
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Play-calling grades and unit rankings
+# ---------------------------------------------------------------------------
+GRADE_LADDER = [(97, "A+"), (93, "A"), (90, "A-"), (87, "B+"), (83, "B"), (80, "B-"),
+                (77, "C+"), (73, "C"), (70, "C-"), (67, "D+"), (63, "D"), (60, "D-"),
+                (55, "F+"), (45, "F"), (0, "F-")]
+
+
+def _letter(score: float) -> str:
+    for cutoff, grade in GRADE_LADDER:
+        if score >= cutoff:
+            return grade
+    return "F-"
+
+
+def playcalling_report(plays: list, team: str) -> dict:
+    """Grade one team's play-calling from its own offensive play-by-play.
+
+    Deterministic on purpose: the same plays always earn the same grade, so a grade
+    means the same thing in every report. Each component is scaled against
+    FBS-typical ranges (the floor scores 0, the ceiling 100), weighted, and the
+    composite maps onto the school ladder from F- to A+.
+    """
+    offense = [p for p in plays if _is_scrimmage(p) and p.get("offense") == team]
+    if len(offense) < 20:
+        return {"available": False,
+                "note": f"Fewer than 20 scrimmage plays for {team} — not enough to "
+                        f"grade the play-calling."}
+
+    def scaled(value, floor, ceiling):
+        return round(max(0.0, min(100.0, (value - floor) / (ceiling - floor) * 100)), 1)
+
+    first = [p for p in offense if int(p.get("down") or 0) == 1]
+    third = [p for p in offense if int(p.get("down") or 0) == 3]
+    fourth = [p for p in offense if int(p.get("down") or 0) == 4]
+
+    components: dict = {}
+
+    def component(key, value, floor, ceiling, weight, what, invert=False):
+        if value is None:
+            return
+        score = scaled(value, floor, ceiling)
+        if invert:
+            score = round(100 - score, 1)
+        components[key] = {"value_pct": round(value * 100, 1), "score": score,
+                           "weight": weight, "what": what}
+
+    if first:
+        component("early_down_success",
+                  sum(1 for p in first if _is_success(p)) / len(first), 0.30, 0.60, 30,
+                  "1st-down success rate — staying ahead of schedule is play-calling's "
+                  "first job")
+    if third:
+        component("schedule_management",
+                  sum(1 for p in third if int(p.get("distance") or 0) <= 6) / len(third),
+                  0.30, 0.75, 15,
+                  "share of 3rd downs kept to 6 yards or less — the calls on 1st and "
+                  "2nd decide this")
+        component("third_down_conversion",
+                  sum(1 for p in third if _converted(p)) / len(third), 0.25, 0.55, 15,
+                  "3rd downs actually converted")
+    component("explosive_play_creation",
+              sum(1 for p in offense if (p.get("yardsGained") or 0) >= 15) / len(offense),
+              0.04, 0.16, 15, "share of snaps gaining 15+ — scheme creating chunk plays")
+    component("negative_play_avoidance",
+              sum(1 for p in offense
+                  if int(p.get("yardsGained") or 0) < 0 or _is_turnover(p)) / len(offense),
+              0.06, 0.22, 15,
+              "share of snaps losing yards or the ball (lower is better)", invert=True)
+
+    red_zone = [p for p in offense
+                if p.get("yardsToGoal") is not None
+                and int(p.get("yardsToGoal") or 100) <= 20]
+    rz_tds = sum(1 for p in red_zone if p.get("scoring") and not _is_turnover(p))
+    rz_trips = {p.get("driveId") for p in red_zone if p.get("driveId") is not None}
+    if rz_trips:
+        component("red_zone_finishing", rz_tds / len(rz_trips), 0.30, 0.80, 10,
+                  "touchdowns per red-zone trip")
+    elif red_zone:
+        component("red_zone_finishing",
+                  sum(1 for p in red_zone if _is_success(p)) / len(red_zone),
+                  0.35, 0.65, 10, "red-zone success rate (drive ids unavailable)")
+
+    total_weight = sum(c["weight"] for c in components.values())
+    composite = (sum(c["score"] * c["weight"] for c in components.values()) / total_weight
+                 if total_weight else 50.0)
+
+    # Fourth down is a decision quality signal, not a volume stat: reward staffs
+    # whose gambles convert, dock the ones that keep failing.
+    adjustment = 0.0
+    if fourth:
+        conv = sum(1 for p in fourth if _converted(p)) / len(fourth)
+        adjustment = 3.0 if conv >= 0.5 else (-3.0 if len(fourth) >= 2 else -1.5)
+    composite = max(0.0, min(100.0, composite + adjustment))
+
+    return {
+        "available": True,
+        "team": team,
+        "grade": _letter(composite),
+        "score": round(composite, 1),
+        "plays_graded": len(offense),
+        "components": components,
+        "fourth_down_adjustment": {
+            "attempts": len(fourth),
+            "conversions": sum(1 for p in fourth if _converted(p)),
+            "applied": adjustment,
+        },
+        "rubric": ("Computed deterministically from the play-by-play: each component "
+                   "is scaled against FBS-typical ranges and weighted as shown, with "
+                   "a fourth-down decision adjustment. Present THIS grade — explain "
+                   "it, never re-derive or soften it."),
+    }
+
+
+def unit_report(plays: list, home: str, away: str) -> dict:
+    """All eight units of a game (or season slice), ranked best to worst.
+
+    Offenses are scored by the per-play value they created, defenses by the value
+    they prevented — so a shutdown pass defense can outrank a good rushing offense
+    and the ranking reads as one honest list.
+    """
+    scrimmage = [p for p in plays if _is_scrimmage(p)]
+    entries = []
+    for team, opponent in ((home, away), (away, home)):
+        for side, source, families in (
+                ("offense", team, (("rush", "rushing offense"),
+                                   ("dropback", "passing offense"))),
+                ("defense", opponent, (("rush", "run defense"),
+                                       ("dropback", "pass defense")))):
+            rows_all = [p for p in scrimmage if p.get("offense") == source]
+            for family, label in families:
+                rows = [p for p in rows_all if _family(p.get("playType")) == family]
+                if len(rows) < 5:
+                    continue
+                agg = _agg(rows)
+                base = (agg["avg_ppa"] if agg["avg_ppa"] is not None
+                        else ((agg["success_rate"] or 0) / 100) - 0.42)
+                score = base if side == "offense" else -base
+                entries.append({
+                    "team": team,
+                    "unit": label,
+                    "perspective": "created" if side == "offense" else "allowed",
+                    "plays": agg["plays"],
+                    "yards_per_play": agg["yards_per_play"],
+                    "success_rate": agg["success_rate"],
+                    "avg_ppa": agg["avg_ppa"],
+                    "score": round(score, 3),
+                })
+    entries.sort(key=lambda e: -e["score"])
+    return {
+        "note": ("All units ranked best to worst on per-play value: offenses by the "
+                 "PPA they created, defenses by the PPA they prevented. 'allowed' "
+                 "rows show what opposing offenses did against that unit."),
+        "ranking": entries,
+    }

@@ -641,6 +641,22 @@ def probe(api_key: str, year: int, team: str = "Georgia") -> dict:
         ("/player/portal", {"year": year}, "Transfer Portal"),
     ]
 
+    # The per-game endpoints need a real game id to say anything useful — take the
+    # team's most recent completed game, so "is /metrics/wp empty?" is answerable
+    # from this probe instead of from a finished report's missing chart.
+    game_errors: list[dict] = []
+    game_rows = _get(api_key, "/games", {"year": year, "team": team},
+                     "Games (for per-game probes)", game_errors) or []
+    completed = [g for g in game_rows
+                 if g.get("completed") and g.get("id") is not None]
+    if completed:
+        completed.sort(key=lambda g: str(g.get("startDate") or ""))
+        gid = completed[-1]["id"]
+        probes += [
+            ("/metrics/wp", {"gameId": gid}, f"Win Probability (game {gid})"),
+            ("/live/plays", {"gameId": gid}, f"Live Play Detail (game {gid})"),
+        ]
+
     for endpoint, params, label in probes:
         errors: list[dict] = []
         data = _get(api_key, endpoint, params, label, errors)
@@ -923,11 +939,17 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
     optional_jobs = {
         "wp": ("/metrics/wp", {"gameId": game_id}, "Win Probability"),
         "live": ("/live/plays", {"gameId": game_id}, "Live Play Detail"),
+        "weather": ("/games/weather", {"year": year, "team": home}, "Game Weather"),
+        "media": ("/games/media", {"year": year, "team": home}, "Game Media"),
+        "lines": ("/lines", {"year": year, "team": home}, "Betting Lines"),
+        "wp_pregame": ("/metrics/wp/pregame",
+                       {"year": year, "week": week, "seasonType": season_type,
+                        "team": home}, "Pregame Win Probability"),
     }
 
     optional_errors: list[dict] = []
     results: dict = {}
-    with ThreadPoolExecutor(max_workers=min(7, config.CFBD_MAX_WORKERS)) as pool:
+    with ThreadPoolExecutor(max_workers=min(9, config.CFBD_MAX_WORKERS)) as pool:
         futures = {pool.submit(_get, api_key, ep, params, label, errors): key
                    for key, (ep, params, label) in jobs.items()}
         futures.update({pool.submit(_get, api_key, ep, params, label, optional_errors): key
@@ -959,6 +981,10 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
         "play_stats": results.get("play_stats") or [],
         "wp": results.get("wp") or [],
         "live": live if isinstance(live, dict) else {},
+        "weather": results.get("weather") or [],
+        "media": results.get("media") or [],
+        "lines": results.get("lines") or [],
+        "wp_pregame": results.get("wp_pregame") or [],
         "teams": results.get("teams") or [],
         "errors": errors,
         "optional_errors": optional_errors,

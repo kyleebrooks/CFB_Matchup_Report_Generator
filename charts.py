@@ -1048,9 +1048,9 @@ RECAP_CHART_SPECS = [
     ("recap_players", "Top Individual Impact",
      "The players who moved the game most, by total PPA across their touches."),
     ("recap_playtypes", "Play-Type Success",
-     "Success rate for every play type either offense ran at least three times, side "
-     "by side. The gap between a team's rush and dropback bars is the story of its "
-     "play-calling night."),
+     "Success rate by play group — rushes, passes (all attempts together) and sacks "
+     "— side by side. The gap between a team's rush and pass bars is the story of "
+     "its play-calling night."),
 ]
 
 
@@ -1254,7 +1254,7 @@ def chart_recap_playtypes(playtypes, game, home_c, away_c):
         return None
 
     def rows(team):
-        return {r["type"]: r for r in playtypes[team].get("offense_by_type") or []
+        return {r["group"]: r for r in playtypes[team].get("offense_play_groups") or []
                 if r.get("plays", 0) >= 3}
 
     home_rows, away_rows = rows(home), rows(away)

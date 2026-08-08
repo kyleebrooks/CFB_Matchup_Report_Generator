@@ -232,11 +232,12 @@ REPORT_TYPES: dict[str, dict] = {
         'title': 'Full Season Play-by-Play Analysis',
         'description': (
             'Every play from every completed game one team played in a season, '
-            'analysed in depth: play-type profile, where the runs went by gap and '
+            'analysed in depth: play-group profile, where the runs went by gap and '
             'side, pass depth and pressure, down-and-distance tendencies, third and '
-            'fourth down, red zone, the same cuts for what the defense allowed, '
-            'week-to-week evolution, and a closing scouting report — with four '
-            'charts from the season play-by-play.'
+            'fourth down, red zone, a computed season play-calling grade, the same '
+            'cuts for what the defense allowed, week-to-week evolution, and a '
+            'closing scouting report — with four charts from the season '
+            'play-by-play.'
         ),
         'required': ['team_short'],
         'optional': ['team_full', 'year'],
@@ -250,10 +251,12 @@ REPORT_TYPES: dict[str, dict] = {
         'title': 'Full Game Recap',
         'description': (
             'Post-game breakdown of one finished game, built entirely from the game '
-            'record: how it unfolded, the drives that decided it, what went right and '
-            'wrong for each team, the adjustments made and missed, and what could have '
-            'been done differently — with six charts from the play-by-play, including '
-            'the win-probability story of the game.'
+            'record: the pregame expectations it was measured against, how it '
+            'unfolded, the drives that decided it, what went right and wrong, '
+            'computed play-calling grades for both staffs, player and unit grades at '
+            'both ends of the scale, and what could have been done differently — '
+            'with six charts from the play-by-play, including the win-probability '
+            'story of the game.'
         ),
         'required': ['game_id'],
         'optional': [],
