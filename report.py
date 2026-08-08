@@ -73,7 +73,10 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
          "From game_context: the forecast for this meeting (temperature, wind speed and "
          "direction, precipitation, indoors flag) and what those conditions do to THIS "
          "matchup's style — wind punishes downfield passing, rain favors the better ground "
-         "game and moves totals down. Then each team's against-the-spread record this "
+         "game and moves totals down. The venue block carries the stage itself: surface "
+         "(grass or turf), dome or open air, capacity and elevation — note anything that "
+         "matters (a dome nullifies the forecast, thin air and hostile capacity are real). "
+         "Then each team's against-the-spread record this "
          "season, and the market's pregame win probability next to the statistical "
          "baseline. If the weather block is marked unavailable, say so in one sentence "
          "and move on — never invent a forecast."),
@@ -129,7 +132,10 @@ first section, no sign-off after the last.
 
 FORMATTING
 - Each section heading is a level-2 markdown heading on its own line: "## Section Title".
-  Do not number them and do not add any other heading levels above them.
+  Do not number them and do not add any other heading levels above them. Write every
+  section EXACTLY ONCE — never repeat a section. Every markdown table starts on its own
+  line with a blank line before it, one row per line — a table glued to prose does not
+  render.
 - Open each section with one short line explaining what the section covers, and — when it is
   built on a statistic — what that statistic actually measures in plain English.
 - Then list the key figures (where applicable), then AT LEAST TWO substantial paragraphs of

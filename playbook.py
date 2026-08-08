@@ -267,6 +267,20 @@ def situational_profile(plays: list[dict]) -> dict:
         if group:
             directions[direction] = _agg(group)
 
+    # Modern ESPN play text usually names no gap at all, so direction data is only
+    # as good as its coverage — report that plainly, and consumers below a sane
+    # threshold should skip direction claims rather than analyse noise.
+    classified = sum(v["plays"] for k, v in directions.items() if k != "unclassified")
+    direction_coverage = {
+        "designed_rushes": len(designed_rushes),
+        "classified": classified,
+        "classified_pct": round(classified / len(designed_rushes) * 100, 1)
+                          if designed_rushes else None,
+        "note": ("Directions come from parsing the play text, which often names no "
+                 "gap. Below ~25% coverage, direction tendencies are noise — skip "
+                 "them and analyse the ground game by outcome instead."),
+    }
+
     details = [pass_detail(p) for p in dropbacks]
     passing = {
         "dropbacks": _agg(dropbacks),
@@ -335,8 +349,23 @@ def situational_profile(plays: list[dict]) -> dict:
                  "are counted whatever the yardage said."),
     }
 
+    # The outcome distribution needs no play text at all, so it is always
+    # reportable — the honest fallback when direction coverage is thin.
+    outcome_bands = (("loss", lambda y: y < 0), ("no_gain", lambda y: y == 0),
+                     ("short_1_3", lambda y: 1 <= y <= 3),
+                     ("solid_4_9", lambda y: 4 <= y <= 9),
+                     ("chunk_10_14", lambda y: 10 <= y <= 14),
+                     ("breakaway_15plus", lambda y: y >= 15))
+    rush_outcomes = {
+        band: sum(1 for p in designed_rushes
+                  if test(int(p.get("yardsGained") or 0)))
+        for band, test in outcome_bands
+    }
+
     return {
         "rush_directions": directions,
+        "rush_direction_coverage": direction_coverage,
+        "designed_rush_outcomes": rush_outcomes,
         "negative_plays": negative_plays,
         "scrambles": _agg(scrambles) if scrambles else {"plays": 0},
         "passing": passing,

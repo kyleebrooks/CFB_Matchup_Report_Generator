@@ -307,6 +307,58 @@ def all_teams(api_key: str, year: int | None = None,
     return rows
 
 
+_VENUES_CACHE: dict = {"at": 0.0, "rows": []}
+_VENUES_LOCK = threading.Lock()
+
+
+def venues(api_key: str, errors: list | None = None) -> list:
+    """CFBD's full venue table, cached in-process for a day — it barely changes."""
+    with _VENUES_LOCK:
+        if _VENUES_CACHE["rows"] and time.time() - _VENUES_CACHE["at"] < _ALL_TEAMS_TTL:
+            return _VENUES_CACHE["rows"]
+    rows = _get(api_key, "/venues", {}, "Venues", errors) or []
+    if rows:
+        with _VENUES_LOCK:
+            _VENUES_CACHE.update(at=time.time(), rows=rows)
+    return rows
+
+
+def venue_details(api_key: str, venue_id=None, name: str | None = None) -> dict | None:
+    """One venue's facts — surface, dome, capacity, elevation — by id or name."""
+    if venue_id is None and not name:
+        return None
+    try:
+        rows = venues(api_key)
+    except Exception as e:
+        logging.warning(f"Venue lookup failed: {e}")
+        return None
+    row = None
+    if venue_id is not None:
+        row = next((v for v in rows if v.get("id") == venue_id), None)
+    if row is None and name:
+        wanted = name.strip().lower()
+        row = next((v for v in rows if (v.get("name") or "").strip().lower() == wanted),
+                   None)
+    if not row:
+        return None
+    elevation = row.get("elevation")
+    try:
+        elevation = round(float(elevation)) if elevation is not None else None
+    except (TypeError, ValueError):
+        elevation = None
+    return {
+        "name": row.get("name"),
+        "city": row.get("city"),
+        "state": row.get("state"),
+        "capacity": row.get("capacity"),
+        "surface": "grass" if row.get("grass") else "artificial turf",
+        "stadium_type": "dome" if row.get("dome") else "open air",
+        "elevation_m": elevation,
+        "built": row.get("constructionYear"),
+        "timezone": row.get("timezone"),
+    }
+
+
 def resolve_team_meta(api_key: str, teams: list, school: str,
                       year: int | None = None) -> dict:
     """team_meta, with the full roster as a fallback for non-FBS schools.
@@ -968,6 +1020,25 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
     box = results.get("box")
     if isinstance(box, list):          # tolerate either envelope shape
         box = _first(box)
+
+    # The win-probability call rides an 11-request concurrent burst, which is
+    # exactly where a rate limiter bites first. If it came back empty without a
+    # hard 4xx (bad request / tier gate), give it one calm, serial second chance.
+    if not results.get("wp"):
+        hard_fail = any(e.get("label") == "Win Probability"
+                        and e.get("status") in (400, 401, 403)
+                        for e in optional_errors)
+        if not hard_fail:
+            time.sleep(1.5)
+            retry_errors: list[dict] = []
+            retried = _get(api_key, "/metrics/wp", {"gameId": game_id},
+                           "Win Probability (serial retry)", retry_errors)
+            if retried:
+                results["wp"] = retried
+                logging.info(f"Win probability recovered on serial retry "
+                             f"({len(retried)} rows) for game {game_id}")
+            else:
+                optional_errors.extend(retry_errors)
 
     live = results.get("live")
     if isinstance(live, list):         # /live/plays returns one object, but be lenient
