@@ -249,6 +249,12 @@ def generate(
         "season_results": {"home": home_games, "away": away_games},
         "scoring_profiles": {"home": home_profile, "away": away_profile},
         "betting_market": market,
+        "game_context": cfbd.matchup_context(cfbd_data, upcoming_game,
+                                             home_short, away_short),
+        "transfer_portal": {
+            "home": cfbd.portal_moves(cfbd_data.get("portal"), home_short),
+            "away": cfbd.portal_moves(cfbd_data.get("portal"), away_short),
+        },
         "statistical_baseline": baseline,
         "news_and_research": sections,
     }

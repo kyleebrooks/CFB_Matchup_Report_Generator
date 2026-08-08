@@ -25,14 +25,21 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
     return [
         ("Matchup Overview",
          "Set the stage: who these teams are, what is at stake, relevant history and context "
-         "for this specific meeting. This is the only place for scene-setting — there must be "
-         "no introduction before it and no closing remarks after the final section."),
+         "for this specific meeting. The game_context.head_to_head block carries the REAL "
+         "series record and recent meetings — build the history from it, never from memory — "
+         "and name the broadcast where game_context lists one. This is the only place for "
+         "scene-setting — there must be no introduction before it and no closing remarks "
+         "after the final section."),
         ("SP Ratings",
          "Use the SP+ overall, offense, defense and special teams RATING values. Ignore the "
          "'ranking' field entirely — it is always 1 in this feed and is meaningless here. Note "
          "that a LOWER SP+ defensive rating is better."),
         ("ELO Ratings", "Elo is a head-to-head power rating; explain what the gap implies."),
         ("FPI Ratings", "FPI is points-above-average against an average opponent."),
+        ("SRS Ratings",
+         "The simple rating system: pure points-based strength adjusted for schedule — the "
+         "fourth independent power number. Note where it agrees with SP+, Elo and FPI, and "
+         "flag any team the four ratings genuinely disagree about."),
         ("Advanced Team Stats",
          "Success rate, explosiveness, PPA per play, line yards, havoc, points per scoring "
          "opportunity. Use the supplied national percentiles to give each number context."),
@@ -51,16 +58,31 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
          "The defining individual battles — a specific WR against the CB who will travel with "
          "him, a RB against a particular front seven, an OL against a named edge rusher. Tie "
          "each one back to the Player PPA and advanced numbers where you can."),
-        (f"{home_full} Roster Updates", "NON-INJURY roster news only."),
-        (f"{away_full} Roster Updates", "NON-INJURY roster news only."),
+        (f"{home_full} Roster Updates",
+         "NON-INJURY roster news only. Lead with this team's verified transfer_portal "
+         "moves (incoming and outgoing, with star ratings) as their own labeled group, "
+         "then the researched news."),
+        (f"{away_full} Roster Updates",
+         "NON-INJURY roster news only. Same structure: the verified transfer_portal "
+         "group first, then the researched news."),
         (f"{home_full} Practice and Scrimmage Updates", "Practice participation, scrimmage results, camp reporting."),
         (f"{away_full} Practice and Scrimmage Updates", "Practice participation, scrimmage results, camp reporting."),
         (f"{home_full} vs {away_full} Media Matchup Analysis",
          "What the national and local media, analysts and coaches are saying about this game."),
+        ("Game Conditions and Betting Context",
+         "From game_context: the forecast for this meeting (temperature, wind speed and "
+         "direction, precipitation, indoors flag) and what those conditions do to THIS "
+         "matchup's style — wind punishes downfield passing, rain favors the better ground "
+         "game and moves totals down. Then each team's against-the-spread record this "
+         "season, and the market's pregame win probability next to the statistical "
+         "baseline. If the weather block is marked unavailable, say so in one sentence "
+         "and move on — never invent a forecast."),
         ("Final Prediction",
          "The reveal. Your overall verdict, a projected final score, and YOUR point spread — "
          "weigh every input above: the ratings, the efficiency mismatches, the form trend, the "
-         "injuries, the roster and practice news, and the statistical baseline. Write it with "
+         "injuries, the roster and practice news, the game conditions (weather moves totals "
+         "and closes passing-game gaps — fold it in explicitly when present), and the "
+         "statistical baseline. Write it with "
          "conviction: name the winner in the first sentence, then justify it. The Verdict "
          "scoreboard card renders directly below this section with the projected score, win "
          "probability and model-vs-market spread — let your numbers agree with it exactly, and "
