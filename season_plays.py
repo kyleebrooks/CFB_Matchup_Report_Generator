@@ -51,14 +51,17 @@ SECTIONS = [
         "Contrast volume with efficiency — the calls leaned on most are not always "
         "the ones that worked, and PPA is the value measure that exposes it."
     )),
-    ("The Ground Game: Where the Runs Went", (
-        "From the rush-direction data: how the season's designed runs distributed "
-        "across left/middle/right and end/tackle/guard, and how each direction "
-        "fared — success rate, yards per carry, explosives, stuffs. Name the "
-        "favourite gap and the most productive gap, and say whether they are the "
-        "same. Scrambles are separated from designed runs; treat them as part of "
-        "the dropback story. Directions marked 'unclassified' mean the play text "
-        "named no gap — say so, never guess."
+    ("The Ground Game", (
+        "Check rush_direction_coverage FIRST. If classified_pct is 25 or higher, "
+        "analyse where the designed runs went — left/middle/right, end/tackle/"
+        "guard, with success, yards per carry, explosives and stuffs per "
+        "direction; name the favourite gap and the most productive gap. If "
+        "classified_pct is BELOW 25, the play text simply does not name gaps this "
+        "season: say that once in one sentence and DO NOT present direction "
+        "tendencies at all — analyse the ground game from "
+        "designed_rush_outcomes instead (losses, no gains, short, solid, chunk, "
+        "breakaway shares), plus PPA and success. Scrambles are separated from "
+        "designed runs; treat them as part of the dropback story."
     )),
     ("The Passing Game: Depth, Pressure and Screens", (
         "From the passing detail: dropback volume and efficiency, short versus deep "
@@ -206,8 +209,11 @@ first section, no sign-off after the last.
 
 FORMAT RULES:
 - Each section heading is a level-2 markdown heading on its own line: "## Section Title".
+  Write every section EXACTLY ONCE — never repeat a section.
 - Open each section with one short line saying what it covers.
-- Use markdown tables for statistical comparisons; bold lead-ins for sub-topics.
+- Use markdown tables for statistical comparisons; bold lead-ins for sub-topics. Every
+  table starts on its own line with a blank line before it, one row per line — a table
+  glued to prose does not render.
 - Cite the data source with the pre-assigned marker [1] the first time each section
   leans on it; do not fabricate other citations.
 - EVERY number must come from the DATA below. If a figure is not in the data, write

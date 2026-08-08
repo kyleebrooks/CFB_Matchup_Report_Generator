@@ -207,11 +207,21 @@ def generate(
     sections = research.assemble_sections(research_raw, rotowire, registry, ctx, settings)
     baseline = predict.build_baseline(stats, home_profile, away_profile, market, home_short, away_short)
 
+    game_context = cfbd.matchup_context(cfbd_data, upcoming_game, home_short, away_short)
+    venue = cfbd.venue_details(
+        cfbd_api_key,
+        venue_id=cfbd.pick(upcoming_game or {}, "venueId", "venue_id"),
+        name=cfbd.pick(upcoming_game or {}, "venue"),
+    )
+    game_context["venue"] = venue or {"available": False,
+                                      "note": "Venue details unavailable."}
+
     # --- Stage 3: visuals ----------------------------------------------------
     step("charts")
     try:
         chart_set = charts_mod.build_all(
-            stats, percentiles, baseline, home_meta, away_meta, home_short, away_short
+            stats, percentiles, baseline, home_meta, away_meta, home_short, away_short,
+            conditions={"weather": game_context.get("weather"), "venue": venue},
         )
     except charts_mod.ChartsUnavailable as e:
         raise PipelineError("Charting library missing on the server", str(e), 500)
@@ -249,8 +259,7 @@ def generate(
         "season_results": {"home": home_games, "away": away_games},
         "scoring_profiles": {"home": home_profile, "away": away_profile},
         "betting_market": market,
-        "game_context": cfbd.matchup_context(cfbd_data, upcoming_game,
-                                             home_short, away_short),
+        "game_context": game_context,
         "transfer_portal": {
             "home": cfbd.portal_moves(cfbd_data.get("portal"), home_short),
             "away": cfbd.portal_moves(cfbd_data.get("portal"), away_short),

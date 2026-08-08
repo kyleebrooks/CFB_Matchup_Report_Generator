@@ -151,7 +151,65 @@ def strip_model_sources(text: str) -> str:
     return cleaned.rstrip()
 
 
+_TABLE_SEP_RE = re.compile(r"\|\s*:?-{3,}")
+
+
+def sanitize_markdown(text: str) -> str:
+    """Repair the model-output defects that break rendering.
+
+    Two real-world failures land here. A model on a long structured task sometimes
+    REPEATS a section — the duplicate (same '## ' heading) and everything under it
+    is dropped, keeping the first telling. And markdown tables only render as
+    tables when they start on their own line after a blank one; a table glued to
+    prose, or a whole table emitted on a single line, prints as a mash of pipe
+    characters — so glued tables are split back onto their own lines and given the
+    blank line the parser needs.
+    """
+    # 1. A single line carrying a whole table: '| a | b | | --- | --- | | 1 | 2 |'.
+    #    Only lines that contain a separator run are touched — an empty cell in a
+    #    legitimate one-row line never coexists with '---' cells on that line.
+    repaired = []
+    for line in text.split("\n"):
+        if _TABLE_SEP_RE.search(line) and line.count("|") > 6:
+            first_pipe = line.find("|")
+            if first_pipe > 0 and line[:first_pipe].strip():
+                line = line[:first_pipe].rstrip() + "\n" + line[first_pipe:]
+            line = re.sub(r"\|\s+\|", "|\n|", line)
+        repaired.append(line)
+    lines = "\n".join(repaired).split("\n")
+
+    # 2. A blank line before every table block, so the parser sees a table.
+    out: list[str] = []
+    for line in lines:
+        starts_table = line.lstrip().startswith("|")
+        if (starts_table and out and out[-1].strip()
+                and not out[-1].lstrip().startswith("|")):
+            out.append("")
+        out.append(line)
+
+    # 3. Duplicate sections: keep the first occurrence of each '## ' heading.
+    deduped: list[str] = []
+    seen: set = set()
+    skipping = False
+    dropped = 0
+    for line in out:
+        if line.startswith("## "):
+            key = line.strip().lower()
+            if key in seen:
+                skipping = True
+                dropped += 1
+                continue
+            seen.add(key)
+            skipping = False
+        if not skipping:
+            deduped.append(line)
+    if dropped:
+        logging.warning(f"sanitize_markdown dropped {dropped} duplicated section(s)")
+    return "\n".join(deduped)
+
+
 def markdown_to_html(text: str) -> str:
+    text = sanitize_markdown(text)
     if markdown:
         return markdown.markdown(text, extensions=["tables", "sane_lists"])
     return "<br>\n".join(text.split("\n"))

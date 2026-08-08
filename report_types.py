@@ -202,8 +202,9 @@ REPORT_TYPES: dict[str, dict] = {
         'description': (
             'Full preview of one game: ratings, efficiency mismatches, injuries, verified '
             'transfer-portal moves, the real head-to-head series, game-day weather and '
-            'broadcast, against-the-spread records, practice news, media analysis, nine '
-            'charts, and a scoreboard-style final prediction card.'
+            'broadcast, against-the-spread records, practice news, media analysis, ten '
+            'charts including a weather-and-venue conditions card, and a '
+            'scoreboard-style final prediction card.'
         ),
         'required': ['home_full', 'away_full', 'home_short', 'away_short'],
         'optional': ['year', 'kickoff'],
@@ -255,8 +256,8 @@ REPORT_TYPES: dict[str, dict] = {
             'unfolded, the drives that decided it, what went right and wrong, '
             'computed play-calling grades for both staffs, player and unit grades at '
             'both ends of the scale, and what could have been done differently — '
-            'with six charts from the play-by-play, including the win-probability '
-            'story of the game.'
+            'with seven charts including a weather-and-venue conditions card and '
+            'the win-probability story of the game.'
         ),
         'required': ['game_id'],
         'optional': [],

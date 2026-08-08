@@ -727,6 +727,9 @@ def chart_verdict(baseline, home_l, away_l, home_c, away_c):
 
 
 CHART_SPECS = [
+    ("conditions", "Game Conditions",
+     "The forecast and the ground it will be played on: temperature, wind and "
+     "precipitation beside the stadium's surface, roof, capacity and elevation."),
     ("power_ratings", "Power Rating Dashboard",
      "SP+, FPI and Elo side by side. SP+ and FPI are points-above-average ratings; the "
      "SP+ defensive rating counts down, so a lower bar is the better defense."),
@@ -754,8 +757,9 @@ CHART_SPECS = [
 ]
 
 
-def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, away_label) -> list[dict]:
-    """Render all eight charts in fixed order. Failures become styled placeholders."""
+def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, away_label,
+              conditions=None) -> list[dict]:
+    """Render all the matchup charts in fixed order. Failures become styled placeholders."""
     if not CHARTS_AVAILABLE:
         raise ChartsUnavailable(
             f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
@@ -764,6 +768,7 @@ def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, aw
     home_c, away_c = resolve_colors(home_meta, away_meta)
 
     builders = {
+        "conditions": lambda: chart_conditions(conditions, home_c),
         "power_ratings": lambda: chart_power_ratings(stats, home_label, away_label, home_c, away_c),
         "efficiency_radar": lambda: chart_efficiency_radar(percentiles, home_label, away_label, home_c, away_c),
         "mismatch_matrix": lambda: chart_mismatch_matrix(percentiles, home_label, away_label, home_c, away_c),
@@ -1033,6 +1038,9 @@ def build_team_charts(stats, percentiles, team_meta, team_label, games,
 # Game recap charts
 # ---------------------------------------------------------------------------
 RECAP_CHART_SPECS = [
+    ("recap_conditions", "Game Conditions",
+     "What the game was played in and on: the day's weather beside the stadium's "
+     "surface, roof, capacity and elevation."),
     ("recap_flow", "Scoring Flow",
      "The score after every scoring play, from kickoff to the final whistle. Long flat "
      "stretches are stalled offense; steep runs are momentum."),
@@ -1290,8 +1298,9 @@ def chart_recap_playtypes(playtypes, game, home_c, away_c):
 
 
 def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
-                       playtypes: dict | None = None) -> list[dict]:
-    """Render the five game-recap charts. Failures become styled placeholders."""
+                       playtypes: dict | None = None,
+                       conditions: dict | None = None) -> list[dict]:
+    """Render the game-recap charts. Failures become styled placeholders."""
     if not CHARTS_AVAILABLE:
         raise ChartsUnavailable(
             f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
@@ -1302,6 +1311,7 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
     home_c, away_c = resolve_colors(home_meta or {}, away_meta or {})
 
     builders = {
+        "recap_conditions": lambda: chart_conditions(conditions, home_c),
         "recap_flow": lambda: chart_recap_flow(recap.get("plays"), game, home_c, away_c),
         "recap_winprob": lambda: chart_recap_winprob(recap.get("wp"), game, home_c, away_c),
         "recap_drives": lambda: chart_recap_drives(recap.get("drives"), game, home_c, away_c),
@@ -1574,10 +1584,10 @@ def build_prediction_charts(kind: str, *, curve, by_model, graded_rows) -> list[
 # Full season play-by-play charts
 # ---------------------------------------------------------------------------
 SEASON_PLAY_CHART_SPECS = [
-    ("season_directions", "Where the Runs Went",
-     "Every designed rush of the season by direction: how often each gap was hit "
-     "and how well it worked. The gap between the volume bar and its success "
-     "label is the difference between habit and effectiveness."),
+    ("season_directions", "The Ground Game",
+     "Where the runs went when the play text names the gap; when it rarely does "
+     "(the norm in recent seasons), the designed-rush outcome distribution "
+     "instead — losses through breakaways — which needs no play text at all."),
     ("season_downs", "Success by Down",
      "Offensive success rate on each down, next to what the defense allowed. The "
      "run-share line shows how predictable the play-calling became as downs got "
@@ -1593,25 +1603,63 @@ SEASON_PLAY_CHART_SPECS = [
 
 
 def chart_season_directions(breakdown, team_label, color, alt):
-    directions = ((breakdown.get("offense") or {}).get("situational") or {}) \
-        .get("rush_directions") or {}
-    order = ["left end", "left tackle", "left guard", "middle",
-             "right guard", "right tackle", "right end", "unclassified"]
-    rows = [(d, directions[d]) for d in order if d in directions]
-    if sum(r["plays"] for _d, r in rows) < 10:
+    """The ground game, told honestly.
+
+    When the play text names gaps often enough (≥25% of designed rushes), this is
+    the direction chart. When it does not — the norm in recent seasons — direction
+    bars would chart parsing luck, not tendencies, so the chart becomes the
+    designed-rush outcome distribution instead, which needs no play text at all.
+    """
+    situational = (breakdown.get("offense") or {}).get("situational") or {}
+    coverage = situational.get("rush_direction_coverage") or {}
+    covered = (coverage.get("classified_pct") or 0) >= 25
+
+    if covered:
+        directions = situational.get("rush_directions") or {}
+        order = ["left end", "left tackle", "left guard", "middle",
+                 "right guard", "right tackle", "right end", "unclassified"]
+        rows = [(d, directions[d]) for d in order if d in directions]
+        if sum(r["plays"] for _d, r in rows) < 10:
+            return None
+        fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+        names = [d for d, _r in rows][::-1]
+        counts = [r["plays"] for _d, r in rows][::-1]
+        rates = [r.get("success_rate") or 0 for _d, r in rows][::-1]
+        colors = [alt if d == "unclassified" else color for d in names]
+        bars = ax.barh(names, counts, color=colors, zorder=3)
+        labels = [f"{c} carries — {s:.0f}% success" for c, s in zip(counts, rates)]
+        ax.bar_label(bars, labels=labels, padding=3, fontsize=8, color=config.CHART_TEXT)
+        ax.set_xlim(0, max(counts) * 1.45)
+        ax.set_xlabel("designed rushes this season")
+        _grid(ax, axis="x")
+        fig.suptitle(f"{team_label}: Where the Runs Went", fontsize=13,
+                     fontweight="bold", color=config.CHART_TEXT)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
+        return _encode(fig)
+
+    outcomes = situational.get("designed_rush_outcomes") or {}
+    bands = [("loss", "loss"), ("no_gain", "no gain"), ("short_1_3", "1–3 yds"),
+             ("solid_4_9", "4–9 yds"), ("chunk_10_14", "10–14 yds"),
+             ("breakaway_15plus", "15+ yds")]
+    counts = [outcomes.get(k, 0) for k, _l in bands]
+    total = sum(counts)
+    if total < 10:
         return None
     fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
-    names = [d for d, _r in rows][::-1]
-    counts = [r["plays"] for _d, r in rows][::-1]
-    rates = [r.get("success_rate") or 0 for _d, r in rows][::-1]
-    colors = [alt if d == "unclassified" else color for d in names]
-    bars = ax.barh(names, counts, color=colors, zorder=3)
-    labels = [f"{c} carries — {s:.0f}% success" for c, s in zip(counts, rates)]
-    ax.bar_label(bars, labels=labels, padding=3, fontsize=8, color=config.CHART_TEXT)
-    ax.set_xlim(0, max(counts) * 1.45)
-    ax.set_xlabel("designed rushes this season")
-    _grid(ax, axis="x")
-    fig.suptitle(f"{team_label}: Where the Runs Went", fontsize=13,
+    shades = [_shade(color, f) for f in (0.45, 0.65, 0.85, 1.0, 1.2, 1.45)]
+    bars = ax.bar([l for _k, l in bands], counts, color=shades, zorder=3)
+    ax.bar_label(bars, labels=[f"{c}\n{c / total * 100:.0f}%" for c in counts],
+                 padding=3, fontsize=8.5, color=config.CHART_TEXT)
+    ax.set_ylim(0, max(counts) * 1.3)
+    ax.set_ylabel("designed rushes")
+    _grid(ax)
+    ax.text(0.99, 0.95,
+            f"play text names a gap on only "
+            f"{coverage.get('classified_pct') or 0:.0f}% of rushes —\n"
+            f"outcomes shown instead of directions",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
+            color=config.CHART_MUTED)
+    fig.suptitle(f"{team_label}: The Ground Game, by Outcome", fontsize=13,
                  fontweight="bold", color=config.CHART_TEXT)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     return _encode(fig)
@@ -1761,3 +1809,140 @@ def build_season_play_charts(breakdown: dict, game_log: list, team_meta: dict,
         out.append({"key": key, "title": title, "caption": caption,
                     "img": img, "available": available})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Game conditions card — the forecast and the ground it is played on
+# ---------------------------------------------------------------------------
+def _compass(degrees) -> str:
+    try:
+        d = float(degrees) % 360
+    except (TypeError, ValueError):
+        return ""
+    points = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+    return points[int((d + 22.5) // 45) % 8]
+
+
+def chart_conditions(conditions, accent_c):
+    """A drawn card: weather on the left, the venue (with a field sketch) on the right."""
+    conditions = conditions or {}
+    weather = conditions.get("weather") or {}
+    venue = conditions.get("venue") or {}
+    has_weather = weather.get("available") is not False and any(
+        weather.get(k) is not None for k in
+        ("temperature", "windSpeed", "precipitation", "weatherCondition", "gameIndoors"))
+    has_venue = bool(venue) and venue.get("available") is not False and venue.get("name")
+    if not has_weather and not has_venue:
+        return None
+
+    fig, ax = plt.subplots(figsize=(FIG_W, 4.3))
+    ax.axis("off")
+    ax.set_xlim(0, 100)
+    ax.set_ylim(0, 100)
+
+    for x0 in (1, 51):
+        ax.add_patch(plt.Rectangle((x0, 2), 48, 96, fill=False,
+                                   edgecolor=config.CHART_GRID, linewidth=1.4))
+
+    # ---- left: the weather ------------------------------------------------
+    ax.text(25, 90, "CONDITIONS", ha="center", fontsize=10, fontweight="bold",
+            color=config.CHART_MUTED)
+    if not has_weather:
+        ax.text(25, 50, "No conditions data\nstored for this game", ha="center",
+                va="center", fontsize=11, color=config.CHART_MUTED)
+    elif weather.get("gameIndoors"):
+        ax.text(25, 56, "INDOORS", ha="center", fontsize=26, fontweight="bold",
+                color=accent_c)
+        ax.text(25, 40, "climate controlled — weather is not a factor",
+                ha="center", fontsize=9.5, color=config.CHART_TEXT)
+    else:
+        temp = weather.get("temperature")
+        if temp is not None:
+            ax.text(17, 60, f"{round(float(temp))}°F", ha="center", fontsize=30,
+                    fontweight="bold", color=accent_c)
+        condition = weather.get("weatherCondition")
+        if condition:
+            ax.text(17, 44, str(condition), ha="center", fontsize=11,
+                    color=config.CHART_TEXT)
+        wind = weather.get("windSpeed")
+        if wind is not None:
+            direction = _compass(weather.get("windDirection"))
+            try:
+                angle = math.radians(90 - float(weather.get("windDirection") or 0))
+                dx, dy = math.cos(angle) * 7, math.sin(angle) * 7
+                ax.annotate("", xy=(37 + dx, 56 + dy), xytext=(37 - dx, 56 - dy),
+                            arrowprops=dict(arrowstyle="-|>", linewidth=2.2,
+                                            color=config.CHART_TEXT))
+            except (TypeError, ValueError):
+                pass
+            ax.text(37, 42, f"wind {round(float(wind))} mph"
+                    f"{' ' + direction if direction else ''}",
+                    ha="center", fontsize=9.5, color=config.CHART_TEXT)
+        detail = []
+        precip = weather.get("precipitation")
+        if precip:
+            detail.append(f"precipitation {precip} in")
+        snow = weather.get("snowfall")
+        if snow:
+            detail.append(f"snowfall {snow} in")
+        humidity = weather.get("humidity")
+        if humidity is not None:
+            detail.append(f"humidity {round(float(humidity))}%")
+        if detail:
+            ax.text(25, 26, "  ·  ".join(detail), ha="center", fontsize=9,
+                    color=config.CHART_MUTED)
+        elif temp is not None:
+            ax.text(25, 26, "no precipitation expected", ha="center", fontsize=9,
+                    color=config.CHART_MUTED)
+
+    # ---- right: the venue -------------------------------------------------
+    ax.text(75, 90, "THE VENUE", ha="center", fontsize=10, fontweight="bold",
+            color=config.CHART_MUTED)
+    if not has_venue:
+        ax.text(75, 50, "Venue details\nunavailable", ha="center", va="center",
+                fontsize=11, color=config.CHART_MUTED)
+    else:
+        name = str(venue.get("name") or "")
+        ax.text(75, 80, name if len(name) <= 34 else name[:33] + "…", ha="center",
+                fontsize=12.5, fontweight="bold", color=config.CHART_TEXT)
+        place = ", ".join(x for x in (venue.get("city"), venue.get("state")) if x)
+        facts = []
+        if venue.get("capacity"):
+            facts.append(f"capacity {int(venue['capacity']):,}")
+        if venue.get("elevation_m") is not None:
+            facts.append(f"elev. {int(venue['elevation_m']):,} m")
+        if venue.get("built"):
+            facts.append(f"opened {venue['built']}")
+        ax.text(75, 72, place, ha="center", fontsize=9.5, color=config.CHART_MUTED)
+        ax.text(75, 64, "  ·  ".join(facts), ha="center", fontsize=9.5,
+                color=config.CHART_TEXT)
+
+        # The field sketch: surface color says grass vs turf, an arc says dome.
+        grass = (venue.get("surface") or "").startswith("grass")
+        field_c = "#3f7d44" if grass else "#4c9c6b"
+        fx0, fx1, fy0, fy1 = 57, 93, 12, 42
+        ax.add_patch(plt.Rectangle((fx0, fy0), fx1 - fx0, fy1 - fy0,
+                                   facecolor=field_c, edgecolor="white",
+                                   linewidth=1.5, zorder=3))
+        for i in range(1, 6):
+            x = fx0 + (fx1 - fx0) * i / 6
+            ax.plot([x, x], [fy0 + 1, fy1 - 1], color="white", linewidth=0.9,
+                    alpha=0.85, zorder=4)
+        ax.text((fx0 + fx1) / 2, (fy0 + fy1) / 2,
+                "GRASS" if grass else "TURF", ha="center", va="center",
+                fontsize=11, fontweight="bold", color="white", alpha=0.9, zorder=5)
+        if (venue.get("stadium_type") or "") == "dome":
+            arc = np.linspace(0, math.pi, 60)
+            ax.plot(fx0 + (fx1 - fx0) * (1 - np.cos(arc)) / 2,
+                    fy1 + np.sin(arc) * 9, color=config.CHART_TEXT,
+                    linewidth=2.2, zorder=4)
+            ax.text((fx0 + fx1) / 2, fy1 + 13, "DOME", ha="center", fontsize=8.5,
+                    fontweight="bold", color=config.CHART_TEXT)
+        ax.text((fx0 + fx1) / 2, fy0 - 5,
+                f"{venue.get('surface', '')} · {venue.get('stadium_type', '')}",
+                ha="center", fontsize=9, color=config.CHART_MUTED)
+
+    fig.suptitle("Game Conditions", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    return _encode(fig)

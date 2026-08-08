@@ -40,7 +40,8 @@ SECTIONS = [
         "betting lines (spread and total, by book), the market's implied win "
         "probability, the pregame Elo gap, the weather (temperature, wind, "
         "precipitation, indoors) and what those conditions promised for the style of "
-        "game, the venue and the broadcast. Close with one line framing the "
+        "game, and the venue block — surface, dome or open air, capacity, elevation "
+        "— plus the broadcast. Close with one line framing the "
         "expectation the rest of this recap grades reality against. Any feed marked "
         "unavailable gets one clause, never an invented number."
     )),
@@ -125,7 +126,10 @@ SECTIONS = [
     )),
     ("Down, Distance and Direction", (
         "The deeper cut, from the situational breakdown: WHERE each ground game went "
-        "(left/middle/right, end/tackle/guard) and how each direction fared; scrambles "
+        "(left/middle/right, end/tackle/guard) and how each direction fared — but "
+        "check rush_direction_coverage first: below 25% classified, say once that "
+        "the play text names no gaps and analyse designed_rush_outcomes instead of "
+        "direction tendencies; scrambles "
         "and screens separated from designed plays; how play selection and success "
         "shifted by down; third-down conversion rates by distance (short 1-3, medium "
         "4-6, long 7+); fourth-down attempts and results; red-zone efficiency; and "
@@ -280,7 +284,8 @@ def _win_probability(rows: list, home: str, away: str) -> dict:
     }
 
 
-def _pregame(recap: dict, game: dict, home: str, away: str) -> dict:
+def _pregame(recap: dict, game: dict, home: str, away: str,
+             venue: dict | None = None) -> dict:
     """What everyone expected walking in: lines, market win%, weather, broadcast."""
     game_id = game.get("id")
 
@@ -310,6 +315,8 @@ def _pregame(recap: dict, game: dict, home: str, away: str) -> dict:
                  "this."),
         "weather": weather or {"available": False,
                                "note": "No conditions stored for this game."},
+        "venue": venue or {"available": False,
+                           "note": "Venue details unavailable."},
         "broadcast": outlets or None,
         "betting_lines": books or None,
         "market_pregame_home_win_probability": wp.get("homeWinProbability"),
@@ -548,9 +555,11 @@ first section, no sign-off after the last.
 
 FORMAT RULES:
 - Each section heading is a level-2 markdown heading on its own line: "## Section Title".
+  Write every section EXACTLY ONCE — never repeat a section.
 - Open each section with one short line saying what it covers.
 - Use markdown tables for statistical comparisons; bold lead-ins ("**{ctx['home_team']}.**")
-  when a section covers the two teams in turn.
+  when a section covers the two teams in turn. Every table starts on its own line with a
+  blank line before it, one row per line — a table glued to prose does not render.
 - Cite the data source with the pre-assigned marker [1] the first time each section
   leans on it; do not fabricate other citations.
 - EVERY number must come from the DATA below. If a figure is not in the data, write
@@ -641,6 +650,8 @@ def generate(
     plays = recap.get("plays") or []
     drives = recap.get("drives") or []
     playtypes = _play_type_breakdown(plays, home, away)
+    venue = cfbd.venue_details(cfbd_api_key, venue_id=game.get("venueId"),
+                               name=game.get("venue"))
     bundle = {
         "game": {
             "id": game.get("id"),
@@ -665,7 +676,7 @@ def generate(
             "away_postgame_elo": game.get("awayPostgameElo"),
         },
         "advanced_box_score": recap.get("box") or {},
-        "pregame_expectations": _pregame(recap, game, home, away),
+        "pregame_expectations": _pregame(recap, game, home, away, venue=venue),
         "drives": _compact_drives(drives),
         "notable_plays": _notable_plays(plays),
         "half_splits": _half_splits(plays, home, away),
@@ -694,8 +705,10 @@ def generate(
     # --- Stage 2: visuals -----------------------------------------------------
     step("charts")
     try:
-        chart_set = charts_mod.build_recap_charts(recap, home_meta, away_meta,
-                                                  playtypes=playtypes)
+        chart_set = charts_mod.build_recap_charts(
+            recap, home_meta, away_meta, playtypes=playtypes,
+            conditions={"weather": bundle["pregame_expectations"]["weather"],
+                        "venue": venue})
     except charts_mod.ChartsUnavailable as e:
         raise PipelineError("Charting library missing on the server", str(e), 500)
 
@@ -726,11 +739,17 @@ def generate(
     usage = result["usage"]
     final = (f"{home} {game.get('homePoints')}, {away} {game.get('awayPoints')}"
              if game.get("homePoints") is not None else f"{home} vs {away}")
+    optional_failures = ", ".join(
+        f"{e['label']} (HTTP {e['status']})"
+        for e in recap.get("optional_errors") or []) or "none"
     meta_lines = [
         f"Data: CollegeFootballData game {game.get('id')} — advanced box score, "
         f"{len(drives)} drives, {len(plays)} plays, "
         f"{len(recap.get('play_stats') or [])} player stat rows. No web research: "
         f"this recap is built from the game record alone.",
+        f"Enrichment: {len(recap.get('wp') or [])} win-probability points; live "
+        f"layer {'present' if (recap.get('live') or {}).get('teams') else 'absent'}; "
+        f"optional endpoint failures: {optional_failures}.",
         f"Report: {result['model']} via OpenRouter — {usage.get('input_tokens') or 'N/A'} "
         f"input tokens / {usage.get('output_tokens') or 'N/A'} output tokens.",
         f"Final: {final}. Generation time: {int(time.time() - started)}s.",
