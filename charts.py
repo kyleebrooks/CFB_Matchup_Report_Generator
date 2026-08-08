@@ -1046,7 +1046,9 @@ RECAP_CHART_SPECS = [
      "stretches are stalled offense; steep runs are momentum."),
     ("recap_winprob", "Win Probability",
      "The home team's chance of winning after every play. Cliffs are the game's true "
-     "turning points; a line that hugs one edge is a game that was never close."),
+     "turning points; a line that hugs one edge is a game that was never close. For "
+     "games CFBD's model skipped, the curve is estimated from score, clock, "
+     "possession and the pregame spread, and labeled as such."),
     ("recap_drives", "Drive Outcomes",
      "Every drive by both offenses: how far it travelled and how it ended. Scoring "
      "drives are solid; empty possessions are hollow."),
@@ -1115,7 +1117,7 @@ def chart_recap_flow(plays, game, home_c, away_c):
     return _encode(fig)
 
 
-def chart_recap_winprob(wp_rows, game, home_c, away_c):
+def chart_recap_winprob(wp_rows, game, home_c, away_c, estimated=False):
     """The home team's win probability after every play — the story of the game."""
     home, away = game.get("homeTeam"), game.get("awayTeam")
     rows = [r for r in wp_rows or [] if r.get("homeWinProbability") is not None]
@@ -1141,8 +1143,13 @@ def chart_recap_winprob(wp_rows, game, home_c, away_c):
     ax.text(0.01, 0.05, f"{away} territory", transform=ax.transAxes,
             fontsize=8, color=away_c, va="bottom")
     _grid(ax)
-    fig.suptitle("Win Probability", fontsize=13, fontweight="bold",
-                 color=config.CHART_TEXT)
+    title = "Win Probability (model estimate)" if estimated else "Win Probability"
+    if estimated:
+        ax.text(0.99, 0.03, "estimated from score, clock, possession and the "
+                            "pregame spread — CFBD stores no series for this game",
+                transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5,
+                color=config.CHART_MUTED)
+    fig.suptitle(title, fontsize=13, fontweight="bold", color=config.CHART_TEXT)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     return _encode(fig)
 
@@ -1313,7 +1320,9 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
     builders = {
         "recap_conditions": lambda: chart_conditions(conditions, home_c),
         "recap_flow": lambda: chart_recap_flow(recap.get("plays"), game, home_c, away_c),
-        "recap_winprob": lambda: chart_recap_winprob(recap.get("wp"), game, home_c, away_c),
+        "recap_winprob": lambda: chart_recap_winprob(
+            recap.get("wp"), game, home_c, away_c,
+            estimated=bool(recap.get("wp_estimated"))),
         "recap_drives": lambda: chart_recap_drives(recap.get("drives"), game, home_c, away_c),
         "recap_box": lambda: chart_recap_box(recap.get("box"), game, home_c, away_c),
         "recap_players": lambda: chart_recap_players(recap.get("box"), game, home_c, away_c),
