@@ -57,7 +57,9 @@ SECTIONS = [
      "game-plan notes, position battles."),
     ("Roster News", "roster",
      "NON-INJURY roster movement: depth-chart changes, starter announcements, transfers in "
-     "and out, suspensions, eligibility rulings, position switches."),
+     "and out, suspensions, eligibility rulings, position switches. The transfer_portal "
+     "block is the verified wire for this team's portal moves — present it as its own "
+     "labeled group (with star ratings) before the researched news."),
     ("Injury Report", "injuries",
      "Medical items only, with status and expected return where reported. This section has "
      "TWO inputs — a live web search run just now, and the stored injury feed built up for "
@@ -572,6 +574,7 @@ def generate(
         "schedule": {"completed": played, "upcoming": upcoming},
         "remaining_schedule_outlook": outlook,
         "our_prediction_record_on_this_team": our_record,
+        "transfer_portal": cfbd.portal_moves(data.get("portal"), team_short),
         "statistics_cfbd": pruned,
         "national_percentiles": percentiles,
         "news_and_research": sections,

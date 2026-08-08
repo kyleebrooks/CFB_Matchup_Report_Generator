@@ -25,6 +25,7 @@ PER_TEAM_ENDPOINTS = [
     ("/ppa/games",              "Team PPA"),
     ("/ppa/players/season",     "Player PPA"),
     ("/stats/season",           "Team Season Stats"),
+    ("/ratings/srs",            "SRS Ratings"),
     ("/wepa/team/season",       "Adjusted Team Metrics"),
 ]
 
@@ -129,6 +130,18 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
     jobs["games::B"] = ("/games", {"year": year, "team": away_short}, f"Games ({away_short})")
     jobs["lines::A"] = ("/lines", {"year": year, "team": home_short}, f"Betting Lines ({home_short})")
 
+    # Game-context feeds from the v5 audit: the meeting's weather and broadcast, the
+    # real head-to-head series, both sides' record against the spread, the market's
+    # pregame win probability, and the league transfer-portal wire (no team filter).
+    jobs["ctx::weather"] = ("/games/weather", {"year": year, "team": home_short}, "Game Weather")
+    jobs["ctx::media"] = ("/games/media", {"year": year, "team": home_short}, "Game Media")
+    jobs["ctx::h2h"] = ("/teams/matchup", {"team1": home_short, "team2": away_short}, "Head to Head")
+    jobs["ctx::ats::A"] = ("/teams/ats", {"year": year, "team": home_short}, f"ATS ({home_short})")
+    jobs["ctx::ats::B"] = ("/teams/ats", {"year": year, "team": away_short}, f"ATS ({away_short})")
+    jobs["ctx::wp"] = ("/metrics/wp/pregame", {"year": year, "team": home_short},
+                       "Pregame Win Probability")
+    jobs["meta::portal"] = ("/player/portal", {"year": year}, "Transfer Portal")
+
     results: dict[str, object] = {}
     errors: list[dict] = []
     with ThreadPoolExecutor(max_workers=config.CFBD_MAX_WORKERS) as pool:
@@ -164,6 +177,10 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
             f"(e.g. HTTP {auth_failures[0]['status']}: {auth_failures[0]['body']})"
         )
 
+    h2h = results.get("ctx::h2h")
+    if isinstance(h2h, list):          # tolerate either envelope shape
+        h2h = _first(h2h)
+
     return {
         "errors": errors,
         "auth_failures": auth_failures,
@@ -179,6 +196,15 @@ def fetch_all(api_key: str, year: int, home_short: str, away_short: str) -> dict
             "teamA": results.get("games::A") or [],
             "teamB": results.get("games::B") or [],
         },
+        "weather": results.get("ctx::weather") or [],
+        "media": results.get("ctx::media") or [],
+        "h2h": h2h if isinstance(h2h, dict) else {},
+        "ats": {
+            "home": results.get("ctx::ats::A") or [],
+            "away": results.get("ctx::ats::B") or [],
+        },
+        "wp_pregame": results.get("ctx::wp") or [],
+        "portal": results.get("meta::portal") or [],
         "lines": results.get("lines::A") or [],
     }
 
@@ -201,6 +227,7 @@ def fetch_team(api_key: str, year: int, team: str) -> dict:
     jobs["meta::talent"] = ("/talent", {"year": year}, "Team Talent")
     jobs["games"] = ("/games", {"year": year, "team": team}, f"Games ({team})")
     jobs["records"] = ("/records", {"year": year, "team": team}, f"Records ({team})")
+    jobs["meta::portal"] = ("/player/portal", {"year": year}, "Transfer Portal")
 
     results: dict[str, object] = {}
     errors: list[dict] = []
@@ -233,6 +260,7 @@ def fetch_team(api_key: str, year: int, team: str) -> dict:
         "teams": results.get("meta::teams") or [],
         "games": results.get("games") or [],
         "records": results.get("records") or [],
+        "portal": results.get("meta::portal") or [],
     }
 
 
@@ -492,6 +520,94 @@ def prune_for_prompt(stats: dict) -> dict:
     return pruned
 
 
+def matchup_context(data: dict, game: dict | None, home: str, away: str) -> dict:
+    """The meeting-specific context block: weather, broadcast, series, ATS, market WP.
+
+    Everything is keyed to THIS meeting's game id where one is known — a September
+    forecast must never dress up the December rematch. Absent feeds degrade to an
+    honest availability note, never to invented conditions.
+    """
+    game_id = (game or {}).get("id")
+
+    def for_game(rows):
+        if not game_id:
+            return None
+        return next((r for r in rows or []
+                     if r.get("id") == game_id or r.get("gameId") == game_id), None)
+
+    weather = for_game(data.get("weather"))
+    if weather:
+        weather = {k: weather.get(k) for k in (
+            "gameIndoors", "venue", "temperature", "dewPoint", "humidity",
+            "precipitation", "snowfall", "windDirection", "windSpeed",
+            "weatherCondition") if weather.get(k) is not None}
+    outlets = sorted({r.get("outlet") for r in data.get("media") or []
+                      if game_id and r.get("id") == game_id and r.get("outlet")})
+
+    h2h = data.get("h2h") or {}
+    series = None
+    if h2h.get("team1Wins") is not None or h2h.get("games"):
+        series = {
+            "record": {h2h.get("team1") or home: h2h.get("team1Wins"),
+                       h2h.get("team2") or away: h2h.get("team2Wins"),
+                       "ties": h2h.get("ties")},
+            "span": f"{h2h.get('startYear')}-{h2h.get('endYear')}",
+            "recent_meetings": (h2h.get("games") or [])[-10:],
+        }
+
+    def ats_row(side):
+        rows = (data.get("ats") or {}).get(side) or []
+        row = _first(rows)
+        if not row:
+            return None
+        return {k: row.get(k) for k in ("team", "games", "atsWins", "atsLosses",
+                                        "atsPushes", "avgCoverMargin")}
+
+    wp = for_game(data.get("wp_pregame"))
+    return {
+        "weather": weather or {"available": False,
+                               "note": "No forecast or conditions stored for this "
+                                       "game yet."},
+        "broadcast": outlets or None,
+        "head_to_head": series or {"available": False,
+                                   "note": "No prior meetings on record."},
+        "against_the_spread": {
+            "home": ats_row("home"), "away": ats_row("away"),
+            "note": "This season's record against the closing spread.",
+        },
+        "market_pregame_win_probability": (
+            {"home_win_probability": wp.get("homeWinProbability"),
+             "spread": wp.get("spread")} if wp else None),
+    }
+
+
+def portal_moves(rows: list, team: str, limit: int = 30) -> dict:
+    """One team's verified transfer-portal wire, best-rated first."""
+    incoming, outgoing = [], []
+    for r in rows or []:
+        entry = {
+            "player": f"{r.get('firstName') or ''} {r.get('lastName') or ''}".strip(),
+            "position": r.get("position"),
+            "origin": r.get("origin"),
+            "destination": r.get("destination"),
+            "stars": r.get("stars"),
+            "rating": r.get("rating"),
+            "date": str(r.get("transferDate") or "")[:10],
+        }
+        if r.get("destination") == team:
+            incoming.append(entry)
+        elif r.get("origin") == team:
+            outgoing.append(entry)
+    for bucket in (incoming, outgoing):
+        bucket.sort(key=lambda e: -(e.get("rating") or 0))
+    return {
+        "incoming": incoming[:limit],
+        "outgoing": outgoing[:limit],
+        "note": "Verified CFBD transfer-portal entries for this season — treat as "
+                "ground truth for who actually moved; research adds anything newer.",
+    }
+
+
 def check_key(api_key: str, year: int) -> dict:
     """One cheap authenticated call, to distinguish a bad key from an empty season."""
     errors: list[dict] = []
@@ -517,6 +633,12 @@ def probe(api_key: str, year: int, team: str = "Georgia") -> dict:
         ("/ratings/sp", {"year": year}, "SP Ratings (league-wide)"),
         ("/games", {"year": year, "team": team}, "Games (NEW)"),
         ("/lines", {"year": year, "team": team}, "Betting Lines (NEW)"),
+        ("/games/weather", {"year": year, "team": team}, "Game Weather"),
+        ("/games/media", {"year": year, "team": team}, "Game Media"),
+        ("/teams/matchup", {"team1": team, "team2": "Alabama"}, "Head to Head"),
+        ("/teams/ats", {"year": year, "team": team}, "Against the Spread"),
+        ("/metrics/wp/pregame", {"year": year, "team": team}, "Pregame Win Probability"),
+        ("/player/portal", {"year": year}, "Transfer Portal"),
     ]
 
     for endpoint, params, label in probes:
@@ -794,11 +916,22 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
         "play_stats": ("/plays/stats", {"gameId": game_id}, "Player-Play Stats"),
         "teams": ("/teams/fbs", {"year": year}, "FBS Teams"),
     }
+    # Enrichment layers, tracked apart from the core record: the win-probability
+    # curve exists for essentially every game, but /live/plays is served from the
+    # live ingestion store and is routinely absent for older seasons — a miss there
+    # is expected, and must not read as a broken recap.
+    optional_jobs = {
+        "wp": ("/metrics/wp", {"gameId": game_id}, "Win Probability"),
+        "live": ("/live/plays", {"gameId": game_id}, "Live Play Detail"),
+    }
 
+    optional_errors: list[dict] = []
     results: dict = {}
-    with ThreadPoolExecutor(max_workers=min(5, config.CFBD_MAX_WORKERS)) as pool:
+    with ThreadPoolExecutor(max_workers=min(7, config.CFBD_MAX_WORKERS)) as pool:
         futures = {pool.submit(_get, api_key, ep, params, label, errors): key
                    for key, (ep, params, label) in jobs.items()}
+        futures.update({pool.submit(_get, api_key, ep, params, label, optional_errors): key
+                        for key, (ep, params, label) in optional_jobs.items()})
         for fut, key in futures.items():
             try:
                 results[key] = fut.result()
@@ -814,14 +947,21 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
     if isinstance(box, list):          # tolerate either envelope shape
         box = _first(box)
 
+    live = results.get("live")
+    if isinstance(live, list):         # /live/plays returns one object, but be lenient
+        live = _first(live)
+
     return {
         "game": game,
         "box": box or {},
         "drives": drives,
         "plays": plays,
         "play_stats": results.get("play_stats") or [],
+        "wp": results.get("wp") or [],
+        "live": live if isinstance(live, dict) else {},
         "teams": results.get("teams") or [],
         "errors": errors,
+        "optional_errors": optional_errors,
         "auth_failures": [e for e in errors if e["status"] in (401, 403)],
         "total_requests": len(jobs) + 1,
     }

@@ -50,8 +50,10 @@ PREVIEW_SECTIONS = [
                     "supported by the numbers in the data."),
     ("Ranked Teams on Alert", "Ranked teams (flagged in the data) whose game carries "
                               "either a thin model margin or a hostile setting."),
-    ("What to Watch, Day by Day", "A viewing guide grouped by date, closing with the "
-                                  "one storyline to follow into next week."),
+    ("What to Watch, Day by Day", "A viewing guide grouped by date — name the kickoff "
+                                  "time and the broadcast network from each game's tv "
+                                  "field where present — closing with the one storyline "
+                                  "to follow into next week."),
 ]
 
 WRAP_SECTIONS = [
@@ -170,6 +172,16 @@ def build_week_data(api_key, year=None, week=None, season_type=None, *,
     lines = _week_lines(api_key, year, week, season_type, errors)
     ranks = _ap_top25(api_key, year, week, season_type, errors)
 
+    # Broadcast networks make the viewing guide real: "3:30 on CBS" beats "afternoon
+    # slot". Only the preview needs them — nobody plans a watch party for last week.
+    media: dict[int, set] = {}
+    if not completed:
+        for r in cfbd._get(api_key, '/games/media',
+                           {'year': year, 'week': week, 'seasonType': season_type},
+                           'Broadcast Media', errors) or []:
+            if r.get('id') and r.get('outlet'):
+                media.setdefault(r['id'], set()).add(r['outlet'])
+
     rows = []
     for g in games:
         if completed and not g['completed']:
@@ -187,6 +199,7 @@ def build_week_data(api_key, year=None, week=None, season_type=None, *,
                     + (25 if g['home'] in ranks or g['away'] in ranks else 0))
         row = {
             'game_id': g['id'], 'start': g['start'], 'venue': g['venue'],
+            'tv': sorted(media.get(g['id'], set())) or None,
             'neutral_site': g['neutral_site'],
             'home': g['home'], 'away': g['away'],
             'home_rank': ranks.get(g['home']), 'away_rank': ranks.get(g['away']),

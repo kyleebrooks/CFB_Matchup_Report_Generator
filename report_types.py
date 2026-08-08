@@ -200,9 +200,10 @@ REPORT_TYPES: dict[str, dict] = {
         'name': 'matchup',
         'title': 'Head-to-Head Matchup Report',
         'description': (
-            'Full preview of one game: ratings, efficiency mismatches, injuries, roster and '
-            'practice news, media analysis, nine charts, and a scoreboard-style final '
-            'prediction card.'
+            'Full preview of one game: ratings, efficiency mismatches, injuries, verified '
+            'transfer-portal moves, the real head-to-head series, game-day weather and '
+            'broadcast, against-the-spread records, practice news, media analysis, nine '
+            'charts, and a scoreboard-style final prediction card.'
         ),
         'required': ['home_full', 'away_full', 'home_short', 'away_short'],
         'optional': ['year', 'kickoff'],
@@ -251,7 +252,8 @@ REPORT_TYPES: dict[str, dict] = {
             'Post-game breakdown of one finished game, built entirely from the game '
             'record: how it unfolded, the drives that decided it, what went right and '
             'wrong for each team, the adjustments made and missed, and what could have '
-            'been done differently — with four charts from the play-by-play.'
+            'been done differently — with six charts from the play-by-play, including '
+            'the win-probability story of the game.'
         ),
         'required': ['game_id'],
         'optional': [],

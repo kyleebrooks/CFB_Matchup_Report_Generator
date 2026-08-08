@@ -1036,6 +1036,9 @@ RECAP_CHART_SPECS = [
     ("recap_flow", "Scoring Flow",
      "The score after every scoring play, from kickoff to the final whistle. Long flat "
      "stretches are stalled offense; steep runs are momentum."),
+    ("recap_winprob", "Win Probability",
+     "The home team's chance of winning after every play. Cliffs are the game's true "
+     "turning points; a line that hugs one edge is a game that was never close."),
     ("recap_drives", "Drive Outcomes",
      "Every drive by both offenses: how far it travelled and how it ended. Scoring "
      "drives are solid; empty possessions are hollow."),
@@ -1100,6 +1103,38 @@ def chart_recap_flow(plays, game, home_c, away_c):
     ax.set_ylabel("points")
     ax.legend(loc="upper left", fontsize=9)
     fig.suptitle("Scoring Flow", fontsize=13, fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_recap_winprob(wp_rows, game, home_c, away_c):
+    """The home team's win probability after every play — the story of the game."""
+    home, away = game.get("homeTeam"), game.get("awayTeam")
+    rows = [r for r in wp_rows or [] if r.get("homeWinProbability") is not None]
+    if len(rows) < 12:
+        return None
+    rows.sort(key=lambda r: int(r.get("playNumber") or 0))
+    y = [float(r["homeWinProbability"]) * 100 for r in rows]
+    x = list(range(len(y)))
+
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    ax.axhline(50, color=config.CHART_MUTED, linewidth=1, linestyle="--", zorder=2)
+    ax.fill_between(x, y, 50, where=[v >= 50 for v in y],
+                    color=home_c, alpha=0.16, zorder=1, interpolate=True)
+    ax.fill_between(x, y, 50, where=[v <= 50 for v in y],
+                    color=away_c, alpha=0.16, zorder=1, interpolate=True)
+    ax.plot(x, y, color=home_c, linewidth=2.2, zorder=4)
+    ax.set_ylim(0, 100)
+    ax.set_xlim(0, len(y) - 1)
+    ax.set_xlabel("play number")
+    ax.set_ylabel(f"{home} win probability, %")
+    ax.text(0.01, 0.96, f"{home} territory", transform=ax.transAxes,
+            fontsize=8, color=home_c, va="top")
+    ax.text(0.01, 0.05, f"{away} territory", transform=ax.transAxes,
+            fontsize=8, color=away_c, va="bottom")
+    _grid(ax)
+    fig.suptitle("Win Probability", fontsize=13, fontweight="bold",
+                 color=config.CHART_TEXT)
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     return _encode(fig)
 
@@ -1268,6 +1303,7 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
 
     builders = {
         "recap_flow": lambda: chart_recap_flow(recap.get("plays"), game, home_c, away_c),
+        "recap_winprob": lambda: chart_recap_winprob(recap.get("wp"), game, home_c, away_c),
         "recap_drives": lambda: chart_recap_drives(recap.get("drives"), game, home_c, away_c),
         "recap_box": lambda: chart_recap_box(recap.get("box"), game, home_c, away_c),
         "recap_players": lambda: chart_recap_players(recap.get("box"), game, home_c, away_c),

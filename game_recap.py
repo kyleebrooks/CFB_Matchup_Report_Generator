@@ -50,7 +50,9 @@ SECTIONS = [
         "The three to five possessions that decided the game: long scoring marches, "
         "empty trips into scoring position, turnovers, fourth-down decisions, special-"
         "teams swings. For each: the situation, what happened, and what it cost or "
-        "bought in points."
+        "bought in points. Where the win-probability data is available, anchor the "
+        "turning points to its biggest swings — the plays that actually moved the "
+        "game — and quote the swing size."
     )),
     ("What Went Right", (
         "For EACH team in turn, what genuinely worked, tied to the numbers: efficiency "
@@ -87,7 +89,9 @@ SECTIONS = [
         "players executing: from the player-execution data, which ball-carriers, "
         "passers and targets drove each play type's success rate up or down, and which "
         "defenders kept showing up in the plays that failed. Use tables for the "
-        "type-level numbers; name names in the prose."
+        "type-level numbers; name names in the prose. Where avg_ppa is present, use "
+        "it as the value measure — a play type can move the chains while losing "
+        "expected points, and PPA is what exposes that."
     )),
     ("Down, Distance and Direction", (
         "The deeper cut, from the situational breakdown: WHERE each ground game went "
@@ -103,7 +107,12 @@ SECTIONS = [
     ("Advanced Box Score Analysis", (
         "The full statistical autopsy: efficiency, explosiveness, field position, "
         "havoc, scoring opportunities, rushing and passing splits. Present the "
-        "comparisons as a table where that is clearer than prose."
+        "comparisons as a table where that is clearer than prose. When the live "
+        "advanced layer is available, add its second dimension: line yards vs "
+        "second-level vs open-field rushing (who won the trenches vs who broke free), "
+        "EPA per rush and per dropback, standard-down vs passing-down success, "
+        "success with garbage time removed, and the 'deserve to win' verdict against "
+        "the actual result. If it is unavailable, simply omit all of that."
     )),
     ("Final Assessment", (
         "What this result actually says about each team going forward — strictly what "
@@ -172,6 +181,107 @@ def _notable_plays(plays: list, limit: int = 110) -> list[dict]:
             "score": f"{p.get('offenseScore')}-{p.get('defenseScore')}",
         })
     return out
+
+
+def _win_probability(rows: list, home: str, away: str) -> dict:
+    """The stored in-game win-probability curve, and the plays that moved it most."""
+    rows = [r for r in rows or [] if r.get("homeWinProbability") is not None]
+    if not rows:
+        return {"available": False,
+                "note": "No win-probability series is stored for this game."}
+    rows.sort(key=lambda r: int(r.get("playNumber") or 0))
+
+    swings = []
+    prev = float(rows[0]["homeWinProbability"])
+    for r in rows[1:]:
+        wp = float(r["homeWinProbability"])
+        swings.append((wp - prev, r))
+        prev = wp
+    swings.sort(key=lambda t: -abs(t[0]))
+
+    step = max(1, len(rows) // 40)     # ~40 samples describe the curve fully
+    return {
+        "available": True,
+        "note": (f"home_wp is {home}'s win probability, play by play. The biggest "
+                 f"swings are the game's true turning points — cite them."),
+        "pregame_spread": rows[0].get("spread"),
+        "curve": [{"play": int(r.get("playNumber") or 0),
+                   "home_wp": round(float(r["homeWinProbability"]), 3)}
+                  for r in rows[::step]],
+        "final_home_wp": round(float(rows[-1]["homeWinProbability"]), 3),
+        "biggest_swings": [{
+            "swing_toward": home if delta > 0 else away,
+            "delta_home_wp": round(delta, 3),
+            "home_wp_after": round(float(r["homeWinProbability"]), 3),
+            "score_after": f"{r.get('homeScore')}-{r.get('awayScore')}",
+            "text": (r.get("playText") or "")[:200],
+        } for delta, r in swings[:8]],
+    }
+
+
+def _live_layer(live: dict | None) -> dict:
+    """The live-pipeline enrichment: pre-classified plays and line-level team stats.
+
+    /live/plays is served from CFBD's live ingestion store, so coverage is strongest
+    for recent games and routinely absent for older seasons. Everything here is
+    additive — the recap stands entirely on the classic play-by-play without it.
+    """
+    if not isinstance(live, dict) or not live.get("teams"):
+        return {"available": False,
+                "note": ("The live play-by-play layer is not stored for this game "
+                         "(typical for older seasons). The analysis rests on the "
+                         "classic play-by-play; do not mention this gap in prose.")}
+
+    teams = [{k: v for k, v in t.items() if k != "drives"}
+             for t in live.get("teams") or []]
+    plays = [p for drive in live.get("drives") or []
+             for p in drive.get("plays") or []]
+
+    def agg(rows):
+        if not rows:
+            return None
+        epa = []
+        for p in rows:
+            try:
+                if p.get("epa") is not None:
+                    epa.append(float(p["epa"]))
+            except (TypeError, ValueError):
+                continue
+        return {"plays": len(rows),
+                "success_rate": round(
+                    sum(1 for p in rows if p.get("success")) / len(rows) * 100, 1),
+                "avg_epa": round(sum(epa) / len(epa), 3) if epa else None}
+
+    classified: dict = {}
+    for t in live.get("teams") or []:
+        name = t.get("team")
+        rows = [p for p in plays if p.get("team") == name]
+        entry = {}
+        for down_type in ("standard", "passing"):
+            bucket = agg([p for p in rows
+                          if (p.get("downType") or "").lower() == down_type])
+            if bucket:
+                entry[f"{down_type}_downs"] = bucket
+        for rush_pass in ("rush", "pass"):
+            bucket = agg([p for p in rows
+                          if (p.get("rushPass") or "").lower() == rush_pass])
+            if bucket:
+                entry[rush_pass] = bucket
+        real = agg([p for p in rows if not p.get("garbageTime")])
+        if real:
+            entry["excluding_garbage_time"] = real
+        if entry:
+            classified[name] = entry
+
+    return {
+        "available": True,
+        "note": ("Pre-classified by CFBD's live pipeline: per-play EPA, success, "
+                 "standard vs passing downs, garbage time flagged. Team blocks carry "
+                 "line yards / second-level / open-field rushing splits, EPA splits "
+                 "and 'deserve to win'."),
+        "teams": teams,
+        "play_classification": classified,
+    }
 
 
 def _half_splits(plays: list, home: str, away: str) -> dict:
@@ -432,13 +542,17 @@ def generate(
         "drives": _compact_drives(drives),
         "notable_plays": _notable_plays(plays),
         "half_splits": _half_splits(plays, home, away),
+        "win_probability": _win_probability(recap.get("wp") or [], home, away),
         "play_type_breakdown": playtypes,
         "situational_breakdown": _situational_breakdown(plays, home, away),
+        "live_advanced": _live_layer(recap.get("live")),
         "player_execution": _player_execution(plays, recap.get("play_stats") or []),
         "player_stat_lines": _player_lines(recap.get("play_stats") or []),
         "data_coverage": {
             "drives": len(drives), "plays": len(plays),
             "player_stat_rows": len(recap.get("play_stats") or []),
+            "win_probability_points": len(recap.get("wp") or []),
+            "live_layer_available": bool((recap.get("live") or {}).get("teams")),
             "endpoints_with_errors": [e["label"] for e in recap.get("errors") or []],
         },
     }
