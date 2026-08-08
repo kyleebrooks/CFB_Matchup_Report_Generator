@@ -188,17 +188,38 @@ def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry
 
     text = openrouter.extract_text(resp)
     if not text:
-        # Reasoning models spend max_tokens on thinking before emitting any content, so
-        # an empty reply is a budget problem, not a model failure. Say which one it is.
+        # An empty reply has three distinct causes, and each needs a different fix, so
+        # naming the wrong one sends the operator chasing settings that are not broken.
         usage = openrouter.extract_usage(resp)
         reason = openrouter.finish_reason(resp)
         reasoning_tokens = usage.get("reasoning_tokens")
-        if reason == "length" or openrouter.has_reasoning(resp):
+        if reason == "error":
+            # The upstream provider died mid-generation (usually after some reasoning
+            # tokens, billed at zero). chat() already retried it; nothing in the
+            # settings caused this and nothing in the settings fixes it.
+            raise openrouter.OpenRouterError(
+                f"The provider serving {model} failed mid-generation and returned no "
+                f"report text (finish_reason=error after {reasoning_tokens or 0} "
+                f"reasoning tokens, cost {usage.get('cost')}). This is an upstream "
+                f"outage, already retried automatically — not a token-budget problem. "
+                f"Run the report again; if it keeps failing, switch report_model.",
+                body=json.dumps(usage),
+            )
+        if reason == "length":
+            # Only here did the model actually exhaust its budget thinking.
             raise openrouter.OpenRouterError(
                 f"{model} used its entire token budget on reasoning and returned no report "
-                f"text (finish_reason={reason or 'unknown'}, reasoning_tokens={reasoning_tokens}, "
+                f"text (finish_reason=length, reasoning_tokens={reasoning_tokens}, "
                 f"max_tokens={settings['report_max_tokens']}). Raise report_max_tokens or "
                 f"lower report_effort.",
+                body=json.dumps(usage),
+            )
+        if openrouter.has_reasoning(resp):
+            raise openrouter.OpenRouterError(
+                f"{model} emitted {reasoning_tokens or 'some'} reasoning tokens but no "
+                f"report text (finish_reason={reason or 'unknown'}). The budget was not "
+                f"exhausted (max_tokens={settings['report_max_tokens']}) — this looks "
+                f"like a provider fault; run the report again.",
                 body=json.dumps(usage),
             )
         raise openrouter.OpenRouterError(

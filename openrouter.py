@@ -108,6 +108,20 @@ def chat(
             if isinstance(data, dict) and data.get("error") and not data.get("choices"):
                 err = data["error"]
                 raise OpenRouterError(f"OpenRouter upstream error: {err}", 200, json.dumps(err)[:800])
+            # A provider can also die MID-generation: HTTP 200, choices present, but
+            # finish_reason "error" and no content — typically after some reasoning
+            # tokens, billed at zero. That is the provider's outage, not this
+            # request's fault, so it gets the same backoff-and-retry as a 502.
+            if finish_reason(data) == "error" and attempt < retries:
+                wait = 2 ** attempt * 2
+                logging.warning(
+                    f"OpenRouter {model} provider failed mid-generation "
+                    f"(finish_reason=error, usage={json.dumps(data.get('usage') or {})[:200]}); "
+                    f"retrying in {wait}s"
+                )
+                last_err = OpenRouterError("provider finish_reason=error", 200)
+                time.sleep(wait)
+                continue
             return data
 
         if resp.status_code in (400, 404, 422) and response_format and not dropped_schema:

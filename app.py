@@ -352,8 +352,10 @@ def health():
                 if not reply:
                     out["ok"] = False
                     entry["error"] = (
-                        "Model returned no text. If finish_reason is 'length' the token "
-                        "budget went entirely to reasoning — raise REPORT_MAX_TOKENS."
+                        "Model returned no text. finish_reason 'length' means the token "
+                        "budget went entirely to reasoning — raise REPORT_MAX_TOKENS; "
+                        "'error' means the upstream provider failed mid-generation — "
+                        "usually transient, retry or switch models."
                     )
                 models[role] = entry
             except Exception as e:
