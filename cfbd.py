@@ -794,11 +794,22 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
         "play_stats": ("/plays/stats", {"gameId": game_id}, "Player-Play Stats"),
         "teams": ("/teams/fbs", {"year": year}, "FBS Teams"),
     }
+    # Enrichment layers, tracked apart from the core record: the win-probability
+    # curve exists for essentially every game, but /live/plays is served from the
+    # live ingestion store and is routinely absent for older seasons — a miss there
+    # is expected, and must not read as a broken recap.
+    optional_jobs = {
+        "wp": ("/metrics/wp", {"gameId": game_id}, "Win Probability"),
+        "live": ("/live/plays", {"gameId": game_id}, "Live Play Detail"),
+    }
 
+    optional_errors: list[dict] = []
     results: dict = {}
-    with ThreadPoolExecutor(max_workers=min(5, config.CFBD_MAX_WORKERS)) as pool:
+    with ThreadPoolExecutor(max_workers=min(7, config.CFBD_MAX_WORKERS)) as pool:
         futures = {pool.submit(_get, api_key, ep, params, label, errors): key
                    for key, (ep, params, label) in jobs.items()}
+        futures.update({pool.submit(_get, api_key, ep, params, label, optional_errors): key
+                        for key, (ep, params, label) in optional_jobs.items()})
         for fut, key in futures.items():
             try:
                 results[key] = fut.result()
@@ -814,14 +825,21 @@ def fetch_game_recap(api_key: str, game_id: int) -> dict:
     if isinstance(box, list):          # tolerate either envelope shape
         box = _first(box)
 
+    live = results.get("live")
+    if isinstance(live, list):         # /live/plays returns one object, but be lenient
+        live = _first(live)
+
     return {
         "game": game,
         "box": box or {},
         "drives": drives,
         "plays": plays,
         "play_stats": results.get("play_stats") or [],
+        "wp": results.get("wp") or [],
+        "live": live if isinstance(live, dict) else {},
         "teams": results.get("teams") or [],
         "errors": errors,
+        "optional_errors": optional_errors,
         "auth_failures": [e for e in errors if e["status"] in (401, 403)],
         "total_requests": len(jobs) + 1,
     }

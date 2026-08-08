@@ -43,10 +43,11 @@ SECTIONS = [
     )),
     ("Play-Type Profile", (
         "What the offense ran all season and how well each call worked: every play "
-        "type by volume, success rate, yards per play, explosives and stuffs, and "
-        "the rush-versus-dropback split. Use a table for the type-level numbers. "
-        "Contrast volume with efficiency — the types leaned on most are not always "
-        "the ones that worked."
+        "type by volume, success rate, yards per play, average PPA where present, "
+        "explosives and stuffs, and the rush-versus-dropback split. Use a table for "
+        "the type-level numbers. Contrast volume with efficiency — the types leaned "
+        "on most are not always the ones that worked, and PPA is the value measure "
+        "that exposes it."
     )),
     ("The Ground Game: Where the Runs Went", (
         "From the rush-direction data: how the season's designed runs distributed "

@@ -251,7 +251,8 @@ REPORT_TYPES: dict[str, dict] = {
             'Post-game breakdown of one finished game, built entirely from the game '
             'record: how it unfolded, the drives that decided it, what went right and '
             'wrong for each team, the adjustments made and missed, and what could have '
-            'been done differently — with four charts from the play-by-play.'
+            'been done differently — with six charts from the play-by-play, including '
+            'the win-probability story of the game.'
         ),
         'required': ['game_id'],
         'optional': [],

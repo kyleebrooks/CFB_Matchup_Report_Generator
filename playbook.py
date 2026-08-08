@@ -115,14 +115,29 @@ def pass_detail(play: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Aggregation primitives
 # ---------------------------------------------------------------------------
+def _ppa_values(plays: list[dict]) -> list[float]:
+    out = []
+    for p in plays:
+        try:
+            if p.get("ppa") is not None:
+                out.append(float(p["ppa"]))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def _agg(plays: list[dict]) -> dict:
     yards = sum(int(p.get("yardsGained") or 0) for p in plays)
     successes = sum(1 for p in plays if _is_success(p))
+    # CFBD scores every play with PPA (predicted points added) — the per-play value
+    # measure that separates "5 yards on 3rd-and-4" from "5 yards on 3rd-and-12".
+    ppa = _ppa_values(plays)
     return {
         "plays": len(plays),
         "yards": yards,
         "yards_per_play": round(yards / len(plays), 2) if plays else None,
         "success_rate": round(successes / len(plays) * 100, 1) if plays else None,
+        "avg_ppa": round(sum(ppa) / len(ppa), 3) if ppa else None,
         "explosive_15plus": sum(1 for p in plays if (p.get("yardsGained") or 0) >= 15),
         "stuffed_zero_or_less": sum(1 for p in plays
                                     if (p.get("yardsGained") or 0) <= 0),
@@ -144,7 +159,8 @@ def _family_rows(plays: list[dict]) -> dict:
         group = [p for p in plays if _family(p.get("playType")) == family]
         if group:
             out[family] = {k: v for k, v in _agg(group).items()
-                           if k in ("plays", "yards", "yards_per_play", "success_rate")}
+                           if k in ("plays", "yards", "yards_per_play",
+                                    "success_rate", "avg_ppa")}
     return out
 
 
