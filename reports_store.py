@@ -68,11 +68,12 @@ def _describe(path: str, name: str) -> dict:
     except OSError:
         size, modified = 0, None
     # Filenames are "{home}_{away}_{Month D, YYYY}.pdf" for matchups, or a
-    # type prefix followed by the subject: "team_...", "recap_...", "slate_...",
-    # "wrap_...", "predaudit_...", "predreview_...".
+    # type prefix followed by the subject: "team_...", "plays_...", "recap_...",
+    # "slate_...", "wrap_...", "predaudit_...", "predreview_...".
     stem = name[:-4] if name.lower().endswith('.pdf') else name
     prefixes = (
         ('team_', 'team'),
+        ('plays_', 'season_plays'),
         ('recap_', 'full_game_recap'),
         ('slate_', 'weekly_preview'),
         ('wrap_', 'weekly_wrap'),

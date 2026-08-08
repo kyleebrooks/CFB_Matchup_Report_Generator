@@ -89,6 +89,17 @@ SECTIONS = [
         "defenders kept showing up in the plays that failed. Use tables for the "
         "type-level numbers; name names in the prose."
     )),
+    ("Down, Distance and Direction", (
+        "The deeper cut, from the situational breakdown: WHERE each ground game went "
+        "(left/middle/right, end/tackle/guard) and how each direction fared; scrambles "
+        "and screens separated from designed plays; how play selection and success "
+        "shifted by down; third-down conversion rates by distance (short 1-3, medium "
+        "4-6, long 7+); fourth-down attempts and results; red-zone efficiency. Cover "
+        "BOTH teams, offense and what each defense allowed. Cite tendencies "
+        "numerically — success running left vs right, run rate on 2nd-and-long — and "
+        "flag anything a future opponent should attack. Directions marked "
+        "'unclassified' mean the play text named no gap; say so rather than guessing."
+    )),
     ("Advanced Box Score Analysis", (
         "The full statistical autopsy: efficiency, explosiveness, field position, "
         "havoc, scoring opportunities, rushing and passing splits. Present the "
@@ -187,117 +198,17 @@ def _half_splits(plays: list, home: str, away: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Play-type analytics
+# Play-type analytics — shared with the season play-by-play report
 # ---------------------------------------------------------------------------
-# The standard down-and-distance success definition used across analytics sites.
-SUCCESS_DEFINITION = (
-    "A play is a success when it gains 50% of the yards to go on 1st down, 70% on "
-    "2nd down, or 100% on 3rd/4th down; offensive touchdowns always count, turnovers "
-    "never do. Special-teams and administrative plays are excluded."
+from playbook import (            # noqa: E402  (re-exported for callers and tests)
+    SUCCESS_DEFINITION,
+    _family,
+    _is_scrimmage,
+    _is_success,
+    _is_turnover,
+    play_type_breakdown as _play_type_breakdown,
+    situational_breakdown as _situational_breakdown,
 )
-
-_NON_SCRIMMAGE = ("kickoff", "punt", "field goal", "timeout", "end period",
-                  "end of half", "end of game", "penalty", "extra point",
-                  "two point", "defensive 2pt")
-
-
-def _is_scrimmage(play: dict) -> bool:
-    text = (play.get("playType") or "").lower()
-    if not text or any(marker in text for marker in _NON_SCRIMMAGE):
-        return False
-    return play.get("yardsGained") is not None
-
-
-def _is_turnover(play: dict) -> bool:
-    text = (play.get("playType") or "").lower()
-    return "interception" in text or "fumble recovery (opponent)" in text \
-        or "fumble return" in text
-
-
-def _is_success(play: dict) -> bool:
-    """The offense's side of the standard success-rate definition."""
-    if _is_turnover(play):
-        return False
-    if play.get("scoring") and not _is_turnover(play):
-        return True
-    yards = int(play.get("yardsGained") or 0)
-    down = int(play.get("down") or 0)
-    distance = play.get("distance")
-    if not distance or int(distance) <= 0:
-        return yards > 0
-    distance = int(distance)
-    if down <= 1:
-        return yards >= 0.5 * distance
-    if down == 2:
-        return yards >= 0.7 * distance
-    return yards >= distance
-
-
-def _family(play_type: str) -> str:
-    text = (play_type or "").lower()
-    if "rush" in text:
-        return "rush"
-    if "pass" in text or "sack" in text or "interception" in text:
-        return "dropback"
-    return "other"
-
-
-def _type_rows(plays: list[dict]) -> list[dict]:
-    """Per-play-type aggregate rows for one set of scrimmage plays."""
-    groups: dict = {}
-    for p in plays:
-        groups.setdefault(p.get("playType") or "Unknown", []).append(p)
-    rows = []
-    for ptype, group in groups.items():
-        yards = sum(int(p.get("yardsGained") or 0) for p in group)
-        successes = sum(1 for p in group if _is_success(p))
-        rows.append({
-            "type": ptype,
-            "plays": len(group),
-            "yards": yards,
-            "yards_per_play": round(yards / len(group), 2),
-            "success_rate": round(successes / len(group) * 100, 1),
-            "explosive_15plus": sum(1 for p in group
-                                    if (p.get("yardsGained") or 0) >= 15),
-            "stuffed_zero_or_less": sum(1 for p in group
-                                        if (p.get("yardsGained") or 0) <= 0),
-        })
-    rows.sort(key=lambda r: -r["plays"])
-    return rows
-
-
-def _family_rows(plays: list[dict]) -> dict:
-    out = {}
-    for family in ("rush", "dropback"):
-        group = [p for p in plays if _family(p.get("playType")) == family]
-        if not group:
-            continue
-        yards = sum(int(p.get("yardsGained") or 0) for p in group)
-        successes = sum(1 for p in group if _is_success(p))
-        out[family] = {"plays": len(group), "yards": yards,
-                       "yards_per_play": round(yards / len(group), 2),
-                       "success_rate": round(successes / len(group) * 100, 1)}
-    return out
-
-
-def _play_type_breakdown(plays: list, home: str, away: str) -> dict:
-    """Offense and defense play-type effectiveness for both teams."""
-    scrimmage = [p for p in plays if _is_scrimmage(p)]
-
-    def offense_of(team):
-        return [p for p in scrimmage if p.get("offense") == team]
-
-    out = {"definition": SUCCESS_DEFINITION}
-    for team, opponent in ((home, away), (away, home)):
-        out[team] = {
-            # What this team ran, and how it went.
-            "offense_by_type": _type_rows(offense_of(team)),
-            "offense_rush_vs_dropback": _family_rows(offense_of(team)),
-            # What this team's DEFENSE allowed, by the opponent's play type.
-            "defense_allowed_by_type": _type_rows(offense_of(opponent)),
-            "defense_rush_vs_dropback_allowed": _family_rows(offense_of(opponent)),
-        }
-    return out
 
 
 def _player_execution(plays: list, play_stats: list, limit: int = 24) -> dict:
@@ -522,6 +433,7 @@ def generate(
         "notable_plays": _notable_plays(plays),
         "half_splits": _half_splits(plays, home, away),
         "play_type_breakdown": playtypes,
+        "situational_breakdown": _situational_breakdown(plays, home, away),
         "player_execution": _player_execution(plays, recap.get("play_stats") or []),
         "player_stat_lines": _player_lines(recap.get("play_stats") or []),
         "data_coverage": {

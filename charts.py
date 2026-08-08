@@ -1532,3 +1532,196 @@ def build_prediction_charts(kind: str, *, curve, by_model, graded_rows) -> list[
         out.append({"key": key, "title": title, "caption": caption,
                     "img": img, "available": available})
     return out
+
+
+# ---------------------------------------------------------------------------
+# Full season play-by-play charts
+# ---------------------------------------------------------------------------
+SEASON_PLAY_CHART_SPECS = [
+    ("season_directions", "Where the Runs Went",
+     "Every designed rush of the season by direction: how often each gap was hit "
+     "and how well it worked. The gap between the volume bar and its success "
+     "label is the difference between habit and effectiveness."),
+    ("season_downs", "Success by Down",
+     "Offensive success rate on each down, next to what the defense allowed. The "
+     "run-share line shows how predictable the play-calling became as downs got "
+     "longer."),
+    ("season_third", "Third Down by Distance",
+     "Conversion rate on 3rd-and-short, medium and long — the offense's rate "
+     "beside the defense's rate allowed. Money-down execution, both sides."),
+    ("season_trend", "Week-to-Week Evolution",
+     "Offensive and defensive success rate game by game across the season. "
+     "Diverging lines are a team changing; parallel lines are a team being who "
+     "it is."),
+]
+
+
+def chart_season_directions(breakdown, team_label, color, alt):
+    directions = ((breakdown.get("offense") or {}).get("situational") or {}) \
+        .get("rush_directions") or {}
+    order = ["left end", "left tackle", "left guard", "middle",
+             "right guard", "right tackle", "right end", "unclassified"]
+    rows = [(d, directions[d]) for d in order if d in directions]
+    if sum(r["plays"] for _d, r in rows) < 10:
+        return None
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    names = [d for d, _r in rows][::-1]
+    counts = [r["plays"] for _d, r in rows][::-1]
+    rates = [r.get("success_rate") or 0 for _d, r in rows][::-1]
+    colors = [alt if d == "unclassified" else color for d in names]
+    bars = ax.barh(names, counts, color=colors, zorder=3)
+    labels = [f"{c} carries — {s:.0f}% success" for c, s in zip(counts, rates)]
+    ax.bar_label(bars, labels=labels, padding=3, fontsize=8, color=config.CHART_TEXT)
+    ax.set_xlim(0, max(counts) * 1.45)
+    ax.set_xlabel("designed rushes this season")
+    _grid(ax, axis="x")
+    fig.suptitle(f"{team_label}: Where the Runs Went", fontsize=13,
+                 fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_season_downs(breakdown, team_label, color, alt):
+    off = ((breakdown.get("offense") or {}).get("situational") or {}).get("by_down") or {}
+    deff = ((breakdown.get("defense_allowed") or {}).get("situational") or {}) \
+        .get("by_down") or {}
+    downs = [d for d in ("1", "2", "3", "4") if d in off]
+    if len(downs) < 3:
+        return None
+    x = np.arange(len(downs))
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    ov = [off[d].get("success_rate") or 0 for d in downs]
+    dv = [(deff.get(d) or {}).get("success_rate") or 0 for d in downs]
+    bars_o = ax.bar(x - 0.18, ov, width=0.34, color=color, zorder=3,
+                    label="offense success")
+    bars_d = ax.bar(x + 0.18, dv, width=0.34, color=alt, zorder=3,
+                    label="defense allowed")
+    ax.bar_label(bars_o, fmt="%.0f%%", padding=2, fontsize=8, color=config.CHART_TEXT)
+    ax.bar_label(bars_d, fmt="%.0f%%", padding=2, fontsize=8, color=config.CHART_TEXT)
+    share = [off[d].get("rush_share_pct") or 0 for d in downs]
+    ax.plot(x, share, marker="o", linewidth=2, color=config.CHART_TEXT,
+            zorder=4, label="offense run share")
+    for xi, s in zip(x, share):
+        ax.annotate(f"{s:.0f}%", (xi, s), textcoords="offset points",
+                    xytext=(0, 7), ha="center", fontsize=7.5,
+                    color=config.CHART_TEXT)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{d}{'st' if d=='1' else 'nd' if d=='2' else 'rd' if d=='3' else 'th'} down"
+                        for d in downs])
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("%")
+    _grid(ax)
+    ax.legend(loc="upper right", fontsize=8.5, frameon=False)
+    fig.suptitle(f"{team_label}: Success by Down", fontsize=13,
+                 fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_season_third(breakdown, team_label, color, alt):
+    off = ((breakdown.get("offense") or {}).get("situational") or {}) \
+        .get("third_down_by_distance") or {}
+    deff = ((breakdown.get("defense_allowed") or {}).get("situational") or {}) \
+        .get("third_down_by_distance") or {}
+    buckets = [("short_1_3", "3rd & 1-3"), ("medium_4_6", "3rd & 4-6"),
+               ("long_7plus", "3rd & 7+")]
+    present = [(k, label) for k, label in buckets if k in off]
+    if len(present) < 2:
+        return None
+    x = np.arange(len(present))
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    ov = [off[k].get("conversion_pct") or 0 for k, _l in present]
+    dv = [(deff.get(k) or {}).get("conversion_pct") or 0 for k, _l in present]
+    bars_o = ax.bar(x - 0.18, ov, width=0.34, color=color, zorder=3, label="offense converts")
+    bars_d = ax.bar(x + 0.18, dv, width=0.34, color=alt, zorder=3, label="defense allows")
+    labels_o = [f"{v:.0f}% ({off[k]['attempts']})" for v, (k, _l) in zip(ov, present)]
+    labels_d = [f"{v:.0f}% ({(deff.get(k) or {}).get('attempts', 0)})"
+                for v, (k, _l) in zip(dv, present)]
+    ax.bar_label(bars_o, labels=labels_o, padding=2, fontsize=8, color=config.CHART_TEXT)
+    ax.bar_label(bars_d, labels=labels_d, padding=2, fontsize=8, color=config.CHART_TEXT)
+    ax.set_xticks(x)
+    ax.set_xticklabels([label for _k, label in present])
+    ax.set_ylim(0, 100)
+    ax.set_ylabel("conversion rate, % (attempts in parentheses)")
+    _grid(ax)
+    ax.legend(loc="upper right", fontsize=8.5, frameon=False)
+    fig.suptitle(f"{team_label}: Third Down by Distance", fontsize=13,
+                 fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_season_trend(game_log, team_label, color, alt):
+    rows = [g for g in game_log
+            if (g.get("offense") or {}).get("plays") and g.get("opponent")]
+    if len(rows) < 4:
+        return None
+    x = np.arange(len(rows))
+    fig, ax = plt.subplots(figsize=(FIG_W, FIG_H))
+    ov = [g["offense"].get("success_rate") or 0 for g in rows]
+    dv = [(g.get("defense_allowed") or {}).get("success_rate") or 0 for g in rows]
+    ax.plot(x, ov, marker="o", linewidth=2.2, color=color, zorder=4,
+            label="offense success rate")
+    ax.plot(x, dv, marker="s", linewidth=2.2, color=alt, zorder=3,
+            label="defense success rate allowed")
+    for xi, g in zip(x, rows):
+        if g.get("result") == "L":
+            ax.axvspan(xi - 0.5, xi + 0.5, color=config.CHART_GRID, alpha=0.35,
+                       zorder=0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(
+        [f"{'@' if g.get('site') == 'away' else ''}{g['opponent']}"
+         f" ({g.get('result') or '?'})" for g in rows],
+        rotation=40, ha="right", fontsize=7.5)
+    ax.set_ylim(0, max(max(ov), max(dv)) * 1.25)
+    ax.set_ylabel("success rate, %")
+    _grid(ax)
+    ax.legend(loc="upper right", fontsize=8.5, frameon=False)
+    fig.suptitle(f"{team_label}: Week-to-Week Evolution (losses shaded)",
+                 fontsize=13, fontweight="bold", color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def build_season_play_charts(breakdown: dict, game_log: list, team_meta: dict,
+                             team_label: str) -> list[dict]:
+    """Render the four season play-by-play charts. Failures become placeholders."""
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt"
+        )
+    _apply_style()
+    color = (_norm_hex(team_meta.get("color")) if _hex_ok(team_meta.get("color"))
+             else config.CHART_FALLBACK_HOME)
+    alt = (_norm_hex(team_meta.get("alt_color")) if _hex_ok(team_meta.get("alt_color"))
+           else config.CHART_FALLBACK_AWAY)
+    # Same contrast guard as the team charts: near-identical or too-pale official
+    # colors get a readable stand-in for the second series.
+    if _hex_ok(team_meta.get("alt_color")) and _luminance(alt) > 0.82:
+        alt = config.CHART_FALLBACK_AWAY
+    if _distance(color, alt) < 70:
+        alt = config.CHART_FALLBACK_AWAY if _distance(color, config.CHART_FALLBACK_AWAY) >= 70 \
+            else config.CHART_MUTED
+
+    builders = {
+        "season_directions": lambda: chart_season_directions(breakdown, team_label, color, alt),
+        "season_downs": lambda: chart_season_downs(breakdown, team_label, color, alt),
+        "season_third": lambda: chart_season_third(breakdown, team_label, color, alt),
+        "season_trend": lambda: chart_season_trend(game_log, team_label, color, alt),
+    }
+
+    out: list[dict] = []
+    for key, title, caption in SEASON_PLAY_CHART_SPECS:
+        img, available = None, True
+        try:
+            img = builders[key]()
+        except Exception as e:
+            logging.warning(f"Season play chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "No data available from CollegeFootballData for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out
