@@ -9,6 +9,7 @@ claim anchored to the supplied data.
 
 import json
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -282,6 +283,58 @@ def _win_probability(rows: list, home: str, away: str) -> dict:
             "text": (r.get("playText") or "")[:200],
         } for delta, wp, r in swings[:8]],
     }
+
+
+def _estimated_wp_rows(plays: list, game: dict, prior_home_margin: float) -> list[dict]:
+    """Synthesize a win-probability series when CFBD stores none for a game.
+
+    Verified live: /metrics/wp answers 200 with ZERO rows for some games while
+    serving 130-180 rows for their neighbors — a per-game hole in CFBD's model
+    coverage, not a request problem. This standard score-time-possession model
+    (normal CDF over the adjusted margin, sigma shrinking with the clock, the
+    market spread as the prior) fills the hole; on a game with real CFBD data it
+    opens within ~0.03 of the market's pregame number. Rows come back in the
+    /metrics/wp shape so the chart and bundle treat both sources identically.
+    """
+    home = game.get("homeTeam")
+
+    def clock_seconds(p):
+        c = p.get("clock") or {}
+        return int(c.get("minutes") or 0) * 60 + int(c.get("seconds") or 0)
+
+    rows = [p for p in plays if p.get("period") and p.get("offenseScore") is not None]
+    rows.sort(key=lambda p: (int(p.get("period") or 0), -clock_seconds(p)))
+    if len(rows) < 12:
+        return []
+
+    out = []
+    for i, p in enumerate(rows):
+        period = int(p.get("period") or 1)
+        remaining = max(0, (4 - min(period, 4)) * 900
+                        + (clock_seconds(p) if period <= 4 else 0))
+        if period > 4:
+            remaining = 30            # overtime: the clock is no longer the story
+        f = remaining / 3600.0
+        off_home = p.get("offense") == home
+        off_pts = int(p.get("offenseScore") or 0)
+        def_pts = int(p.get("defenseScore") or 0)
+        margin = (off_pts - def_pts) if off_home else (def_pts - off_pts)
+        adjusted = (margin + prior_home_margin * f
+                    + (1.4 if off_home else -1.4) * min(1.0, f * 3))
+        sigma = max(0.8, 15.5 * math.sqrt(max(f, 0.0004)))
+        wp = 0.5 * (1 + math.erf(adjusted / (sigma * math.sqrt(2))))
+        out.append({
+            "playNumber": i + 1,
+            "homeWinProbability": round(wp, 4),
+            "homeScore": off_pts if off_home else def_pts,
+            "awayScore": def_pts if off_home else off_pts,
+            "playText": (p.get("playText") or "")[:200],
+        })
+
+    home_pts, away_pts = game.get("homePoints"), game.get("awayPoints")
+    if home_pts is not None and away_pts is not None and home_pts != away_pts:
+        out[-1]["homeWinProbability"] = 1.0 if home_pts > away_pts else 0.0
+    return out
 
 
 def _pregame(recap: dict, game: dict, home: str, away: str,
@@ -652,6 +705,38 @@ def generate(
     playtypes = _play_type_breakdown(plays, home, away)
     venue = cfbd.venue_details(cfbd_api_key, venue_id=game.get("venueId"),
                                name=game.get("venue"))
+
+    # CFBD's win-probability model has per-game coverage holes (200 with zero
+    # rows). When this game is one of them, estimate the curve ourselves — and
+    # label it as an estimate everywhere it appears.
+    wp_source = "cfbd" if recap.get("wp") else "none"
+    if wp_source == "none" and plays:
+        pre_row = next((r for r in recap.get("wp_pregame") or []
+                        if r.get("gameId") == game.get("id")), None)
+        spread = (pre_row or {}).get("spread")
+        if spread is None:
+            line_row = next((r for r in recap.get("lines") or []
+                             if r.get("id") == game.get("id")), {})
+            spread = ((line_row.get("lines") or [{}])[0] or {}).get("spread")
+        try:
+            prior = -float(spread) if spread is not None else 0.0
+        except (TypeError, ValueError):
+            prior = 0.0
+        estimated = _estimated_wp_rows(plays, game, prior)
+        if estimated:
+            recap["wp"] = estimated
+            wp_source = "estimated"
+    recap["wp_estimated"] = wp_source == "estimated"
+
+    wp_block = _win_probability(recap.get("wp") or [], home, away)
+    if wp_source == "estimated" and wp_block.get("available"):
+        wp_block["estimated"] = True
+        wp_block["note"] = (
+            "CFBD stores no win-probability series for this game, so this curve is "
+            "MODEL-ESTIMATED from score, clock, possession and the pregame spread. "
+            "Use it for the game's shape and turning points, and present it as an "
+            "estimate — never as stored ESPN/CFBD data.")
+
     bundle = {
         "game": {
             "id": game.get("id"),
@@ -680,7 +765,7 @@ def generate(
         "drives": _compact_drives(drives),
         "notable_plays": _notable_plays(plays),
         "half_splits": _half_splits(plays, home, away),
-        "win_probability": _win_probability(recap.get("wp") or [], home, away),
+        "win_probability": wp_block,
         "play_type_breakdown": playtypes,
         "situational_breakdown": _situational_breakdown(plays, home, away),
         "coach_playcalling": {home: playcalling_report(plays, home),
@@ -694,6 +779,7 @@ def generate(
             "drives": len(drives), "plays": len(plays),
             "player_stat_rows": len(recap.get("play_stats") or []),
             "win_probability_points": len(recap.get("wp") or []),
+            "win_probability_source": wp_source,
             "live_layer_available": bool((recap.get("live") or {}).get("teams")),
             "endpoints_with_errors": [e["label"] for e in recap.get("errors") or []],
             "optional_endpoints_with_errors": [
@@ -747,8 +833,9 @@ def generate(
         f"{len(drives)} drives, {len(plays)} plays, "
         f"{len(recap.get('play_stats') or [])} player stat rows. No web research: "
         f"this recap is built from the game record alone.",
-        f"Enrichment: {len(recap.get('wp') or [])} win-probability points; live "
-        f"layer {'present' if (recap.get('live') or {}).get('teams') else 'absent'}; "
+        f"Enrichment: {len(recap.get('wp') or [])} win-probability points "
+        f"(source: {wp_source}); live layer "
+        f"{'present' if (recap.get('live') or {}).get('teams') else 'absent'}; "
         f"optional endpoint failures: {optional_failures}.",
         f"Report: {result['model']} via OpenRouter — {usage.get('input_tokens') or 'N/A'} "
         f"input tokens / {usage.get('output_tokens') or 'N/A'} output tokens.",
