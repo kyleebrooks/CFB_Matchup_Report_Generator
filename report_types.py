@@ -8,6 +8,7 @@ table, so nothing else needs to change.
 import game_recap
 import pipeline
 import prediction_reports
+import season_plays
 import team_report
 import weekly
 
@@ -94,6 +95,21 @@ def _validate_team(params: dict) -> dict:
 
 def _run_team(params: dict, progress) -> dict:
     return team_report.generate(
+        team_full=params['team_full'],
+        team_short=params['team_short'],
+        year=params.get('year'),
+        settings=params.get('settings'),
+        watermark=params.get('watermark'),
+        report_dir=params.get('report_dir'),
+        progress=progress,
+    )
+
+
+# ---------------------------------------------------------------------------
+# season_plays — every play of one team's season, analysed in depth
+# ---------------------------------------------------------------------------
+def _run_season_plays(params: dict, progress) -> dict:
+    return season_plays.generate(
         team_full=params['team_full'],
         team_short=params['team_short'],
         year=params.get('year'),
@@ -209,6 +225,24 @@ REPORT_TYPES: dict[str, dict] = {
         'run': _run_team,
         'subject': lambda p: p['team_short'],
         'dedup_key': lambda p: f"team:{p['team_short']}",
+    },
+    'season_plays': {
+        'name': 'season_plays',
+        'title': 'Full Season Play-by-Play Analysis',
+        'description': (
+            'Every play from every completed game one team played in a season, '
+            'analysed in depth: play-type profile, where the runs went by gap and '
+            'side, pass depth and pressure, down-and-distance tendencies, third and '
+            'fourth down, red zone, the same cuts for what the defense allowed, '
+            'week-to-week evolution, and a closing scouting report — with four '
+            'charts from the season play-by-play.'
+        ),
+        'required': ['team_short'],
+        'optional': ['team_full', 'year'],
+        'validate': _validate_team,
+        'run': _run_season_plays,
+        'subject': lambda p: p['team_short'],
+        'dedup_key': lambda p: f"season_plays:{p['team_short']}|{p.get('year')}",
     },
     'full_game_recap': {
         'name': 'full_game_recap',

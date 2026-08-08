@@ -715,6 +715,54 @@ def week_games(api_key: str, year: int, week: int | None = None,
 # ---------------------------------------------------------------------------
 # One finished game, end to end — the Full Game Recap's entire data diet
 # ---------------------------------------------------------------------------
+def fetch_season_plays(api_key: str, year: int, team: str) -> dict:
+    """Every play from every completed game one team played in a season.
+
+    /plays is served per week, so the team's completed games name the (week,
+    season type) slots to pull; each pull is team-filtered server-side and then
+    game-filtered here, so bye weeks and other teams' games never ride along.
+    """
+    errors: list[dict] = []
+    games_rows = _get(api_key, "/games", {"year": year, "team": team},
+                      f"Games ({team})", errors) or []
+    completed = [g for g in games_rows if g.get("completed")]
+    game_ids = {g.get("id") for g in completed if g.get("id")}
+    slots = sorted({(g.get("week"), g.get("seasonType") or "regular")
+                    for g in completed if g.get("week")})
+
+    jobs: dict[str, tuple] = {
+        f"plays::{week}::{stype}": (
+            "/plays",
+            {"year": year, "week": week, "seasonType": stype, "team": team},
+            f"Plays ({team} wk{week} {stype})",
+        )
+        for week, stype in slots
+    }
+    jobs["teams"] = ("/teams/fbs", {"year": year}, "FBS Teams")
+
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=min(6, config.CFBD_MAX_WORKERS)) as pool:
+        futures = {pool.submit(_get, api_key, ep, params, label, errors): key
+                   for key, (ep, params, label) in jobs.items()}
+        for fut, key in futures.items():
+            try:
+                results[key] = fut.result()
+            except Exception as e:
+                logging.warning(f"CFBD season-plays job {key} raised: {e}")
+                results[key] = []
+
+    plays = [p for key, rows in results.items() if key.startswith("plays::")
+             for p in (rows or []) if p.get("gameId") in game_ids]
+    return {
+        "games": completed,
+        "plays": plays,
+        "teams": results.get("teams") or [],
+        "errors": errors,
+        "auth_failures": [e for e in errors if e["status"] in (401, 403)],
+        "total_requests": len(jobs) + 1,
+    }
+
+
 def fetch_game_recap(api_key: str, game_id: int) -> dict:
     """Everything CFBD knows about one game: the game row, the advanced box score,
     every drive, every play, and the player-play stat lines.
