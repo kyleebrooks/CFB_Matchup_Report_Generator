@@ -35,11 +35,21 @@ STAGES = {
 # The repeatable skeleton. Every recap has exactly these sections in this order, so
 # recaps read the same way week after week and can be compared side by side.
 SECTIONS = [
+    ("Pre-Game Conditions and Expectations", (
+        "What everyone expected walking in, from the pregame_expectations data: the "
+        "betting lines (spread and total, by book), the market's implied win "
+        "probability, the pregame Elo gap, the weather (temperature, wind, "
+        "precipitation, indoors) and what those conditions promised for the style of "
+        "game, the venue and the broadcast. Close with one line framing the "
+        "expectation the rest of this recap grades reality against. Any feed marked "
+        "unavailable gets one clause, never an invented number."
+    )),
     ("Final Score and Game Story", (
         "The result, stated immediately: final score, where and when, and the one-"
         "paragraph story of the game — was it controlled throughout, a comeback, a "
         "collapse, decided late? Use the excitement index and win-probability swing "
-        "to characterise it honestly."
+        "to characterise it honestly, and say plainly whether the favorite covered "
+        "where the pregame line is present."
     )),
     ("How the Game Unfolded", (
         "Quarter by quarter, from the line scores, drives and plays: who scored when, "
@@ -71,26 +81,46 @@ SECTIONS = [
         "choices, tempo. Where the data shows a team kept failing the same way, say "
         "so plainly."
     )),
+    ("Coaching and Play-Calling Grades", (
+        "Each staff's play-calling, graded. The coach_playcalling data carries a "
+        "COMPUTED grade for each team on the school scale (F- to A+), built from "
+        "weighted components: early-down success, schedule management, third-down "
+        "conversion, explosive-play creation, negative-play avoidance, red-zone "
+        "finishing, and a fourth-down decision adjustment. State each team's letter "
+        "grade in bold in the first line of its write-up, then walk the two or three "
+        "components that earned it — citing the component values — and compare the "
+        "two staffs. The grade is deterministic: present it as given, explain it, "
+        "never re-derive or soften it."
+    )),
     ("What Could Have Been Done Differently", (
         "Grounded counterfactuals only — each one anchored to something in the data: "
         "points left on the field in scoring opportunities, field-position surrendered, "
         "personnel usage the impact numbers argue against. No speculation about "
         "injuries, play-calling intent, or anything the data cannot see."
     )),
-    ("Top Performers", (
-        "The players who actually moved the game, from the box-score PPA and the "
-        "player stat lines: their production, and where in the game it came."
+    ("Player and Unit Grades", (
+        "Individual and unit impact, both ends of the scale. From player_impact and "
+        "the player stat lines: the players who moved the game — AND the "
+        "most_negative list, the players whose touches cost their team expected "
+        "points, named with the same specificity as the heroes. From "
+        "player_execution: whose play types kept succeeding or failing. Then the "
+        "unit_grades ranking: all eight units (each team's rushing/passing offense "
+        "and run/pass defense) best to worst on per-play value — present the "
+        "ranking as a table and call out the best and worst unit on the field."
     )),
     ("Play-Type Breakdown", (
-        "What each team ran and how well it worked, from the play-type data: success "
-        "rate, yards per play, explosives and stuffs by play type — the OFFENSIVE view "
-        "for each team, then the DEFENSIVE view (what each defense allowed, by type). "
+        "What each team ran and how well it worked, from the play-group data: "
+        "Rushes (including rushing TDs, scrambles noted), Passes (one group — "
+        "completions, incompletions, passing TDs and interceptions together, with "
+        "the completion detail inside the row), and Sacks — success rate, yards per "
+        "play, avg PPA, explosives and stuffs for each group, the OFFENSIVE view "
+        "for each team, then the DEFENSIVE view (what each defense allowed). "
         "The success definition is supplied in the data; state it once. Then the "
         "players executing: from the player-execution data, which ball-carriers, "
-        "passers and targets drove each play type's success rate up or down, and which "
+        "passers and targets drove each group's success rate up or down, and which "
         "defenders kept showing up in the plays that failed. Use tables for the "
-        "type-level numbers; name names in the prose. Where avg_ppa is present, use "
-        "it as the value measure — a play type can move the chains while losing "
+        "group-level numbers; name names in the prose. Where avg_ppa is present, use "
+        "it as the value measure — a play group can move the chains while losing "
         "expected points, and PPA is what exposes that."
     )),
     ("Down, Distance and Direction", (
@@ -98,7 +128,10 @@ SECTIONS = [
         "(left/middle/right, end/tackle/guard) and how each direction fared; scrambles "
         "and screens separated from designed plays; how play selection and success "
         "shifted by down; third-down conversion rates by distance (short 1-3, medium "
-        "4-6, long 7+); fourth-down attempts and results; red-zone efficiency. Cover "
+        "4-6, long 7+); fourth-down attempts and results; red-zone efficiency; and "
+        "the negative_plays ledger — every snap that went backwards, not just sacks: "
+        "rushes for loss, sacks, other losses, yards surrendered and turnovers. Say "
+        "who won the negative-play battle and what it cost. Cover "
         "BOTH teams, offense and what each defense allowed. Cite tendencies "
         "numerically — success running left vs right, run rate on 2nd-and-long — and "
         "flag anything a future opponent should attack. Directions marked "
@@ -183,39 +216,130 @@ def _notable_plays(plays: list, limit: int = 110) -> list[dict]:
     return out
 
 
+def _wp_value(row: dict):
+    """The home win probability of one row, whatever the API spelled it or typed it.
+
+    The published spec says homeWinProbability (number), but a report that silently
+    loses its whole win-probability layer to a field-name or string-typing quirk is
+    worse than a tolerant parser — so accept the plausible variants and coerce."""
+    for key in ("homeWinProbability", "homeWinProb", "home_win_probability"):
+        value = row.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _win_probability(rows: list, home: str, away: str) -> dict:
     """The stored in-game win-probability curve, and the plays that moved it most."""
-    rows = [r for r in rows or [] if r.get("homeWinProbability") is not None]
-    if not rows:
+    usable = [(_wp_value(r), r) for r in rows or []]
+    usable = [(wp, r) for wp, r in usable if wp is not None]
+    if not usable:
         return {"available": False,
-                "note": "No win-probability series is stored for this game."}
-    rows.sort(key=lambda r: int(r.get("playNumber") or 0))
+                "note": (f"No win-probability series is stored for this game "
+                         f"({len(rows or [])} rows returned)."),
+                }
+
+    def order(pair):
+        _wp, r = pair
+        try:
+            return (0, int(r.get("playNumber")))
+        except (TypeError, ValueError):
+            pass
+        try:
+            return (1, int(r.get("playId")))
+        except (TypeError, ValueError):
+            return (2, 0)
+    usable.sort(key=order)
 
     swings = []
-    prev = float(rows[0]["homeWinProbability"])
-    for r in rows[1:]:
-        wp = float(r["homeWinProbability"])
-        swings.append((wp - prev, r))
+    prev = usable[0][0]
+    for wp, r in usable[1:]:
+        swings.append((wp - prev, wp, r))
         prev = wp
     swings.sort(key=lambda t: -abs(t[0]))
 
-    step = max(1, len(rows) // 40)     # ~40 samples describe the curve fully
+    step = max(1, len(usable) // 40)     # ~40 samples describe the curve fully
     return {
         "available": True,
         "note": (f"home_wp is {home}'s win probability, play by play. The biggest "
                  f"swings are the game's true turning points — cite them."),
-        "pregame_spread": rows[0].get("spread"),
-        "curve": [{"play": int(r.get("playNumber") or 0),
-                   "home_wp": round(float(r["homeWinProbability"]), 3)}
-                  for r in rows[::step]],
-        "final_home_wp": round(float(rows[-1]["homeWinProbability"]), 3),
+        "pregame_spread": usable[0][1].get("spread"),
+        "curve": [{"play": int(r.get("playNumber") or 0), "home_wp": round(wp, 3)}
+                  for wp, r in usable[::step]],
+        "final_home_wp": round(usable[-1][0], 3),
         "biggest_swings": [{
             "swing_toward": home if delta > 0 else away,
             "delta_home_wp": round(delta, 3),
-            "home_wp_after": round(float(r["homeWinProbability"]), 3),
+            "home_wp_after": round(wp, 3),
             "score_after": f"{r.get('homeScore')}-{r.get('awayScore')}",
             "text": (r.get("playText") or "")[:200],
-        } for delta, r in swings[:8]],
+        } for delta, wp, r in swings[:8]],
+    }
+
+
+def _pregame(recap: dict, game: dict, home: str, away: str) -> dict:
+    """What everyone expected walking in: lines, market win%, weather, broadcast."""
+    game_id = game.get("id")
+
+    def row_for(rows):
+        return next((r for r in rows or []
+                     if r.get("id") == game_id or r.get("gameId") == game_id), None)
+
+    weather = row_for(recap.get("weather"))
+    if weather:
+        weather = {k: weather.get(k) for k in (
+            "gameIndoors", "venue", "temperature", "dewPoint", "humidity",
+            "precipitation", "snowfall", "windDirection", "windSpeed",
+            "weatherCondition") if weather.get(k) is not None}
+    outlets = sorted({r.get("outlet") for r in recap.get("media") or []
+                      if r.get("id") == game_id and r.get("outlet")})
+
+    lines_row = row_for(recap.get("lines")) or {}
+    books = [{"provider": l.get("provider"), "spread": l.get("spread"),
+              "over_under": l.get("overUnder"),
+              "formatted_spread": l.get("formattedSpread")}
+             for l in lines_row.get("lines") or []][:5]
+
+    wp = row_for(recap.get("wp_pregame")) or {}
+    return {
+        "note": ("The pregame picture: what the books, the market model and the "
+                 "conditions said before kickoff. The recap grades reality against "
+                 "this."),
+        "weather": weather or {"available": False,
+                               "note": "No conditions stored for this game."},
+        "broadcast": outlets or None,
+        "betting_lines": books or None,
+        "market_pregame_home_win_probability": wp.get("homeWinProbability"),
+        "market_spread": wp.get("spread"),
+        "pregame_elo": {home: game.get("homePregameElo"),
+                        away: game.get("awayPregameElo")},
+    }
+
+
+def _player_impact(box: dict, limit: int = 6) -> dict:
+    """Both ends of the individual-impact scale, from the box-score player PPA."""
+    rows = ((box or {}).get("players") or {}).get("ppa") or []
+    scored = []
+    for r in rows:
+        total = ((r.get("cumulative") or {}).get("total")
+                 if isinstance(r.get("cumulative"), dict) else None)
+        if total is None and isinstance(r.get("average"), dict):
+            total = (r.get("average") or {}).get("total")
+        if total is None or not r.get("player"):
+            continue
+        scored.append({"player": r.get("player"), "position": r.get("position"),
+                       "team": r.get("team"), "total_ppa": round(float(total), 2)})
+    scored.sort(key=lambda e: -e["total_ppa"])
+    return {
+        "note": ("Cumulative PPA across every play a player touched. The negative "
+                 "list is the players whose touches cost their team expected points "
+                 "— name them with the same specificity as the heroes."),
+        "most_positive": [e for e in scored if e["total_ppa"] > 0][:limit],
+        "most_negative": sorted([e for e in scored if e["total_ppa"] < 0],
+                                key=lambda e: e["total_ppa"])[:limit],
     }
 
 
@@ -317,7 +441,9 @@ from playbook import (            # noqa: E402  (re-exported for callers and tes
     _is_success,
     _is_turnover,
     play_type_breakdown as _play_type_breakdown,
+    playcalling_report,
     situational_breakdown as _situational_breakdown,
+    unit_report,
 )
 
 
@@ -539,13 +665,18 @@ def generate(
             "away_postgame_elo": game.get("awayPostgameElo"),
         },
         "advanced_box_score": recap.get("box") or {},
+        "pregame_expectations": _pregame(recap, game, home, away),
         "drives": _compact_drives(drives),
         "notable_plays": _notable_plays(plays),
         "half_splits": _half_splits(plays, home, away),
         "win_probability": _win_probability(recap.get("wp") or [], home, away),
         "play_type_breakdown": playtypes,
         "situational_breakdown": _situational_breakdown(plays, home, away),
+        "coach_playcalling": {home: playcalling_report(plays, home),
+                              away: playcalling_report(plays, away)},
+        "unit_grades": unit_report(plays, home, away),
         "live_advanced": _live_layer(recap.get("live")),
+        "player_impact": _player_impact(recap.get("box") or {}),
         "player_execution": _player_execution(plays, recap.get("play_stats") or []),
         "player_stat_lines": _player_lines(recap.get("play_stats") or []),
         "data_coverage": {
@@ -554,6 +685,9 @@ def generate(
             "win_probability_points": len(recap.get("wp") or []),
             "live_layer_available": bool((recap.get("live") or {}).get("teams")),
             "endpoints_with_errors": [e["label"] for e in recap.get("errors") or []],
+            "optional_endpoints_with_errors": [
+                f"{e['label']} (HTTP {e['status']})"
+                for e in recap.get("optional_errors") or []],
         },
     }
 
