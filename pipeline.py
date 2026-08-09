@@ -98,7 +98,10 @@ def generate(
 
     out_dir = report_dir or config.REPORTS_DIR
     os.makedirs(out_dir, exist_ok=True)
-    filename = f"{home_short}_{away_short}_{db.format_friendly_date(today)}.pdf"
+    # "_vs_", not a bare underscore: school names contain spaces ("Ole Miss"), and
+    # once underscores become spaces downstream, only an explicit divider says where
+    # the home team ends and the away team begins.
+    filename = f"{home_short}_vs_{away_short}_{db.format_friendly_date(today)}.pdf"
     filepath = os.path.join(out_dir, filename)
     # Build to a temp path and swap at the end, so any existing report for this matchup
     # stays downloadable for the entire multi-minute run.
@@ -162,7 +165,7 @@ def generate(
     game_date_iso = str(cfbd.pick(upcoming_game or {}, "startDate", "start_date",
                                   default="") or "")[:10]
     if game_date_iso:
-        filename = (f"{home_short}_{away_short}_{game_date_iso}_"
+        filename = (f"{home_short}_vs_{away_short}_{game_date_iso}_"
                     f"{db.format_friendly_date(today)}.pdf")
         filepath = os.path.join(out_dir, filename)
         tmp_path = filepath + ".building"
@@ -402,19 +405,21 @@ def cleanup_old_reports(home_short: str, away_short: str, keep_filename: str | N
     import glob
     import re
 
-    pattern = os.path.join(report_dir or config.REPORTS_DIR,
-                           f"{home_short}_{away_short}_*.pdf")
-    prefix = f"{home_short}_{away_short}_"
-    for path in glob.glob(pattern):
-        name = os.path.basename(path)
-        if keep_filename and name == keep_filename:
-            continue
-        if game_date:
-            rest = name[len(prefix):]
-            m = re.match(r'(\d{4}-\d{2}-\d{2})_', rest)
-            if m and m.group(1) != game_date:
-                continue          # a different meeting of the same teams — keep it
-        try:
-            os.remove(path)
-        except Exception as e:
-            logging.warning(f"Could not delete old report {path}: {e}")
+    # Two filename generations exist: the current "{home}_vs_{away}_..." and the
+    # legacy "{home}_{away}_..." — a new report supersedes both spellings.
+    for divider in ("_vs_", "_"):
+        prefix = f"{home_short}{divider}{away_short}_"
+        pattern = os.path.join(report_dir or config.REPORTS_DIR, prefix + "*.pdf")
+        for path in glob.glob(pattern):
+            name = os.path.basename(path)
+            if keep_filename and name == keep_filename:
+                continue
+            if game_date:
+                rest = name[len(prefix):]
+                m = re.match(r'(\d{4}-\d{2}-\d{2})_', rest)
+                if m and m.group(1) != game_date:
+                    continue      # a different meeting of the same teams — keep it
+            try:
+                os.remove(path)
+            except Exception as e:
+                logging.warning(f"Could not delete old report {path}: {e}")
