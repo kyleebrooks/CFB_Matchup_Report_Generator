@@ -67,8 +67,9 @@ def _describe(path: str, name: str) -> dict:
         size, modified = stat.st_size, datetime.fromtimestamp(stat.st_mtime)
     except OSError:
         size, modified = 0, None
-    # Filenames are "{home}_{away}_{Month D, YYYY}.pdf" for matchups, or a
-    # type prefix followed by the subject: "team_...", "plays_...", "recap_...",
+    # Matchup filenames are "{home}_vs_{away}_{game date}_{Month D, YYYY}.pdf"
+    # (older files joined the schools with a bare underscore); every other type is
+    # a prefix followed by the subject: "team_...", "plays_...", "recap_...",
     # "slate_...", "wrap_...", "predaudit_...", "predreview_...".
     stem = name[:-4] if name.lower().endswith('.pdf') else name
     prefixes = (
