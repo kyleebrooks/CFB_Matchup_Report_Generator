@@ -512,6 +512,105 @@ def patch_settings():
     return jsonify(accounts.public_view(account)), 200
 
 
+@bp.route('/podcasts', methods=['POST'])
+@require_account
+def create_podcast():
+    """Queue a podcast episode: paste a script, name a TTS model, poll the job.
+
+    Returns 202 with the same job handle shape as reports — poll
+    GET /v1/reports/{job_id} until done; the result carries the episode filename.
+    """
+    import podcasts
+    account = request.account
+    data = _body()
+
+    script = (data.get('script') or '').strip()
+    if not script:
+        return _error("'script' is required — paste the episode text.", 400)
+    if len(script) > podcasts.MAX_SCRIPT_CHARS:
+        return _error(f'Script is too long ({len(script)} chars; the limit is '
+                      f'{podcasts.MAX_SCRIPT_CHARS}).', 413)
+    tts_model = (data.get('tts_model') or '').strip()
+    if '/' not in tts_model:
+        return _error("'tts_model' must be a full OpenRouter model id, e.g. "
+                      "'openai/gpt-4o-mini-tts'.", 400)
+    voice = (data.get('voice') or '').strip() or None
+    title = (data.get('title') or '').strip() or None
+
+    params = {
+        'script': script, 'tts_model': tts_model, 'voice': voice, 'title': title,
+        'account_id': account['id'],
+    }
+
+    def run(job_params, progress):
+        return podcasts.generate(
+            script=job_params['script'], tts_model=job_params['tts_model'],
+            voice=job_params.get('voice'), title=job_params.get('title'),
+            account_id=job_params['account_id'], progress=progress)
+
+    usage_row = usage.record_request(account['id'], 'podcast',
+                                     title or 'podcast episode', '')
+
+    def tracked(job_params, progress, _row=usage_row):
+        try:
+            result = run(job_params, progress)
+        except Exception as e:
+            usage.mark_complete(_row, 'error', error=f'{e.__class__.__name__}: {e}')
+            raise
+        usage.mark_complete(_row, 'done')
+        return result
+
+    import hashlib
+    digest = hashlib.sha1(script.encode('utf-8')).hexdigest()[:12]
+    job = jobs.manager.submit(
+        params,
+        runner=tracked,
+        key=f"acct{account['id']}:podcast:{digest}",
+        meta={'account_id': account['id'], 'report_type': 'podcast',
+              'subject': title or 'podcast episode'},
+    )
+    status = 200 if job.get('deduplicated') else 202
+    return jsonify({'job_id': job['job_id'], 'state': job['state'],
+                    'message': job.get('message'),
+                    'deduplicated': bool(job.get('deduplicated'))}), status
+
+
+@bp.route('/podcasts', methods=['GET'])
+@require_account
+def list_podcasts():
+    import podcasts
+    try:
+        episodes = podcasts.list_for(request.account['id'])
+    except Exception as e:
+        return _error('Podcast store unavailable.', 503, detail=str(e)[:200])
+    return jsonify({'podcast_episodes': episodes, 'count': len(episodes)}), 200
+
+
+@bp.route('/podcasts/audio/<path:filename>', methods=['GET'])
+@require_account
+def podcast_audio(filename):
+    """The episode audio itself, with conditional/Range support for streaming."""
+    import podcasts
+    from flask import send_file
+    try:
+        path = podcasts.resolve(request.account['id'], filename)
+    except podcasts.PodcastError as e:
+        return _error(str(e), e.status)
+    if not os.path.isfile(path):
+        return _error('No such episode.', 404)
+    return send_file(path, mimetype='audio/mpeg', conditional=True)
+
+
+@bp.route('/podcasts/<path:filename>', methods=['DELETE'])
+@require_account
+def delete_podcast(filename):
+    import podcasts
+    try:
+        return jsonify(podcasts.delete(request.account['id'], filename)), 200
+    except podcasts.PodcastError as e:
+        return _error(str(e), e.status)
+
+
 @bp.route('/account/content/<key>', methods=['GET'])
 @require_account
 def get_site_content(key):

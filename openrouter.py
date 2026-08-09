@@ -254,3 +254,57 @@ def parse_json_lenient(text: str) -> dict | None:
         if isinstance(parsed, list):
             return {"findings": parsed}
     return None
+
+
+def speech(api_key: str, model: str, text: str, voice: str | None = None,
+           timeout: int = 300, retries: int = 2) -> bytes:
+    """One text-to-speech synthesis call. Returns audio bytes (MP3).
+
+    OpenRouter speaks the OpenAI dialect, whose TTS endpoint is /audio/speech.
+    Callers chunk long scripts themselves — TTS providers cap input length — and
+    concatenate the returned MP3 segments.
+    """
+    url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
+    body: dict = {"model": model, "input": text, "response_format": "mp3"}
+    if voice:
+        body["voice"] = voice
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(url, json=body, headers=_headers(api_key),
+                                 timeout=timeout)
+        except requests.RequestException as e:
+            last_err = e
+            logging.warning(f"OpenRouter TTS {model} transport error "
+                            f"(attempt {attempt + 1}): {e}")
+            time.sleep(2 ** attempt)
+            continue
+
+        if resp.status_code == 200:
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if resp.content and "json" not in content_type:
+                return resp.content
+            # A JSON body on 200 is an error envelope, not audio.
+            raise OpenRouterError(
+                f"OpenRouter returned no audio for {model}", 200, resp.text[:400])
+
+        if resp.status_code in (408, 429, 500, 502, 503, 504) and attempt < retries:
+            wait = 2 ** attempt * 2
+            logging.warning(f"OpenRouter TTS {model} HTTP {resp.status_code}; "
+                            f"retrying in {wait}s")
+            time.sleep(wait)
+            last_err = OpenRouterError(f"HTTP {resp.status_code}", resp.status_code,
+                                       resp.text[:400])
+            continue
+
+        hint = ""
+        if resp.status_code in (400, 404):
+            hint = (" — check that this model id is a TTS model available on "
+                    "OpenRouter (the endpoint speaks the OpenAI /audio/speech "
+                    "dialect), and that the voice name is one it supports")
+        raise OpenRouterError(
+            f"OpenRouter TTS request failed for {model}{hint}",
+            resp.status_code, resp.text[:400])
+
+    raise OpenRouterError(f"OpenRouter TTS failed for {model} after retries: {last_err}")

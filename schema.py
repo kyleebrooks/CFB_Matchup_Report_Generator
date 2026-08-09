@@ -247,6 +247,42 @@ SPEC: dict[str, dict] = {
         },
         'indexes': {},
     },
+    'podcasts': {
+        'owner': 'service',
+        'purpose': 'Podcast episodes synthesized from pasted scripts, one row per episode',
+        'create': """
+            CREATE TABLE IF NOT EXISTS podcasts (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                account_id   INT          NOT NULL,
+                episode      INT          NOT NULL,
+                title        VARCHAR(200) NOT NULL,
+                filename     VARCHAR(255) NOT NULL,
+                tts_model    VARCHAR(120) NOT NULL,
+                voice        VARCHAR(60)  DEFAULT NULL,
+                bytes        INT          NOT NULL DEFAULT 0,
+                script_chars INT          NOT NULL DEFAULT 0,
+                chunks       INT          NOT NULL DEFAULT 0,
+                created_at   DATETIME     NOT NULL,
+                KEY idx_podcast_account (account_id, episode)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'id':           'INT AUTO_INCREMENT PRIMARY KEY',
+            'account_id':   'INT NOT NULL',
+            'episode':      'INT NOT NULL',
+            'title':        'VARCHAR(200) NOT NULL',
+            'filename':     'VARCHAR(255) NOT NULL',
+            'tts_model':    'VARCHAR(120) NOT NULL',
+            'voice':        'VARCHAR(60) DEFAULT NULL',
+            'bytes':        'INT NOT NULL DEFAULT 0',
+            'script_chars': 'INT NOT NULL DEFAULT 0',
+            'chunks':       'INT NOT NULL DEFAULT 0',
+            'created_at':   'DATETIME NOT NULL',
+        },
+        'indexes': {
+            'idx_podcast_account': 'ADD KEY idx_podcast_account (account_id, episode)',
+        },
+    },
     'API_KEYS': {
         'owner': 'pre-existing',
         'purpose': 'Shared provider key store (predates this service — audited, never altered)',
