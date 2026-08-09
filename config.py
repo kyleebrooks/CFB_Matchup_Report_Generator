@@ -26,6 +26,7 @@ ROTOWIRE_DB_PATH = os.getenv('ROTOWIRE_DB_PATH', os.path.join(os.getcwd(), 'roto
 SERVICE_API_KEY = os.getenv('SERVICE_API_KEY')
 WKHTMLTOPDF_PATH = os.getenv('WKHTMLTOPDF_PATH')  # /usr/bin/wkhtmltopdf
 REPORTS_DIR = os.getenv('REPORTS_DIR', os.path.join(BASE_DIR, 'reports'))
+PODCASTS_DIR = os.getenv('PODCASTS_DIR', os.path.join(BASE_DIR, 'podcasts'))
 WATERMARK_PATH = os.path.join(BASE_DIR, 'AFPLNA_LOGO.png')
 
 # ---------------------------------------------------------------------------
