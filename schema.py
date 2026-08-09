@@ -227,6 +227,26 @@ SPEC: dict[str, dict] = {
             'idx_sched_due': 'ADD KEY idx_sched_due (enabled, day_of_week, hour_utc)',
         },
     },
+    'site_content': {
+        'owner': 'service',
+        'purpose': 'Editable site page copy, one row per (account, key) — e.g. the About page',
+        'create': """
+            CREATE TABLE IF NOT EXISTS site_content (
+                account_id  INT          NOT NULL,
+                content_key VARCHAR(64)  NOT NULL,
+                content     TEXT         DEFAULT NULL,
+                updated_at  DATETIME     NOT NULL,
+                PRIMARY KEY (account_id, content_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'account_id':  'INT NOT NULL',
+            'content_key': 'VARCHAR(64) NOT NULL',
+            'content':     'TEXT DEFAULT NULL',
+            'updated_at':  'DATETIME NOT NULL',
+        },
+        'indexes': {},
+    },
     'API_KEYS': {
         'owner': 'pre-existing',
         'purpose': 'Shared provider key store (predates this service — audited, never altered)',

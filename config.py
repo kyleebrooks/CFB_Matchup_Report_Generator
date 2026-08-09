@@ -45,6 +45,11 @@ OPENROUTER_BASE_URL = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/ap
 OPENROUTER_RESEARCH_MODEL = os.getenv('OPENROUTER_RESEARCH_MODEL', 'deepseek/deepseek-v4-flash')
 # Stage 2: one synthesis call that writes the finished report.
 OPENROUTER_REPORT_MODEL = os.getenv('OPENROUTER_REPORT_MODEL', 'moonshotai/kimi-k3')
+# The premium tier swaps only the synthesis model. Defaulting to the standard report
+# model means premium behaves identically until an operator actually picks a bigger
+# model — no surprise spend from a deploy alone.
+OPENROUTER_PREMIUM_REPORT_MODEL = os.getenv('OPENROUTER_PREMIUM_REPORT_MODEL',
+                                            OPENROUTER_REPORT_MODEL)
 
 # Web search plugin. "native" routes OpenAI/Anthropic/Google/xAI models to the
 # provider's own live browsing; "exa" forces OpenRouter's Exa-backed search; ""
@@ -150,6 +155,7 @@ INCLUDE_GENERATION_DETAILS = os.getenv(
 ACCOUNT_SETTING_KEYS = (
     'research_model',
     'report_model',
+    'premium_report_model',
     'search_engine',
     'search_max_results',
     'research_effort',
@@ -173,6 +179,7 @@ def default_settings() -> dict:
     return {
         'research_model': OPENROUTER_RESEARCH_MODEL,
         'report_model': OPENROUTER_REPORT_MODEL,
+        'premium_report_model': OPENROUTER_PREMIUM_REPORT_MODEL,
         'search_engine': OPENROUTER_SEARCH_ENGINE,
         'search_max_results': OPENROUTER_SEARCH_MAX_RESULTS,
         'research_effort': RESEARCH_EFFORT,

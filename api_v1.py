@@ -142,10 +142,21 @@ def create_report():
     except report_types.ValidationError as e:
         return _error(str(e), 400, required_params=spec['required'])
 
+    tier = (str(data.get('tier') or 'standard')).strip().lower()
+    if tier not in ('standard', 'premium'):
+        return _error("'tier' must be 'standard' or 'premium'.", 400)
+
     # Per-account model/search choices, watermark and output directory travel with the
     # job. The directory is what keeps two customers' PDFs apart: filenames are built
     # from subject and date, so without it the same matchup on the same day collides.
     params['settings'] = accounts.effective_settings(account)
+    if tier == 'premium':
+        # Premium swaps ONLY the synthesis model; the research/search model is
+        # unchanged. The override rides inside the job's settings, so every report
+        # pipeline gets it without knowing tiers exist.
+        params['settings'] = dict(params['settings'],
+                                  report_model=params['settings']['premium_report_model'])
+    params['tier'] = tier
     params['watermark'] = accounts.watermark_path(account)
     params['report_dir'] = reports_store.account_dir(account['id'])
     params['account_id'] = account['id']
@@ -171,11 +182,14 @@ def create_report():
     job = jobs.manager.submit(
         params,
         runner=tracked,
-        # Namespaced by account so two customers requesting the same team do not collide.
-        key=f"acct{account['id']}:{spec['dedup_key'](params)}",
+        # Namespaced by account so two customers requesting the same team do not
+        # collide — and by tier, so a premium request is never deduplicated into a
+        # standard build that happens to be running.
+        key=f"acct{account['id']}:{tier}:{spec['dedup_key'](params)}",
         meta={
             'account_id': account['id'],
             'report_type': report_type,
+            'tier': tier,
             'subject': subject,
         },
     )
@@ -496,6 +510,36 @@ def patch_settings():
     except accounts.AccountError as e:
         return _error(e.message, e.status, allowed_settings=list(config.ACCOUNT_SETTING_KEYS))
     return jsonify(accounts.public_view(account)), 200
+
+
+@bp.route('/account/content/<key>', methods=['GET'])
+@require_account
+def get_site_content(key):
+    """One stored content entry (e.g. the site's About page copy)."""
+    import content_store
+    try:
+        return jsonify(content_store.get(request.account['id'], key)), 200
+    except content_store.ContentError as e:
+        return _error(str(e), e.status)
+    except Exception as e:
+        return _error('Content store unavailable.', 503, detail=str(e)[:200])
+
+
+@bp.route('/account/content/<key>', methods=['PUT', 'POST'])
+@require_account
+def put_site_content(key):
+    """Replace one content entry. Body: {"content": "..."}."""
+    import content_store
+    data = _body()
+    if 'content' not in data:
+        return _error("'content' is required.", 400)
+    try:
+        saved = content_store.put(request.account['id'], key, data.get('content'))
+    except content_store.ContentError as e:
+        return _error(str(e), e.status)
+    except Exception as e:
+        return _error('Content store unavailable.', 503, detail=str(e)[:200])
+    return jsonify(saved), 200
 
 
 @bp.route('/account/watermark', methods=['POST'])
