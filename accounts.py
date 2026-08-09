@@ -369,7 +369,7 @@ def validate_settings(settings: dict) -> dict:
         if value is None:
             continue
 
-        if key in ('research_model', 'report_model'):
+        if key in ('research_model', 'report_model', 'premium_report_model'):
             model = str(value).strip()
             if '/' not in model:
                 raise AccountError(
