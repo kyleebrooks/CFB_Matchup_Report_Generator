@@ -257,17 +257,25 @@ def parse_json_lenient(text: str) -> dict | None:
 
 
 def speech(api_key: str, model: str, text: str, voice: str | None = None,
+           input_references: list | None = None,
            timeout: int = 300, retries: int = 2) -> bytes:
     """One text-to-speech synthesis call. Returns audio bytes (MP3).
 
     OpenRouter speaks the OpenAI dialect, whose TTS endpoint is /audio/speech.
     Callers chunk long scripts themselves — TTS providers cap input length — and
     concatenate the returned MP3 segments.
+
+    input_references carries stateless voice cloning for models that support it
+    (an input_audio part with the base64 voice sample, optionally a text part
+    with its transcript). Cloning is per-request by design, so the caller sends
+    the same references with every chunk.
     """
     url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
     body: dict = {"model": model, "input": text, "response_format": "mp3"}
     if voice:
         body["voice"] = voice
+    if input_references:
+        body["input_references"] = input_references
 
     last_err: Exception | None = None
     for attempt in range(retries + 1):
