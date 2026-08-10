@@ -9,3 +9,4 @@ PyPDF2~=3.0
 reportlab~=4.0
 PyMuPDF~=1.24
 matplotlib~=3.9
+lameenc~=1.8

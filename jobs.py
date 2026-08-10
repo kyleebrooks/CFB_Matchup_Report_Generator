@@ -149,7 +149,13 @@ class JobManager:
         except Exception as e:
             # An unexpected escape. Name the stage and the exception type — a bare
             # str(e) from deep in the stack is close to useless when it reaches the UI.
-            stage = getattr(pipeline.generate, "current_stage", {}).get("label", "unknown stage")
+            # The job's own last progress message is the most precise stage marker
+            # ("Synthesizing speech — part 3 of 5"); the report pipeline's stage
+            # tracker is the fallback for jobs that never reported progress.
+            with self._lock:
+                last_message = (self._by_id.get(job_id) or {}).get("message")
+            stage = last_message or getattr(
+                pipeline.generate, "current_stage", {}).get("label", "unknown stage")
             logging.exception(f"Report job {job_id} crashed during: {stage}")
             self._set(
                 job_id,

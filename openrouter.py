@@ -257,9 +257,13 @@ def parse_json_lenient(text: str) -> dict | None:
 
 
 def speech(api_key: str, model: str, text: str, voice: str | None = None,
-           input_references: list | None = None,
+           input_references: list | None = None, response_format: str = 'mp3',
            timeout: int = 300, retries: int = 3) -> bytes:
-    """One text-to-speech synthesis call. Returns audio bytes (MP3).
+    """One text-to-speech synthesis call. Returns audio bytes.
+
+    response_format is 'mp3' or 'pcm'. Some adapters (Gemini TTS) only emit
+    raw PCM and reject an mp3 ask with a 400 — the caller detects that and
+    re-requests as PCM, then encodes the audio itself.
 
     OpenRouter speaks the OpenAI dialect, whose TTS endpoint is /audio/speech.
     Callers chunk long scripts themselves — TTS providers cap input length — and
@@ -278,7 +282,7 @@ def speech(api_key: str, model: str, text: str, voice: str | None = None,
     if not (text or '').strip():
         raise OpenRouterError("Empty text passed to TTS — nothing to synthesize.", 400)
     url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
-    body: dict = {"model": model, "input": text, "response_format": "mp3"}
+    body: dict = {"model": model, "input": text, "response_format": response_format}
     if voice:
         body["voice"] = voice
     if input_references:
