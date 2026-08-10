@@ -20,6 +20,9 @@ import openrouter
 TABLE = 'podcasts'
 MAX_SCRIPT_CHARS = 100_000
 CHUNK_CHARS = 3_500          # inside every mainstream TTS input cap, with margin
+MAX_SPEAKERS = 6
+MAX_CLONE_B64 = 12_000_000   # base64 chars per voice sample; OpenRouter caps at 20 MiB
+_NAME_RE = re.compile(r"[A-Za-z0-9 ._'\-]{1,40}")
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -106,6 +109,114 @@ def split_script(script: str, limit: int = CHUNK_CHARS) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Speakers
+# ---------------------------------------------------------------------------
+def normalize_speakers(raw) -> list[dict] | None:
+    """Validate a request's speaker roster into a clean list, or None.
+
+    Each speaker is a name plus how to voice it: a provider voice ID, and/or a
+    stateless-cloning reference (a data:audio base64 sample with an optional
+    transcript) for models whose OpenRouter endpoint supports cloning.
+    """
+    if raw in (None, '', []):
+        return None
+    if not isinstance(raw, list):
+        raise PodcastError("'speakers' must be a list of speaker objects.")
+    if len(raw) > MAX_SPEAKERS:
+        raise PodcastError(f'At most {MAX_SPEAKERS} speakers per episode.')
+    out: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise PodcastError("Each speaker must be an object with a 'name'.")
+        name = str(item.get('name') or '').strip()
+        if not name or not _NAME_RE.fullmatch(name):
+            raise PodcastError(
+                "Every speaker needs a name of up to 40 characters using "
+                "letters, numbers, spaces, dots, dashes or apostrophes.")
+        if name.lower() in seen:
+            raise PodcastError(f'Speaker name {name!r} appears twice.')
+        seen.add(name.lower())
+        voice = str(item.get('voice') or '').strip() or None
+        if voice and len(voice) > 120:
+            raise PodcastError(f'Voice ID for {name!r} is too long.')
+        clone = str(item.get('clone_audio') or '').strip() or None
+        if clone:
+            if not clone.startswith('data:audio/'):
+                raise PodcastError(
+                    f"The voice sample for {name!r} must be a "
+                    "data:audio/...;base64 URI.")
+            if len(clone) > MAX_CLONE_B64:
+                raise PodcastError(
+                    f'The voice sample for {name!r} is too large '
+                    '(about 8 MB of audio at most).', 413)
+        transcript = str(item.get('clone_transcript') or '').strip() or None
+        out.append({'name': name, 'voice': voice,
+                    'clone_audio': clone, 'clone_transcript': transcript})
+    return out or None
+
+
+def speakers_signature(speakers: list[dict] | None) -> str:
+    """A short stable digest of the roster, for job dedup keys."""
+    if not speakers:
+        return ''
+    parts = [f"{s['name']}={s['voice'] or ''}:{(s['clone_audio'] or '')[:80]}"
+             for s in speakers]
+    return '|'.join(parts)
+
+
+_LABEL_RE = re.compile(r"^\s*[*_]{0,2}([^:\n]{1,40}?)[*_]{0,2}\s*:\s*(.*)$")
+
+
+def split_dialogue(script: str, names: list[str]) -> list[tuple[str, str]]:
+    """(speaker, text) turns in script order, with the name labels stripped.
+
+    A turn starts at a line beginning with a configured speaker's name and a
+    colon (markdown bold/italic around the name is tolerated, since LLMs love
+    writing '**HOST:**'). Only configured names count as labels — 'Score: 21-14'
+    inside a turn stays spoken text. Anything before the first label belongs to
+    the first configured speaker.
+    """
+    lookup = {n.lower(): n for n in names}
+    turns: list[tuple[str, list[str]]] = []
+    current = names[0]
+    lines: list[str] = []
+
+    def flush():
+        text = '\n'.join(lines).strip()
+        if text:
+            if turns and turns[-1][0] == current:
+                turns[-1][1].append(text)
+            else:
+                turns.append((current, [text]))
+
+    for line in script.split('\n'):
+        m = _LABEL_RE.match(line)
+        label = m.group(1).strip().lower() if m else None
+        if label in lookup:
+            flush()
+            lines = []
+            current = lookup[label]
+            rest = m.group(2).strip()
+            if rest:
+                lines.append(rest)
+        else:
+            lines.append(line)
+    flush()
+    return [(name, '\n\n'.join(chunks)) for name, chunks in turns]
+
+
+def _clone_refs(speaker: dict | None) -> list | None:
+    if not speaker or not speaker.get('clone_audio'):
+        return None
+    refs = [{'type': 'input_audio',
+             'input_audio': {'data': speaker['clone_audio']}}]
+    if speaker.get('clone_transcript'):
+        refs.append({'type': 'text', 'text': speaker['clone_transcript']})
+    return refs
+
+
+# ---------------------------------------------------------------------------
 # Storage
 # ---------------------------------------------------------------------------
 def account_dir(account_id: int, create: bool = True) -> str:
@@ -189,8 +300,17 @@ STAGES = {
 
 
 def generate(*, script: str, tts_model: str, voice: str | None = None,
+             speakers: list[dict] | None = None,
              title: str | None = None, account_id: int, progress=None) -> dict:
-    """Synthesize one episode end to end and record it."""
+    """Synthesize one episode end to end and record it.
+
+    With one speaker (or the legacy bare voice) the whole script is read in
+    that voice. With several, the script is a dialogue: it is split into turns
+    at the speakers' name labels, every turn is synthesized in its speaker's
+    voice, and the segments are stitched in order — which is what makes
+    multi-voice episodes work identically on every TTS model, one voice per
+    /audio/speech call.
+    """
     progress = progress or (lambda *a: None)
 
     def step(key, pct=None, label=None):
@@ -212,8 +332,24 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
             f'Script is too long ({len(script)} chars; the limit is '
             f'{MAX_SCRIPT_CHARS}).', 413)
 
-    chunks = split_script(script)
-    if not chunks:
+    # The synthesis plan: (voice, cloning refs, text) per chunk, in episode order.
+    plan: list[tuple[str | None, list | None, str]] = []
+    if speakers and len(speakers) > 1:
+        turns = split_dialogue(script, [s['name'] for s in speakers])
+        by_name = {s['name']: s for s in speakers}
+        for name, text in turns:
+            sp = by_name[name]
+            for chunk in split_script(text):
+                plan.append((sp['voice'], _clone_refs(sp), chunk))
+        voice_label = ' + '.join(s['name'] for s in speakers)[:60]
+    else:
+        solo = speakers[0] if speakers else None
+        solo_voice = (solo['voice'] if solo and solo['voice'] else voice)
+        refs = _clone_refs(solo)
+        for chunk in split_script(script):
+            plan.append((solo_voice, refs, chunk))
+        voice_label = solo_voice or voice
+    if not plan:
         raise PodcastError("'script' contains no speakable text.")
 
     episode = _next_episode(account_id)
@@ -221,15 +357,17 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
     title = (title or '').strip() or f'Episode {episode} — {db.format_friendly_date(today)}'
 
     audio = bytearray()
-    for n, chunk in enumerate(chunks, start=1):
-        pct = 10 + int(80 * (n - 1) / len(chunks))
-        step('synthesize', pct, f'Synthesizing speech — part {n} of {len(chunks)}')
+    for n, (part_voice, part_refs, chunk) in enumerate(plan, start=1):
+        pct = 10 + int(80 * (n - 1) / len(plan))
+        step('synthesize', pct, f'Synthesizing speech — part {n} of {len(plan)}')
         try:
-            audio.extend(openrouter.speech(api_key, tts_model, chunk, voice=voice))
+            audio.extend(openrouter.speech(api_key, tts_model, chunk,
+                                           voice=part_voice,
+                                           input_references=part_refs))
         except openrouter.OpenRouterError as e:
             detail = f'{e} | upstream: {e.body}' if e.body else str(e)
             raise PodcastError(f'Text-to-speech failed on part {n} of '
-                               f'{len(chunks)}: {detail[:400]}', 502)
+                               f'{len(plan)}: {detail[:400]}', 502)
 
     step('store')
     safe = ''.join(ch for ch in title if ch.isalnum() or ch in ' -_').strip()[:80] \
@@ -249,21 +387,23 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
                 f'tts_model, voice, bytes, script_chars, chunks, created_at) '
                 f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
                 (int(account_id), episode, title, filename, tts_model,
-                 voice or None, len(audio), len(script), len(chunks), today))
+                 voice_label or None, len(audio), len(script), len(plan), today))
         conn.commit()
     finally:
         conn.close()
 
     step('done')
     logging.info(f'Podcast episode {episode} ({filename}) generated: '
-                 f'{len(audio)} bytes from {len(chunks)} chunk(s) via {tts_model}')
+                 f'{len(audio)} bytes from {len(plan)} part(s) via {tts_model}')
     return {
         'podcast': True,
         'episode': episode,
         'title': title,
         'filename': filename,
         'bytes': len(audio),
-        'chunks': len(chunks),
+        'chunks': len(plan),
         'tts_model': tts_model,
-        'voice': voice or None,
+        'voice': voice_label or None,
+        'speakers': ([{'name': s['name'], 'voice': s['voice']} for s in speakers]
+                     if speakers else None),
     }

@@ -533,19 +533,24 @@ def create_podcast():
     tts_model = (data.get('tts_model') or '').strip()
     if '/' not in tts_model:
         return _error("'tts_model' must be a full OpenRouter model id, e.g. "
-                      "'openai/gpt-4o-mini-tts'.", 400)
+                      "'fish-audio/s2.1-pro'.", 400)
     voice = (data.get('voice') or '').strip() or None
     title = (data.get('title') or '').strip() or None
+    try:
+        speakers = podcasts.normalize_speakers(data.get('speakers'))
+    except podcasts.PodcastError as e:
+        return _error(str(e), e.status)
 
     params = {
         'script': script, 'tts_model': tts_model, 'voice': voice, 'title': title,
-        'account_id': account['id'],
+        'speakers': speakers, 'account_id': account['id'],
     }
 
     def run(job_params, progress):
         return podcasts.generate(
             script=job_params['script'], tts_model=job_params['tts_model'],
-            voice=job_params.get('voice'), title=job_params.get('title'),
+            voice=job_params.get('voice'), speakers=job_params.get('speakers'),
+            title=job_params.get('title'),
             account_id=job_params['account_id'], progress=progress)
 
     usage_row = usage.record_request(account['id'], 'podcast',
@@ -561,7 +566,8 @@ def create_podcast():
         return result
 
     import hashlib
-    digest = hashlib.sha1(script.encode('utf-8')).hexdigest()[:12]
+    fingerprint = script + '\x00' + podcasts.speakers_signature(speakers)
+    digest = hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:12]
     job = jobs.manager.submit(
         params,
         runner=tracked,
