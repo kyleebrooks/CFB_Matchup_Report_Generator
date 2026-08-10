@@ -536,20 +536,25 @@ def create_podcast():
                       "'fish-audio/s2.1-pro'.", 400)
     voice = (data.get('voice') or '').strip() or None
     title = (data.get('title') or '').strip() or None
+    clone_audio = (data.get('clone_audio') or '').strip() or None
+    clone_transcript = (data.get('clone_transcript') or '').strip() or None
     try:
-        speakers = podcasts.normalize_speakers(data.get('speakers'))
+        podcasts.validate_clone(clone_audio)
     except podcasts.PodcastError as e:
         return _error(str(e), e.status)
 
     params = {
         'script': script, 'tts_model': tts_model, 'voice': voice, 'title': title,
-        'speakers': speakers, 'account_id': account['id'],
+        'clone_audio': clone_audio, 'clone_transcript': clone_transcript,
+        'account_id': account['id'],
     }
 
     def run(job_params, progress):
         return podcasts.generate(
             script=job_params['script'], tts_model=job_params['tts_model'],
-            voice=job_params.get('voice'), speakers=job_params.get('speakers'),
+            voice=job_params.get('voice'),
+            clone_audio=job_params.get('clone_audio'),
+            clone_transcript=job_params.get('clone_transcript'),
             title=job_params.get('title'),
             account_id=job_params['account_id'], progress=progress)
 
@@ -566,7 +571,10 @@ def create_podcast():
         return result
 
     import hashlib
-    fingerprint = script + '\x00' + podcasts.speakers_signature(speakers)
+    # Model, voice and clone sample are part of the episode's identity: asking
+    # again with a different voice is a new episode, not a duplicate request.
+    fingerprint = '\x00'.join([script, tts_model, voice or '',
+                               (clone_audio or '')[:80]])
     digest = hashlib.sha1(fingerprint.encode('utf-8')).hexdigest()[:12]
     job = jobs.manager.submit(
         params,

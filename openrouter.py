@@ -258,7 +258,7 @@ def parse_json_lenient(text: str) -> dict | None:
 
 def speech(api_key: str, model: str, text: str, voice: str | None = None,
            input_references: list | None = None,
-           timeout: int = 300, retries: int = 2) -> bytes:
+           timeout: int = 300, retries: int = 3) -> bytes:
     """One text-to-speech synthesis call. Returns audio bytes (MP3).
 
     OpenRouter speaks the OpenAI dialect, whose TTS endpoint is /audio/speech.
@@ -269,7 +269,14 @@ def speech(api_key: str, model: str, text: str, voice: str | None = None,
     (an input_audio part with the base64 voice sample, optionally a text part
     with its transcript). Cloning is per-request by design, so the caller sends
     the same references with every chunk.
+
+    Every transient failure shape retries with backoff: transport errors, 408/425/429,
+    any 5xx, and the empty-audio 200 (a JSON error envelope where audio should
+    be — providers emit these mid-incident and a retry usually lands on a
+    healthy one). Only a definitive 4xx fails fast.
     """
+    if not (text or '').strip():
+        raise OpenRouterError("Empty text passed to TTS — nothing to synthesize.", 400)
     url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/audio/speech"
     body: dict = {"model": model, "input": text, "response_format": "mp3"}
     if voice:
@@ -293,12 +300,27 @@ def speech(api_key: str, model: str, text: str, voice: str | None = None,
             content_type = (resp.headers.get("Content-Type") or "").lower()
             if resp.content and "json" not in content_type:
                 return resp.content
-            # A JSON body on 200 is an error envelope, not audio.
-            raise OpenRouterError(
+            # A JSON body on 200 is an error envelope, not audio — treat it
+            # like any other transient provider failure.
+            last_err = OpenRouterError(
                 f"OpenRouter returned no audio for {model}", 200, resp.text[:400])
+            if attempt < retries:
+                wait = 2 ** attempt * 2
+                logging.warning(f"OpenRouter TTS {model} sent an error envelope "
+                                f"instead of audio; retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            raise last_err
 
-        if resp.status_code in (408, 429, 500, 502, 503, 504) and attempt < retries:
+        retryable = resp.status_code in (408, 425, 429) or resp.status_code >= 500
+        if retryable and attempt < retries:
             wait = 2 ** attempt * 2
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait = min(15, max(wait, int(float(retry_after))))
+                except ValueError:
+                    pass
             logging.warning(f"OpenRouter TTS {model} HTTP {resp.status_code}; "
                             f"retrying in {wait}s")
             time.sleep(wait)
