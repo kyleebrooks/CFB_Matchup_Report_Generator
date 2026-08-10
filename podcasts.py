@@ -148,6 +148,67 @@ def clean_script(script: str) -> str:
     return '\n'.join(line.rstrip() for line in text.split('\n')).strip()
 
 
+# ---------------------------------------------------------------------------
+# PCM handling — some adapters (Gemini TTS) only emit raw PCM
+# ---------------------------------------------------------------------------
+# The PCM these adapters return: 24 kHz, 16-bit, mono (documented for Gemini
+# TTS, and the de-facto standard shape for TTS PCM output).
+PCM_RATE = 24_000
+PCM_WIDTH = 2
+PCM_CHANNELS = 1
+
+
+def wants_pcm(err) -> bool:
+    """Does this 400 say the adapter only supports response_format=pcm?"""
+    blob = f'{err} {getattr(err, "body", "") or ""}'.lower()
+    return getattr(err, 'status', None) == 400 and \
+        'response_format' in blob and 'pcm' in blob
+
+
+def encode_pcm_to_mp3(pcm: bytes) -> bytes | None:
+    """Raw 24 kHz mono PCM -> MP3, via lameenc or ffmpeg. None if neither exists."""
+    try:
+        import lameenc
+        encoder = lameenc.Encoder()
+        encoder.set_bit_rate(64)
+        encoder.set_in_sample_rate(PCM_RATE)
+        encoder.set_channels(PCM_CHANNELS)
+        encoder.set_quality(2)
+        return bytes(encoder.encode(pcm)) + bytes(encoder.flush())
+    except ImportError:
+        pass
+    except Exception as e:
+        logging.warning(f'lameenc MP3 encode failed, trying ffmpeg: {e}')
+    import shutil
+    import subprocess
+    if shutil.which('ffmpeg'):
+        try:
+            proc = subprocess.run(
+                ['ffmpeg', '-loglevel', 'error',
+                 '-f', 's16le', '-ar', str(PCM_RATE), '-ac', str(PCM_CHANNELS),
+                 '-i', 'pipe:0', '-b:a', '64k', '-f', 'mp3', 'pipe:1'],
+                input=pcm, capture_output=True, timeout=600)
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+            logging.warning(f'ffmpeg MP3 encode failed: {proc.stderr[:300]}')
+        except Exception as e:
+            logging.warning(f'ffmpeg MP3 encode failed: {e}')
+    return None
+
+
+def wrap_pcm_as_wav(pcm: bytes) -> bytes:
+    """Raw PCM in a WAV container — pure stdlib, always available."""
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wav:
+        wav.setnchannels(PCM_CHANNELS)
+        wav.setsampwidth(PCM_WIDTH)
+        wav.setframerate(PCM_RATE)
+        wav.writeframes(pcm)
+    return buf.getvalue()
+
+
 def validate_clone(clone_audio: str | None) -> None:
     if not clone_audio:
         return
@@ -182,7 +243,8 @@ def account_dir(account_id: int, create: bool = True) -> str:
 def resolve(account_id: int, filename: str) -> str:
     """Absolute path to one episode, confined to that account's directory."""
     name = os.path.basename((filename or '').strip())
-    if not name or name.startswith('.') or not name.lower().endswith('.mp3'):
+    if not name or name.startswith('.') \
+            or not name.lower().endswith(('.mp3', '.wav')):
         raise PodcastError(f'Unsafe podcast filename: {filename!r}')
     base = os.path.realpath(account_dir(account_id, create=False))
     path = os.path.realpath(os.path.join(base, name))
@@ -295,11 +357,22 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
     today = datetime.now()
     title = (title or '').strip() or f'Episode {episode} — {db.format_friendly_date(today)}'
 
+    # The whole episode is synthesized in one format. We ask for MP3; if the
+    # adapter answers "pcm only" (Gemini TTS does), the episode switches to
+    # PCM and is encoded to MP3 here after synthesis.
+    fmt = {'value': 'mp3'}
+
     def synthesize(text: str, n: int, rescued: bool = False) -> bytes:
         try:
             return openrouter.speech(api_key, tts_model, text, voice=voice,
-                                     input_references=refs)
+                                     input_references=refs,
+                                     response_format=fmt['value'])
         except openrouter.OpenRouterError as e:
+            if fmt['value'] == 'mp3' and wants_pcm(e):
+                logging.info(f'{tts_model} only emits PCM; switching the '
+                             'episode to PCM and encoding locally')
+                fmt['value'] = 'pcm'
+                return synthesize(text, n, rescued=rescued)
             # A 400/413 on a sizeable chunk usually means this provider's input
             # cap is tighter than our default — halve the chunk and try the
             # pieces before giving up. One level of rescue only.
@@ -321,14 +394,30 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
         step('synthesize', pct, f'Synthesizing speech — part {n} of {len(chunks)}')
         audio.extend(synthesize(chunk, n))
 
+    # Concatenated MP3 segments play as one file; concatenated raw PCM frames
+    # are literally one continuous recording — encode those to MP3 (or fall
+    # back to a WAV container when no encoder is installed on this host).
+    ext = 'mp3'
+    data = bytes(audio)
+    if fmt['value'] == 'pcm':
+        step('synthesize', 90, 'Encoding the episode audio')
+        mp3 = encode_pcm_to_mp3(data)
+        if mp3:
+            data = mp3
+        else:
+            logging.warning('No MP3 encoder available (pip install lameenc '
+                            'or install ffmpeg); storing the episode as WAV')
+            data = wrap_pcm_as_wav(data)
+            ext = 'wav'
+
     step('store')
     safe = ''.join(ch for ch in title if ch.isalnum() or ch in ' -_').strip()[:80] \
            or f'episode {episode}'
-    filename = f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.mp3'
+    filename = f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}'
     path = os.path.join(account_dir(account_id), filename)
     tmp = path + '.building'
     with open(tmp, 'wb') as fh:
-        fh.write(bytes(audio))
+        fh.write(data)
     os.replace(tmp, path)
 
     conn = db.get_db_connection()
@@ -339,20 +428,20 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
                 f'tts_model, voice, bytes, script_chars, chunks, created_at) '
                 f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
                 (int(account_id), episode, title, filename, tts_model,
-                 voice or None, len(audio), len(script), len(chunks), today))
+                 voice or None, len(data), len(script), len(chunks), today))
         conn.commit()
     finally:
         conn.close()
 
     step('done')
     logging.info(f'Podcast episode {episode} ({filename}) generated: '
-                 f'{len(audio)} bytes from {len(chunks)} part(s) via {tts_model}')
+                 f'{len(data)} bytes from {len(chunks)} part(s) via {tts_model}')
     return {
         'podcast': True,
         'episode': episode,
         'title': title,
         'filename': filename,
-        'bytes': len(audio),
+        'bytes': len(data),
         'chunks': len(chunks),
         'tts_model': tts_model,
         'voice': voice or None,
