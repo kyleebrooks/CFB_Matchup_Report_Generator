@@ -304,6 +304,101 @@ def delete(account_id: int, filename: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Manual upload — episodes produced outside this service
+# ---------------------------------------------------------------------------
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+_UPLOAD_CHUNK = 256 * 1024
+
+
+def sniff_audio(head: bytes) -> str | None:
+    """'mp3' or 'wav' from a file's first bytes; None when it is neither.
+
+    Extension claims lie; the magic bytes do not. MP3 files open with an ID3
+    tag or an MPEG frame sync, WAV files with RIFF....WAVE.
+    """
+    if head[:4] == b'RIFF' and head[8:12] == b'WAVE':
+        return 'wav'
+    if head[:3] == b'ID3':
+        return 'mp3'
+    if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return 'mp3'
+    return None
+
+
+def store_upload(*, stream, account_id: int, title: str | None = None,
+                 max_bytes: int | None = None) -> dict:
+    """A finished episode produced elsewhere: stream it to disk and catalogue it.
+
+    The file is written in chunks — never held whole in memory — with the size
+    cap enforced as it arrives. The stored row looks like any generated
+    episode's, so listing, streaming, the RSS feed and deletion all behave
+    identically; the tts_model column records that it was a manual upload.
+    """
+    ensure_schema()
+    max_bytes = max_bytes or MAX_UPLOAD_BYTES
+
+    head = stream.read(_UPLOAD_CHUNK)
+    ext = sniff_audio(head or b'')
+    if not ext:
+        raise PodcastError(
+            'The uploaded file is not recognizable MP3 or WAV audio.')
+
+    episode = _next_episode(account_id)
+    today = datetime.now()
+    title = (title or '').strip() or \
+        f'Episode {episode} — {db.format_friendly_date(today)}'
+    safe = ''.join(ch for ch in title if ch.isalnum() or ch in ' -_').strip()[:80] \
+           or f'episode {episode}'
+    filename = f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}'
+    path = os.path.join(account_dir(account_id), filename)
+    tmp = path + '.uploading'
+
+    size = 0
+    try:
+        with open(tmp, 'wb') as fh:
+            chunk = head
+            while chunk:
+                size += len(chunk)
+                if size > max_bytes:
+                    raise PodcastError(
+                        f'The upload exceeds the '
+                        f'{max_bytes // (1024 * 1024)} MB limit.', 413)
+                fh.write(chunk)
+                chunk = stream.read(_UPLOAD_CHUNK)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+    os.replace(tmp, path)
+
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'INSERT INTO {TABLE} (account_id, episode, title, filename, '
+                f'tts_model, voice, bytes, script_chars, chunks, created_at) '
+                f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                (int(account_id), episode, title, filename, 'manual upload',
+                 None, size, 0, 0, today))
+        conn.commit()
+    finally:
+        conn.close()
+
+    logging.info(f'Podcast episode {episode} ({filename}) uploaded manually: '
+                 f'{size} bytes')
+    return {
+        'podcast': True,
+        'episode': episode,
+        'title': title,
+        'filename': filename,
+        'bytes': size,
+        'chunks': 0,
+        'tts_model': 'manual upload',
+        'voice': None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
 STAGES = {

@@ -589,6 +589,29 @@ def create_podcast():
                     'deduplicated': bool(job.get('deduplicated'))}), status
 
 
+@bp.route('/podcasts/upload', methods=['POST'])
+@require_account
+def upload_podcast():
+    """Catalogue a finished episode produced elsewhere.
+
+    The request body is the raw audio file (MP3 or WAV — verified by content,
+    not extension); the optional title travels as a query parameter. Streamed
+    to disk, so the file's size never sits in this process's memory.
+    """
+    import podcasts
+    account = request.account
+    title = (request.args.get('title') or '').strip() or None
+    try:
+        result = podcasts.store_upload(stream=request.stream,
+                                       account_id=account['id'], title=title)
+    except podcasts.PodcastError as e:
+        return _error(str(e), e.status)
+    usage_row = usage.record_request(account['id'], 'podcast_upload',
+                                     result['title'], '')
+    usage.mark_complete(usage_row, 'done')
+    return jsonify(result), 201
+
+
 @bp.route('/podcasts', methods=['GET'])
 @require_account
 def list_podcasts():
