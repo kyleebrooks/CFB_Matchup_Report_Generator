@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from flask import Flask, request, send_file, jsonify
 from werkzeug.exceptions import HTTPException
 
+import accounts
 import api_v1
 import cfbd
 import config
@@ -20,6 +21,10 @@ import pipeline
 # App & CORS
 # ---------------------------
 app = Flask(__name__)
+
+# Newly shipped report types reach the flagship account without a manual grant;
+# other tenants' entitlements stay untouched. Never fatal at boot.
+accounts.ensure_type_entitlements(['conference_wrap', 'conference_roundup'])
 
 # --- ONE CORS LAYER ONLY ---
 ALLOWED_ORIGINS = {

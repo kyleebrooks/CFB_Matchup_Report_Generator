@@ -11,6 +11,7 @@ enough for speech).
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 
 import config
@@ -253,6 +254,22 @@ def resolve(account_id: int, filename: str) -> str:
     return path
 
 
+# Episode numbers are allocated by reading MAX(episode)+1, so two episodes
+# publishing at the same moment would collide on the number and the filename.
+# The number is provisional while audio is being made; the final allocation
+# happens under this lock at publish time.
+_publish_lock = threading.Lock()
+
+
+def _finalize(account_id: int, episode: int, filename: str) -> tuple[int, str]:
+    """Re-resolve the episode number at publish time, under the lock."""
+    final = _next_episode(account_id)
+    if final != episode:
+        filename = filename.replace(f'ep{episode:03d}_', f'ep{final:03d}_', 1)
+        episode = final
+    return episode, filename
+
+
 def _next_episode(account_id: int) -> int:
     conn = db.get_db_connection()
     try:
@@ -349,9 +366,10 @@ def store_upload(*, stream, account_id: int, title: str | None = None,
         f'Episode {episode} — {db.format_friendly_date(today)}'
     safe = ''.join(ch for ch in title if ch.isalnum() or ch in ' -_').strip()[:80] \
            or f'episode {episode}'
-    filename = f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}'
-    path = os.path.join(account_dir(account_id), filename)
-    tmp = path + '.uploading'
+    # Stream to a per-request temp name; the episode number and filename are
+    # finalized under the publish lock only once the bytes are all here.
+    tmp = os.path.join(account_dir(account_id),
+                       f'.upload-{os.getpid()}-{threading.get_ident()}.tmp')
 
     size = 0
     try:
@@ -369,20 +387,26 @@ def store_upload(*, stream, account_id: int, title: str | None = None,
         if os.path.exists(tmp):
             os.remove(tmp)
         raise
-    os.replace(tmp, path)
 
-    conn = db.get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f'INSERT INTO {TABLE} (account_id, episode, title, filename, '
-                f'tts_model, voice, bytes, script_chars, chunks, created_at) '
-                f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                (int(account_id), episode, title, filename, 'manual upload',
-                 None, size, 0, 0, today))
-        conn.commit()
-    finally:
-        conn.close()
+    with _publish_lock:
+        episode, filename = _finalize(
+            account_id, episode,
+            f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}')
+        path = os.path.join(account_dir(account_id), filename)
+        os.replace(tmp, path)
+
+        conn = db.get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'INSERT INTO {TABLE} (account_id, episode, title, filename, '
+                    f'tts_model, voice, bytes, script_chars, chunks, created_at) '
+                    f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (int(account_id), episode, title, filename, 'manual upload',
+                     None, size, 0, 0, today))
+            conn.commit()
+        finally:
+            conn.close()
 
     logging.info(f'Podcast episode {episode} ({filename}) uploaded manually: '
                  f'{size} bytes')
@@ -508,25 +532,28 @@ def generate(*, script: str, tts_model: str, voice: str | None = None,
     step('store')
     safe = ''.join(ch for ch in title if ch.isalnum() or ch in ' -_').strip()[:80] \
            or f'episode {episode}'
-    filename = f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}'
-    path = os.path.join(account_dir(account_id), filename)
-    tmp = path + '.building'
-    with open(tmp, 'wb') as fh:
-        fh.write(data)
-    os.replace(tmp, path)
+    with _publish_lock:
+        episode, filename = _finalize(
+            account_id, episode,
+            f'ep{episode:03d}_{safe}_{db.format_friendly_date(today)}.{ext}')
+        path = os.path.join(account_dir(account_id), filename)
+        tmp = path + '.building'
+        with open(tmp, 'wb') as fh:
+            fh.write(data)
+        os.replace(tmp, path)
 
-    conn = db.get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f'INSERT INTO {TABLE} (account_id, episode, title, filename, '
-                f'tts_model, voice, bytes, script_chars, chunks, created_at) '
-                f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
-                (int(account_id), episode, title, filename, tts_model,
-                 voice or None, len(data), len(script), len(chunks), today))
-        conn.commit()
-    finally:
-        conn.close()
+        conn = db.get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'INSERT INTO {TABLE} (account_id, episode, title, filename, '
+                    f'tts_model, voice, bytes, script_chars, chunks, created_at) '
+                    f'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                    (int(account_id), episode, title, filename, tts_model,
+                     voice or None, len(data), len(script), len(chunks), today))
+            conn.commit()
+        finally:
+            conn.close()
 
     step('done')
     logging.info(f'Podcast episode {episode} ({filename}) generated: '

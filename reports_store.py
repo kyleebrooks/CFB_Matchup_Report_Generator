@@ -77,6 +77,9 @@ def _describe(path: str, name: str) -> dict:
         ('plays_', 'season_plays'),
         ('recap_', 'full_game_recap'),
         ('slate_', 'weekly_preview'),
+        # confwrap_ must match before wrap_ — tuple order is the tiebreak.
+        ('confwrap_', 'conference_wrap'),
+        ('confround_', 'conference_roundup'),
         ('wrap_', 'weekly_wrap'),
         ('predaudit_', 'prediction_audit'),
         ('predreview_', 'prediction_review'),

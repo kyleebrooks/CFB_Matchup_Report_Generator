@@ -5,6 +5,7 @@ API surface, per-account entitlements, job handling and PDF delivery all key off
 table, so nothing else needs to change.
 """
 
+import conference
 import game_recap
 import pipeline
 import prediction_reports
@@ -172,6 +173,38 @@ def _weekly_subject(p: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# conference_wrap / conference_roundup — one conference, behind and ahead
+# ---------------------------------------------------------------------------
+def _validate_conference(params: dict) -> dict:
+    _require(params, 'conference')
+    return {
+        'conference': str(params['conference']).strip(),
+        'year': _year(params),
+        'week': _week(params),
+    }
+
+
+def _run_conference(generator):
+    def run(params: dict, progress) -> dict:
+        return generator(
+            conference=params['conference'],
+            year=params.get('year'),
+            week=params.get('week'),
+            settings=params.get('settings'),
+            watermark=params.get('watermark'),
+            report_dir=params.get('report_dir'),
+            progress=progress,
+        )
+    return run
+
+
+def _conference_subject(p: dict) -> str:
+    if p.get('year') and p.get('week'):
+        return f"{p['conference']} {p['year']} week {p['week']}"
+    return p['conference']
+
+
+# ---------------------------------------------------------------------------
 # prediction_audit / prediction_review — the prediction record, graded
 # ---------------------------------------------------------------------------
 def _validate_predictions(params: dict) -> dict:
@@ -328,10 +361,46 @@ REPORT_TYPES: dict[str, dict] = {
         'subject': _prediction_subject,
         'dedup_key': lambda p: f"prediction_review:{p.get('year')}",
     },
+    'conference_wrap': {
+        'name': 'conference_wrap',
+        'title': 'Conference Weekly Wrap',
+        'description': (
+            'One conference\'s completed week: every final with kickoff, broadcast '
+            'and conditions, the good, the bad and the ugly, the week\'s top '
+            'performers from the box scores, how every team fared against the '
+            'closing line, how the stored CFBReports projections fared against the '
+            'market and the final scores, the top stories from live research, and '
+            'what the results change going forward.'
+        ),
+        'required': ['conference'],
+        'optional': ['year', 'week'],
+        'validate': _validate_conference,
+        'run': _run_conference(conference.generate_wrap),
+        'subject': _conference_subject,
+        'dedup_key': lambda p: (f"conference_wrap:{p['conference'].lower()}|"
+                                f"{p.get('year')}|{p.get('week')}"),
+    },
+    'conference_roundup': {
+        'name': 'conference_roundup',
+        'title': 'Conference Roundup',
+        'description': (
+            'One conference\'s week ahead: breaking news, injury reports and '
+            'stories to watch from live research, the standings picture, and a '
+            'board of every upcoming game with kickoff time, broadcast, forecast, '
+            'market lines and projections — including the stored CFBReports '
+            'projection beside the official line wherever one exists.'
+        ),
+        'required': ['conference'],
+        'optional': ['year', 'week'],
+        'validate': _validate_conference,
+        'run': _run_conference(conference.generate_roundup),
+        'subject': _conference_subject,
+        'dedup_key': lambda p: (f"conference_roundup:{p['conference'].lower()}|"
+                                f"{p.get('year')}|{p.get('week')}"),
+    },
     # Planned, not yet implemented. Listed so entitlements can be granted ahead of the
     # build and clients can discover what is coming.
-    # 'conference': conference-wide report
-    # 'injury':     league-wide injury sweep
+    # 'injury': league-wide injury sweep
 }
 
 

@@ -187,17 +187,22 @@ def _build_prompt(job: dict, ctx: dict) -> str:
     }
     focus = job["focus"].format(**fmt)
     section = job["section"].format(**fmt)
-    subject = (
-        f'the upcoming matchup "{ctx["home_full"]}" (home) vs "{ctx["away_full"]}" (away)'
-        if job["scope"] == "matchup"
-        else f'the "{team_full}" college football team'
-    )
+    if job["scope"] == "matchup":
+        subject = (f'the upcoming matchup "{ctx["home_full"]}" (home) vs '
+                   f'"{ctx["away_full"]}" (away)')
+    elif job["scope"] == "conference":
+        subject = f'the {ctx["home_full"]} college football conference'
+    else:
+        subject = f'the "{team_full}" college football team'
 
     kickoff_line = f"Scheduled kickoff: {ctx['kickoff']}.\n" if ctx.get("kickoff") else ""
+    header = (f"MATCHUP: {ctx['home_full']} (home) vs {ctx['away_full']} (away)."
+              if ctx.get("away_full")
+              else f"SUBJECT: the {ctx['home_full']} conference.")
 
     return f"""CURRENT DATE AND TIME: {now.strftime('%A, %B %d, %Y at %H:%M UTC')}
 SEASON: {ctx['year']} college football season.
-MATCHUP: {ctx['home_full']} (home) vs {ctx['away_full']} (away).
+{header}
 {kickoff_line}
 TASK: Research {subject} and report ONLY on: {focus}.
 
