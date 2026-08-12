@@ -266,6 +266,33 @@ def update(account_id: int, **fields) -> dict:
     return account
 
 
+def ensure_type_entitlements(new_types: list[str],
+                             name_match: str = 'cfbreports') -> None:
+    """Grant newly shipped report types to the flagship account automatically.
+
+    Runs at boot and never raises — a database hiccup at startup must not stop
+    the service. Only accounts whose name contains the match (the CFBReports
+    site account) are touched; other tenants' entitlements are theirs to manage.
+    """
+    try:
+        ensure_schema()
+        for account in list_all():
+            if name_match not in (account.get('account_name') or '').lower():
+                continue
+            allowed = list(account.get('allowed_reports') or [])
+            missing = [t for t in new_types if t not in allowed]
+            if not missing:
+                continue
+            update(account['id'], allowed_reports=allowed + missing)
+            import logging
+            logging.info(f"Entitlements: granted {', '.join(missing)} to "
+                         f"account '{account.get('account_name')}' "
+                         f"(id {account['id']})")
+    except Exception as e:
+        import logging
+        logging.warning(f'Entitlement grant skipped (non-fatal): {e}')
+
+
 def merge_settings(account_id: int, patch: dict) -> dict:
     """Apply a partial settings update, leaving unmentioned keys alone."""
     account = get(account_id)
