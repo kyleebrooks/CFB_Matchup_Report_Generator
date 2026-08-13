@@ -162,6 +162,29 @@ def _injury_jobs(window_days: int, recent_headlines: list[str],
     } for key, focus in INJURY_ANGLES]
 
 
+def _resolved_settings(state: dict) -> dict:
+    """Model and search settings for one feed's pull, lowest precedence first.
+
+        environment defaults          (OPENROUTER_RESEARCH_MODEL et al)
+        service-wide overrides        (the droplet admin console)
+        this feed's own overrides     (the cfbreports console's feed card)
+
+    The first two layers are exactly what the reports resolve, so a model
+    changed service-wide moves the wire too instead of leaving it on whatever
+    the environment happened to ship with.
+    """
+    try:
+        import settings_store
+        settings = settings_store.resolved_defaults()
+    except Exception:
+        settings = config.default_settings()
+    if state.get('research_model'):
+        settings['research_model'] = state['research_model']
+    if state.get('search_engine'):
+        settings['search_engine'] = state['search_engine']
+    return settings
+
+
 def _news_jobs(window_days: int, recent_headlines: list[str],
                last_run_at: str | None = None) -> list[dict]:
     suppress = ''
@@ -589,11 +612,7 @@ def _pull_news(state: dict) -> dict:
     if not api_key:
         _set_status('news', 'No OpenRouter API key configured', 0)
         raise FeedError('No OpenRouter API key is configured.', 500)
-    settings = config.default_settings()
-    if state.get('research_model'):
-        settings['research_model'] = state['research_model']
-    if state.get('search_engine'):
-        settings['search_engine'] = state['search_engine']
+    settings = _resolved_settings(state)
 
     window_days = FEEDS['news']['window_days']
     recent = [r['headline'] for r in items('news', limit=25)]
@@ -757,11 +776,7 @@ def _pull_injuries(state: dict) -> dict:
     found_research = 0
     api_key = db.resolve_openrouter_key()
     if api_key:
-        settings = config.default_settings()
-        if state.get('research_model'):
-            settings['research_model'] = state['research_model']
-        if state.get('search_engine'):
-            settings['search_engine'] = state['search_engine']
+        settings = _resolved_settings(state)
         recent = [r['headline'] for r in items('injuries', limit=25)]
         jobs = _injury_jobs(window_days, recent,
                             last_run_at=state.get('last_run_at'))
