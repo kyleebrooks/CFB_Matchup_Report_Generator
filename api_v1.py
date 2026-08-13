@@ -7,6 +7,7 @@ as before. Everything here authenticates with a per-account key issued by an adm
 
 import base64
 import functools
+import hmac
 import logging
 import os
 import time
@@ -81,6 +82,32 @@ def require_admin(fn):
             logging.exception("Admin check failed")
             return _error('Account lookup failed', 503, detail=str(e)[:200])
         request.account = accounts.find_by_key(key)
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+def require_worker(fn):
+    """Voice-studio endpoints, authenticated by the shared worker token.
+
+    Deliberately not an account key. The machine polling this queue is a workstation on
+    someone's desk that we do not administer; if its token leaks, the blast radius is the
+    voice queue and nothing else — no reports, no report generation spend, no account
+    settings. Unset token means the whole worker surface is closed.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        expected = config.VOICE_WORKER_TOKEN
+        if not expected:
+            return _error('The voice studio queue is not enabled on this service.', 503)
+        presented = _presented_key()
+        if not presented:
+            return _error('Missing worker token.', 401)
+        if not hmac.compare_digest(str(presented), str(expected)):
+            return _error('Invalid worker token.', 401)
+        worker_id = (request.headers.get('X-Worker-Id') or '').strip()
+        if not worker_id:
+            return _error('Missing X-Worker-Id header.', 400)
+        request.worker_id = worker_id[:64]
         return fn(*args, **kwargs)
     return wrapper
 
@@ -703,6 +730,261 @@ def delete_podcast(filename):
         return jsonify(podcasts.delete(request.account['id'], filename)), 200
     except podcasts.PodcastError as e:
         return _error(str(e), e.status)
+
+
+# ---------------------------------------------------------------------------
+# Voice studio — episodes rendered by an external VibeVoice workstation
+#
+# Two audiences share these routes. The console (account key) queues jobs and reads
+# status; the workstation (worker token) claims jobs, reports progress and posts audio
+# back. Nothing here ever calls out to the workstation — see voice_jobs for why.
+# ---------------------------------------------------------------------------
+@bp.route('/voice-jobs', methods=['POST'])
+@require_account
+def create_voice_job():
+    """Queue an episode for this account's VibeVoice studio to render."""
+    import voice_jobs
+    body = _body()
+    speakers = body.get('speakers') or {}
+    if not isinstance(speakers, dict):
+        return _error('"speakers" must be an object mapping speaker number to voice.')
+    try:
+        job = voice_jobs.enqueue(
+            account_id=request.account['id'],
+            title=body.get('title') or '',
+            script=body.get('script') or '',
+            automation=body.get('automation'),
+            vibevoice_model=body.get('vibevoice_model'),
+            preset=body.get('preset'),
+            speakers={str(k): v for k, v in speakers.items() if v},
+        )
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+    except Exception as e:
+        logging.exception('Voice job enqueue failed')
+        return _error('Voice queue unavailable.', 503, detail=str(e)[:200])
+    return jsonify(job), 201
+
+
+@bp.route('/voice-jobs', methods=['GET'])
+@require_account
+def list_voice_jobs():
+    import voice_jobs
+    try:
+        return jsonify({'voice_jobs': voice_jobs.list_for(request.account['id'])}), 200
+    except Exception as e:
+        return _error('Voice queue unavailable.', 503, detail=str(e)[:200])
+
+
+@bp.route('/voice-jobs/<int:job_id>', methods=['GET'])
+@require_account
+def get_voice_job(job_id):
+    import voice_jobs
+    try:
+        return jsonify(voice_jobs.get(request.account['id'], job_id)), 200
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+
+
+@bp.route('/voice-jobs/<int:job_id>/cancel', methods=['POST'])
+@require_account
+def cancel_voice_job(job_id):
+    import voice_jobs
+    try:
+        return jsonify(voice_jobs.cancel(request.account['id'], job_id)), 200
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+
+
+@bp.route('/voice-studio', methods=['GET'])
+@require_account
+def voice_studio():
+    """Whether a studio is online for this account, and the voices it advertises.
+
+    Answers even when nothing has ever checked in — the console renders an offline
+    badge from this and must not break because the workstation is switched off.
+    """
+    import voice_jobs
+    try:
+        return jsonify(voice_jobs.studio_status(request.account['id'])), 200
+    except Exception as e:
+        logging.warning(f'Voice studio status failed: {e}')
+        return jsonify({'online': False, 'catalog': {}, 'worker_id': None,
+                        'error': str(e)[:200]}), 200
+
+
+# -- worker side ------------------------------------------------------------
+@bp.route('/voice-jobs/next', methods=['GET'])
+@require_worker
+def claim_voice_job():
+    """Hand the oldest queued job to the calling studio, or 204 when there is none."""
+    import voice_jobs
+    try:
+        job = voice_jobs.claim_next(request.worker_id)
+    except Exception as e:
+        logging.exception('Voice job claim failed')
+        return _error('Voice queue unavailable.', 503, detail=str(e)[:200])
+    if not job:
+        return '', 204
+    return jsonify(job), 200
+
+
+@bp.route('/voice-jobs/<int:job_id>', methods=['PATCH'])
+@require_worker
+def update_voice_job(job_id):
+    """A progress report. Extends the lease; returns the job so the worker sees a
+    cancellation without a second round trip."""
+    import voice_jobs
+    body = _body()
+    try:
+        job = voice_jobs.progress(job_id, worker_id=request.worker_id,
+                                  stage=body.get('stage'),
+                                  percent=body.get('percent'))
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+    return jsonify(job), 200
+
+
+@bp.route('/voice-jobs/<int:job_id>/audio', methods=['POST'])
+@require_worker
+def complete_voice_job(job_id):
+    """The finished episode. Body is the raw audio; publishing is the podcast path.
+
+    Reusing podcasts.store_upload means an episode rendered on a workstation is
+    indistinguishable downstream from one synthesized here: same table, same filename
+    convention, same RSS feed, same delete button.
+    """
+    import podcasts
+    import voice_jobs
+    try:
+        job = voice_jobs.claimed_by(job_id, request.worker_id)
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+
+    if job['state'] == voice_jobs.CANCELED:
+        return _error('That job was canceled.', 409)
+
+    cap = config.VOICE_JOB_MAX_UPLOAD_MB * 1024 * 1024
+    if (request.content_length or 0) > cap:
+        return _error(f'Episode exceeds the {config.VOICE_JOB_MAX_UPLOAD_MB} MB limit.',
+                      413)
+    try:
+        result = podcasts.store_upload(stream=request.stream,
+                                       account_id=job['account_id'],
+                                       title=job['title'] or None,
+                                       max_bytes=cap)
+    except podcasts.PodcastError as e:
+        voice_jobs.fail(job_id, worker_id=request.worker_id, error=str(e))
+        return _error(str(e), e.status)
+    except Exception as e:
+        logging.exception('Voice job audio store failed')
+        voice_jobs.fail(job_id, worker_id=request.worker_id, error=str(e)[:400])
+        return _error('Could not store the episode.', 500, detail=str(e)[:200])
+
+    # The row records that a studio made it, not the generic "manual upload" the
+    # browser-upload path writes.
+    try:
+        podcasts.set_source(job['account_id'], result['filename'],
+                            tts_model='vibevoice studio',
+                            voice=(job.get('speakers') or {}).get('1'))
+    except Exception as e:
+        logging.warning(f'Could not stamp voice-job source on {result["filename"]}: {e}')
+
+    try:
+        job = voice_jobs.complete(job_id, worker_id=request.worker_id,
+                                  episode=result['episode'],
+                                  filename=result['filename'])
+    except voice_jobs.VoiceJobError as e:
+        # The lease expired while the audio was in flight and another worker has the
+        # job. The episode we just wrote is a duplicate of one that is about to be
+        # published, so take it back out rather than leaving two on the feed.
+        logging.warning(f'Voice job {job_id} lost its lease mid-upload; '
+                        f'removing duplicate {result["filename"]}')
+        try:
+            podcasts.delete(job['account_id'], result['filename'])
+        except Exception as cleanup_error:
+            logging.error(f'Could not remove duplicate episode '
+                          f'{result["filename"]}: {cleanup_error}')
+        return _error(str(e), e.status)
+    usage_row = usage.record_request(job['account_id'], 'voice_job',
+                                     result['title'], '')
+    usage.mark_complete(usage_row, 'done')
+    return jsonify({'job': job, 'episode': result}), 201
+
+
+@bp.route('/voice-jobs/<int:job_id>/fail', methods=['POST'])
+@require_worker
+def fail_voice_job(job_id):
+    import voice_jobs
+    error = (_body().get('error') or 'The studio reported a failure.')[:500]
+    try:
+        return jsonify(voice_jobs.fail(job_id, worker_id=request.worker_id,
+                                       error=error)), 200
+    except voice_jobs.VoiceJobError as e:
+        return _error(str(e), e.status)
+
+
+@bp.route('/voice-workers/heartbeat', methods=['POST'])
+@require_worker
+def voice_worker_heartbeat():
+    """Liveness plus the catalog of voices, presets and models the studio offers.
+
+    This is the only way the console learns what voices exist on a machine it cannot
+    reach. `account_id` binds the studio to one account's pickers.
+    """
+    import voice_jobs
+    body = _body()
+    account_id = body.get('account_id')
+    try:
+        out = voice_jobs.heartbeat(
+            request.worker_id,
+            account_id=int(account_id) if account_id else None,
+            label=body.get('label'),
+            catalog=body.get('catalog'),
+            busy=bool(body.get('busy')))
+    except Exception as e:
+        logging.exception('Voice worker heartbeat failed')
+        return _error('Voice queue unavailable.', 503, detail=str(e)[:200])
+    return jsonify(out), 200
+
+
+# -- script builder ---------------------------------------------------------
+@bp.route('/podcasts/script', methods=['POST'])
+@require_account
+def build_podcast_script():
+    """Write a two-host episode script from instructions plus this account's reports."""
+    import podcast_script
+    body = _body()
+    filenames = body.get('report_filenames') or body.get('reports') or []
+    if isinstance(filenames, str):
+        filenames = [f.strip() for f in filenames.split(',') if f.strip()]
+    try:
+        out = podcast_script.generate(
+            account_id=request.account['id'],
+            instructions=body.get('instructions') or '',
+            report_filenames=filenames,
+            model=body.get('model'),
+            host_a=(body.get('host_a') or 'Jake').strip()[:60],
+            host_b=(body.get('host_b') or 'Coach Mac').strip()[:60],
+            minutes=int(body.get('minutes') or 12))
+    except podcast_script.ScriptError as e:
+        return _error(str(e), e.status)
+    except Exception as e:
+        logging.exception('Podcast script build failed')
+        return _error('Script generation failed.', 500, detail=str(e)[:200])
+    return jsonify(out), 200
+
+
+@bp.route('/openrouter/models', methods=['GET'])
+@require_account
+def openrouter_models():
+    """Text-to-text models, for the script builder's picker."""
+    import podcast_script
+    try:
+        models = podcast_script.text_models()
+    except podcast_script.ScriptError as e:
+        return _error(str(e), e.status)
+    return jsonify({'models': models, 'count': len(models)}), 200
 
 
 @bp.route('/account/content/<key>', methods=['GET'])

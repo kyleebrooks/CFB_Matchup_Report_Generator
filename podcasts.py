@@ -422,6 +422,28 @@ def store_upload(*, stream, account_id: int, title: str | None = None,
     }
 
 
+def set_source(account_id: int, filename: str, *, tts_model: str,
+               voice: str | None = None) -> None:
+    """Re-label how an uploaded episode was produced.
+
+    store_upload() writes 'manual upload' because that is true of a file dragged into
+    the browser. An episode that arrived from a VibeVoice studio came through the same
+    function but is not the same thing, and the console's listing should say so.
+    """
+    ensure_schema()
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'UPDATE {TABLE} SET tts_model=%s, voice=%s '
+                f'WHERE account_id=%s AND filename=%s',
+                (tts_model[:120], voice[:60] if voice else None,
+                 int(account_id), os.path.basename(filename)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------

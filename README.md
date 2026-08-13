@@ -93,6 +93,10 @@ point at a URL that was hallucinated or dropped.
 | `catalog.py` | What each report contains and how each section is produced |
 | `examples.py` | Copy-pasteable API examples, generated per account |
 | `settings_store.py` | Service-wide setting overrides, live from the database |
+| `podcasts.py` | Podcast episodes: script chunking, TTS synthesis, storage, manual uploads |
+| `voice_jobs.py` | Queue for episodes rendered by an external VibeVoice workstation |
+| `podcast_script.py` | Writes a two-host episode script from stored reports via OpenRouter |
+| `voice_queue_selftest.py` | Proves the voice queue against the real database after a deploy |
 | `scoreboard.php` | Reference frontend (lives on the web host, not the droplet) |
 | `report_proxy.php` | Same-origin PHP proxy the frontend calls (web host) |
 
@@ -427,6 +431,42 @@ Gunicorn and Nginx timeouts must still be at least 900s for the `wait=true` path
 | `/health/cfbd` | GET | Probe every CFBD endpoint individually (optional `year`, `team`) |
 | `/health/llm` | GET | OpenRouter only — resolve the key and ping both models |
 | `/ping` | GET | Liveness |
+
+## Voice studio
+
+Podcast episodes normally come from `podcasts.py`, which synthesizes a pasted script
+through OpenRouter's TTS models. An account that owns a GPU workstation can instead have
+that machine render the episode with VibeVoice — multi-speaker, cloned voices, effects —
+and still have it publish here like any other episode.
+
+The workstation is behind a home NAT, so this service cannot call it. The direction is
+inverted: it polls `/v1/voice-jobs/next`, claims a job, renders, and posts the audio back
+to `/v1/voice-jobs/{id}/audio`, which hands it to the same `podcasts.store_upload()` a
+browser upload uses. This service never opens a connection to the workstation and never
+learns its address.
+
+```
+console ──POST /v1/voice-jobs──► [queued] ◄──GET /v1/voice-jobs/next── workstation
+                                    │                                       │
+                                    ├───── PATCH …/{id} (progress) ◄────────┤
+                                    └───── POST …/{id}/audio ◄──────────────┘
+                                               │
+                                               └─► published as a normal episode
+```
+
+A claim carries a lease. A workstation that is rebooted or crashes mid-render stops
+renewing it, and the job returns to the queue — safe to re-run, because nothing is
+published until audio actually arrives.
+
+`podcast_script.py` is the other half: the console sends instructions plus a few report
+filenames, and it extracts those PDFs' text here and asks OpenRouter for a script in
+VibeVoice's two-speaker format. Keeping that on this side means the report text makes one
+hop to the model instead of travelling out to the website and back, and no OpenRouter key
+is needed on the web tier.
+
+Set `VOICE_WORKER_TOKEN` to enable any of this; see **Enabling the voice studio** in
+[API.md](API.md). Unset, the worker endpoints return `503` and consoles show the studio as
+offline.
 
 ## Injury feed database
 
