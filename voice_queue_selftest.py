@@ -15,8 +15,16 @@ import sys
 import threading
 import time
 
-import db
-import voice_jobs
+# The service gets DB_PASSWORD from /etc/afplna.env via systemd; an interactive shell
+# gets none of it, and the failure surfaces as a confusing "Access denied ... (using
+# password: NO)". Bootstrap first and, critically, *before* importing anything that
+# reads config — config.py resolves the database settings at import time, so a later
+# load would be too late to matter.
+import envfile            # noqa: E402
+ENV_REPORT = envfile.bootstrap()
+
+import db                 # noqa: E402
+import voice_jobs         # noqa: E402
 
 # Far outside the real id space; every row this script writes carries it, and the
 # cleanup at the end deletes strictly by this id.
@@ -48,7 +56,23 @@ def cleanup() -> None:
 
 def main() -> int:
     print('Voice queue self-test\n')
-    voice_jobs.ensure_schema()
+
+    if ENV_REPORT.get('missing'):
+        # Say exactly what is missing and how to supply it, rather than letting the
+        # first query fail with a database error that names none of that.
+        for line in envfile.guidance(ENV_REPORT):
+            print(line)
+        return 2
+    if ENV_REPORT.get('source') and ENV_REPORT['source'] != 'environment':
+        print(f"environment loaded from {ENV_REPORT['source']}\n")
+
+    try:
+        voice_jobs.ensure_schema()
+    except Exception as e:
+        print(f'  FAIL  could not reach the database: {e}')
+        print('\nThe tables are created on demand, so this is a connection problem,')
+        print('not a schema one. Check DB_HOST/DB_USER/DB_PASSWORD in /etc/afplna.env.')
+        return 1
     cleanup()
 
     # -- schema -------------------------------------------------------------
