@@ -14,6 +14,7 @@ Nothing belonging to a real account is read or touched.
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 
 # The service gets DB_PASSWORD from /etc/afplna.env via systemd; an interactive shell
 # gets none of it, and the failure surfaces as a confusing "Access denied ... (using
@@ -84,6 +85,17 @@ def main() -> int:
             check('voice_jobs table exists', cur.fetchone() is not None)
             cur.execute('SHOW TABLES LIKE %s', (voice_jobs.WORKERS_TABLE,))
             check('voice_workers table exists', cur.fetchone() is not None)
+
+            # Reported, not asserted. The queue never reads the database's clock — it
+            # writes and compares datetime.now() from this host throughout — so a
+            # difference here is harmless. It is printed because it is precisely the
+            # thing that makes a lease or heartbeat look wrong to a human reading rows
+            # by hand, and because a query using NOW() would quietly inherit it.
+            cur.execute('SELECT NOW()')
+            db_now = cur.fetchone()[0]
+            skew = (db_now - datetime.now()).total_seconds()
+            note = 'in step' if abs(skew) < 60 else f'{skew / 3600:+.1f} h from this host'
+            print(f'  note  database clock reads {db_now} ({note})')
     finally:
         conn.close()
 
@@ -168,12 +180,17 @@ def main() -> int:
         check('another worker cannot read the claim', e.status == 409, f'status {e.status}')
 
     # -- lease expiry -------------------------------------------------------
+    # Expire the lease with a PYTHON datetime, not MySQL's NOW(). Every timestamp the
+    # queue writes and every comparison it makes uses datetime.now() on this host, so
+    # the two clocks never meet in production — but a test that reached for NOW() here
+    # would silently depend on the database server agreeing with this one, and report a
+    # timezone difference as a broken reaper.
     print('\nlease expiry')
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f'UPDATE {voice_jobs.TABLE} SET lease_expires = '
-                        f'DATE_SUB(NOW(), INTERVAL 1 HOUR) WHERE id=%s', (job_id,))
+            cur.execute(f'UPDATE {voice_jobs.TABLE} SET lease_expires=%s WHERE id=%s',
+                        (datetime.now() - timedelta(hours=1), job_id))
         conn.commit()
     finally:
         conn.close()
@@ -184,7 +201,16 @@ def main() -> int:
     check('attempt count survived', back['attempts'] >= 1, str(back.get('attempts')))
 
     reclaimed = voice_jobs.claim_next('selftest-worker-second-pass')
-    check('a fresh worker can take it', reclaimed and reclaimed['id'] == job_id)
+    check('a fresh worker can take it',
+          bool(reclaimed) and reclaimed['id'] == job_id,
+          'nothing was claimable' if not reclaimed else f"got job {reclaimed['id']}")
+    if not reclaimed:
+        # Without a claim there is no worker id, and every check after this one is
+        # about the job this worker holds. Stop cleanly rather than dying on a None.
+        print('\n  cannot continue without a reclaimed job')
+        cleanup()
+        print('\n' + f'{len(_failures)} FAILED: ' + ', '.join(_failures))
+        return 1
     worker = reclaimed['worker_id']
 
     # -- completion ---------------------------------------------------------
@@ -218,9 +244,10 @@ def main() -> int:
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute(f'UPDATE {voice_jobs.WORKERS_TABLE} SET last_seen = '
-                        f'DATE_SUB(NOW(), INTERVAL 1 HOUR) WHERE account_id=%s',
-                        (TEST_ACCOUNT,))
+            # Python's clock again, for the same reason as the lease above.
+            cur.execute(f'UPDATE {voice_jobs.WORKERS_TABLE} SET last_seen=%s '
+                        f'WHERE account_id=%s',
+                        (datetime.now() - timedelta(hours=1), TEST_ACCOUNT))
         conn.commit()
     finally:
         conn.close()
