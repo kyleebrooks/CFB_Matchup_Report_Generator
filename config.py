@@ -30,6 +30,20 @@ PODCASTS_DIR = os.getenv('PODCASTS_DIR', os.path.join(BASE_DIR, 'podcasts'))
 WATERMARK_PATH = os.path.join(BASE_DIR, 'AFPLNA_LOGO.png')
 
 # ---------------------------------------------------------------------------
+# Voice studio — external VibeVoice workstations that render episodes for us
+# ---------------------------------------------------------------------------
+# A shared token, deliberately separate from any account API key: the workstation
+# polling this queue lives on someone's desk, and a leak there must not hand out the
+# ability to read reports or spend money on report generation. Unset disables the
+# worker endpoints entirely.
+VOICE_WORKER_TOKEN = os.getenv('VOICE_WORKER_TOKEN')
+# How long a studio may hold a claimed job without reporting progress before it goes
+# back in the queue. Long, because one render stage can legitimately take minutes.
+VOICE_JOB_LEASE_SECONDS = int(os.getenv('VOICE_JOB_LEASE_SECONDS', '900'))
+# Largest episode a studio may post back.
+VOICE_JOB_MAX_UPLOAD_MB = int(os.getenv('VOICE_JOB_MAX_UPLOAD_MB', '200'))
+
+# ---------------------------------------------------------------------------
 # CollegeFootballData (CFBD)
 # ---------------------------------------------------------------------------
 CFBD_BASE_URL = os.getenv('CFBD_BASE_URL', 'https://api.collegefootballdata.com')

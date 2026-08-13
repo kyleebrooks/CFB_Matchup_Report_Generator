@@ -256,6 +256,85 @@ Twenty sections and eight charts, with a projected final score anchored to a det
 
 ---
 
+## Voice studio
+
+Episodes rendered by a VibeVoice workstation the account owns, rather than by this
+service's OpenRouter TTS. The workstation sits behind a home NAT, so this service never
+calls it: the workstation polls, claims, renders and posts the audio back. A finished
+episode is published through the same path as any other and is indistinguishable
+downstream — same table, same filename convention, same RSS feed.
+
+Two credentials are in play. The console uses its **account key**; the workstation uses a
+**shared worker token** (`VOICE_WORKER_TOKEN`) plus an `X-Worker-Id` header identifying
+the machine. The token is deliberately not an account key: it lives on a desk we do not
+administer, so a leak must not expose reports or report-generation spend.
+
+### Console side (account key)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/voice-jobs` | Queue an episode → `201` |
+| `GET` | `/v1/voice-jobs` | This account's recent jobs |
+| `GET` | `/v1/voice-jobs/{id}` | One job's state and progress |
+| `POST` | `/v1/voice-jobs/{id}/cancel` | Abandon a job |
+| `GET` | `/v1/voice-studio` | Is a studio online, and what voices does it have |
+| `POST` | `/v1/podcasts/script` | Write a two-host script from reports + instructions |
+| `GET` | `/v1/openrouter/models` | Text-to-text models, for the script picker |
+
+```bash
+curl -X POST https://api.example.com/v1/voice-jobs \
+  -H "X-Api-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"title":"Week 3 Preview",
+       "script":"Speaker 1: Welcome in.\nSpeaker 2: Big slate today.",
+       "automation":"cfb_reports_podcast",
+       "preset":"podcast",
+       "speakers":{"1":"Johnny_Vibe","2":"Ed_Clean_Vibe"}}'
+```
+
+`title` becomes both the episode title and its filename. `speakers` maps speaker number
+to a voice profile name on the workstation; omit it, or omit individual speakers, and the
+studio falls back to whatever defaults are saved there for that automation.
+
+`GET /v1/voice-studio` answers even when no studio has ever checked in — the console
+renders an offline badge from it and must not break because the workstation is switched
+off:
+
+```json
+{"online": true, "busy": false, "worker_id": "kylee-desktop",
+ "catalog": {"voices": ["Johnny_Vibe", "Ed_Clean_Vibe"],
+             "presets": ["podcast", "comedic"],
+             "models": ["vibevoice/VibeVoice-7B"]},
+ "last_seen": "2026-08-12 21:40:11", "seconds_ago": 12}
+```
+
+`POST /v1/podcasts/script` takes `{instructions, report_filenames[], model, host_a,
+host_b, minutes}` and returns a script already in the studio's two-speaker format. The
+reports are read from this disk and their text goes straight to the model — it never
+travels out to the website and back.
+
+### Workstation side (worker token)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/voice-jobs/next` | Claim the oldest queued job → `200`, or `204` when idle |
+| `PATCH` | `/v1/voice-jobs/{id}` | `{stage, percent}` — also extends the lease |
+| `POST` | `/v1/voice-jobs/{id}/audio` | Raw MP3/WAV body → publishes the episode |
+| `POST` | `/v1/voice-jobs/{id}/fail` | `{error}` |
+| `POST` | `/v1/voice-workers/heartbeat` | `{account_id, label, catalog, busy}` |
+
+A claim carries a **lease** (`VOICE_JOB_LEASE_SECONDS`, default 900). Every `PATCH`
+renews it. If the workstation is rebooted or crashes mid-render, the lease expires and the
+job returns to `queued` for the next poll — nothing was published, because publication
+only happens when audio actually arrives.
+
+Verify the queue against the real database after deploying:
+
+```bash
+cd /opt/afplna && ./venv/bin/python voice_queue_selftest.py
+```
+
+---
+
 # Part 2 — Legacy API (unchanged)
 
 Authenticates with the single `SERVICE_API_KEY`.
@@ -316,6 +395,38 @@ curl -sS -X POST https://HOST/v1/admin/accounts \
   -H "X-Api-Key: $ADMIN_API_KEY" -H 'Content-Type: application/json' \
   -d '{"account_name":"CFBReports.com","allowed_reports":["team","matchup"]}'
 ```
+
+## Enabling the voice studio
+
+Only needed if an account renders episodes on its own VibeVoice workstation. Without
+`VOICE_WORKER_TOKEN` set, every worker endpoint answers `503` and the console simply shows
+the studio as offline — the rest of the service is unaffected.
+
+```bash
+# generate a token
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+```bash
+# /etc/afplna.env
+VOICE_WORKER_TOKEN='the-token-you-just-generated'
+# optional:
+VOICE_JOB_LEASE_SECONDS=900      # how long a studio may go quiet mid-render
+VOICE_JOB_MAX_UPLOAD_MB=200      # largest episode a studio may post back
+```
+
+```bash
+cd /opt/afplna && git pull
+./venv/bin/python -c "import voice_jobs; voice_jobs.ensure_schema()"
+sudo systemctl restart afplna
+
+# prove the queue works against the real database
+./venv/bin/python voice_queue_selftest.py
+```
+
+The same token goes into the workstation's `.env` as `CFBR_WORKER_TOKEN`. If nginx fronts
+the API, make sure `client_max_body_size` is at least `VOICE_JOB_MAX_UPLOAD_MB` or
+episodes will be refused at the proxy before they reach the service.
 
 ---
 
