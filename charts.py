@@ -1346,6 +1346,206 @@ def build_recap_charts(recap: dict, home_meta: dict, away_meta: dict,
 
 
 # ---------------------------------------------------------------------------
+# Conference publication charts
+# ---------------------------------------------------------------------------
+# Team logos for the standings strip. Fetched once per process, fail-soft: an
+# unreachable CDN degrades a logo to its team's name, never the chart.
+_LOGO_CACHE: dict = {}
+
+
+def _logo_image(url: str | None):
+    if not url:
+        return None
+    if url in _LOGO_CACHE:
+        return _LOGO_CACHE[url]
+    img = None
+    try:
+        import io as _io
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            raw = resp.read()
+        img = plt.imread(_io.BytesIO(raw), format='png')
+    except Exception:
+        img = None
+    _LOGO_CACHE[url] = img
+    return img
+
+
+def chart_conference_lines(games):
+    """Every upcoming game: our ratings number vs the market's, both labeled.
+
+    Paired horizontal bars per game — nothing sampled, nothing truncated — with
+    the CFBReports stored projection marked wherever one exists. Positive bars
+    favor the home side.
+    """
+    rows = [g for g in games if g.get('model_margin_home') is not None
+            or g.get('market_margin_home') is not None]
+    if not rows:
+        return None
+    rows = sorted(rows, key=lambda g: g.get('start') or '')[::-1]
+    labels = [f"{g['away']} @ {g['home']}" for g in rows]
+    idx = range(len(rows))
+    fig, ax = plt.subplots(figsize=(FIG_W, max(FIG_H, 1.0 + 0.85 * len(rows))))
+    bar_h = 0.34
+    any_projection = False
+    for i, g in enumerate(rows):
+        market = g.get('market_margin_home')
+        model = g.get('model_margin_home')
+        if market is not None:
+            ax.barh(i - bar_h / 2, market, height=bar_h,
+                    color=config.CHART_MUTED, zorder=3)
+        if model is not None:
+            ax.barh(i + bar_h / 2, model, height=bar_h,
+                    color=config.CHART_FALLBACK_HOME, zorder=3)
+        proj = (g.get('cfbreports_projection') or {})
+        ours = proj.get('margin_home') if proj.get('available', True) else None
+        if ours is not None:
+            any_projection = True
+            ax.plot([float(ours)], [i], marker='D', markersize=7,
+                    color=config.CHART_FALLBACK_AWAY, zorder=4,
+                    linestyle='none')
+    ax.axvline(0, color=config.CHART_TEXT, linewidth=1)
+    ax.set_yticks(list(idx))
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel('projected home margin (positive = home favored)')
+    _grid(ax, axis='x')
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    handles = [Patch(color=config.CHART_MUTED, label='Market line'),
+               Patch(color=config.CHART_FALLBACK_HOME, label='Ratings consensus')]
+    if any_projection:
+        handles.append(Line2D([], [], marker='D', linestyle='none',
+                              color=config.CHART_FALLBACK_AWAY,
+                              label='CFBReports projection'))
+    ax.legend(handles=handles, loc='lower right', fontsize=8, frameon=False)
+    fig.suptitle('Our Number vs. The Market — every game', fontsize=13,
+                 fontweight='bold', color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_conference_results(games):
+    """Every final against its closing line: the cover, visible at a glance."""
+    rows = [g for g in games if g.get('margin') is not None]
+    if not rows:
+        return None
+    rows = sorted(rows, key=lambda g: g.get('start') or '')[::-1]
+    labels = [f"{g['away']} @ {g['home']}" for g in rows]
+    fig, ax = plt.subplots(figsize=(FIG_W, max(FIG_H, 1.0 + 0.85 * len(rows))))
+    for i, g in enumerate(rows):
+        margin = g['margin']
+        covered = g.get('against_the_spread')
+        color = (config.CHART_FALLBACK_HOME if covered == 'home covered'
+                 else config.CHART_FALLBACK_AWAY if covered == 'away covered'
+                 else config.CHART_MUTED)
+        ax.barh(i, margin, height=0.55, color=color, zorder=3)
+        market = g.get('market_margin_home')
+        if market is not None:
+            ax.plot([float(market)], [i], marker='|', markersize=18,
+                    markeredgewidth=3, color=config.CHART_TEXT, zorder=4,
+                    linestyle='none')
+    ax.axvline(0, color=config.CHART_TEXT, linewidth=1)
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel('final home margin (bar) vs closing line (tick)')
+    _grid(ax, axis='x')
+    fig.suptitle('Against the Line — result vs the closing spread', fontsize=13,
+                 fontweight='bold', color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+def chart_conference_teams(standings, logos):
+    """The standings strip: every team's record and SP+ rating, logo included."""
+    rows = [s for s in standings if s.get('team')]
+    if len(rows) < 2:
+        return None
+    rows = rows[::-1]
+    fig, ax = plt.subplots(figsize=(FIG_W, max(FIG_H, 0.9 + 0.62 * len(rows))))
+    ratings = [float(s['sp_rating']) if s.get('sp_rating') is not None else 0.0
+               for s in rows]
+    bars = ax.barh(range(len(rows)), ratings, height=0.6,
+                   color=config.CHART_FALLBACK_HOME, zorder=3)
+    for i, s in enumerate(rows):
+        ax.annotate(f"  {s['conference']} conf · {s['overall']} overall",
+                    (max(ratings[i], 0), i), fontsize=8,
+                    color=config.CHART_TEXT, va='center',
+                    xytext=(6, 0), textcoords='offset points')
+        img = _logo_image((logos or {}).get(s['team']))
+        if img is not None:
+            try:
+                from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+                ab = AnnotationBbox(OffsetImage(img, zoom=0.10), (0, i),
+                                    xybox=(-24, 0), xycoords='data',
+                                    boxcoords='offset points', frameon=False)
+                ax.add_artist(ab)
+            except Exception:
+                pass
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels([s['team'] for s in rows], fontsize=9)
+    ax.set_xlabel('SP+ rating')
+    _grid(ax, axis='x')
+    fig.suptitle('The Conference, Ranked', fontsize=13, fontweight='bold',
+                 color=config.CHART_TEXT)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return _encode(fig)
+
+
+CONFERENCE_CHART_SPECS = {
+    'roundup': [
+        ("conference_teams", "The Conference, Ranked",
+         "Every team's conference and overall record beside its SP+ rating."),
+        ("conference_lines", "Our Number vs. The Market",
+         "Every upcoming game: the closing market line and our ratings-consensus "
+         "margin side by side (positive favors the home team), with the stored "
+         "CFBReports projection marked where one has been published."),
+    ],
+    'wrap': [
+        ("conference_teams", "The Conference, Ranked",
+         "Every team's conference and overall record beside its SP+ rating."),
+        ("conference_results", "Against the Line",
+         "Every final's home margin as a bar against the closing spread as a "
+         "tick: bars past the tick covered."),
+        ("week_movers", "Elo Movers",
+         "The teams whose rating moved most on the week's results."),
+        ("week_excitement", "The Best Games",
+         "The week's finals ranked by excitement index."),
+    ],
+}
+
+
+def build_conference_charts(kind: str, data: dict, extras: dict) -> list[dict]:
+    if not CHARTS_AVAILABLE:
+        raise ChartsUnavailable(
+            f"matplotlib is not importable on this host ({IMPORT_ERROR}). "
+            f"Install it with: pip install -r requirements.txt")
+    _apply_style()
+    builders = {
+        'conference_teams': lambda: chart_conference_teams(
+            data.get('standings') or [], data.get('team_logos') or {}),
+        'conference_lines': lambda: chart_conference_lines(data['games']),
+        'conference_results': lambda: chart_conference_results(data['games']),
+        'week_movers': lambda: chart_week_movers(extras.get('finals_detail')),
+        'week_excitement': lambda: chart_week_excitement(extras.get('finals_detail')),
+    }
+    out = []
+    for key, title, caption in CONFERENCE_CHART_SPECS[kind]:
+        img, available = None, True
+        try:
+            img = builders[key]()
+        except Exception as e:
+            logging.warning(f"Conference chart '{key}' failed to render: {e}")
+            img = None
+        if not img:
+            available = False
+            img = _placeholder(title, "No data available from CollegeFootballData "
+                                      "for this chart.")
+        out.append({"key": key, "title": title, "caption": caption,
+                    "img": img, "available": available})
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Weekly publication charts
 # ---------------------------------------------------------------------------
 WEEKLY_CHART_SPECS = {
