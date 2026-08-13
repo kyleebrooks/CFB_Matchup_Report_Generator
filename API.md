@@ -417,12 +417,25 @@ VOICE_JOB_MAX_UPLOAD_MB=200      # largest episode a studio may post back
 
 ```bash
 cd /opt/afplna && git pull
-./venv/bin/python -c "import voice_jobs; voice_jobs.ensure_schema()"
 sudo systemctl restart afplna
 
 # prove the queue works against the real database
 ./venv/bin/python voice_queue_selftest.py
 ```
+
+There is no separate migration step: `voice_jobs.ensure_schema()` runs on first use and
+the self-test calls it, so the tables appear on their own.
+
+If you would rather create them explicitly, load the environment first — an interactive
+shell does not get `/etc/afplna.env` the way systemd does, and without it the command
+fails with `Access denied for user '…' (using password: NO)`:
+
+```bash
+./venv/bin/python -c "import envfile; envfile.bootstrap(); import voice_jobs; voice_jobs.ensure_schema()"
+```
+
+`envfile.bootstrap()` has to come before anything that imports `config`, which resolves
+the database settings at import time. The self-test does this for you.
 
 The same token goes into the workstation's `.env` as `CFBR_WORKER_TOKEN`. If nginx fronts
 the API, make sure `client_max_body_size` is at least `VOICE_JOB_MAX_UPLOAD_MB` or
