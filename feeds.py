@@ -118,6 +118,45 @@ NEWS_ANGLES = [
                 'battles resolved'),
 ]
 
+# ESPN's structured college-football injury listing is thin — often empty
+# outside the season — so the injury wire searches as well, exactly like the
+# news wire, with the same page-level date verification.
+INJURY_ANGLES = [
+    ('breaking', 'college football players newly injured, newly ruled out, '
+                 'newly listed as questionable or doubtful, or carted off: '
+                 'the injury news that broke today across FBS programs'),
+    ('status', 'college football injury STATUS CHANGES and availability '
+               'updates: players cleared to return, activated from injury, '
+               'upgraded or downgraded for an upcoming game, season-ending '
+               'diagnoses confirmed, surgeries scheduled or completed, and '
+               'conference availability-report designations just published'),
+]
+
+
+def _injury_jobs(window_days: int, recent_headlines: list[str],
+                 last_run_at: str | None = None) -> list[dict]:
+    suppress = ''
+    if recent_headlines:
+        listed = '; '.join(h[:70] for h in recent_headlines[:15])
+        suppress = (f". Also exclude injuries already on our wire unless the "
+                    f"player's status has actually CHANGED: {listed}")
+    anchor = ''
+    if last_run_at:
+        anchor = (f' Our previous pull ran at {last_run_at} UTC — the target '
+                  f'is what changed SINCE then.')
+    rule = _DATE_RULE.format(days=window_days)
+    return [{
+        'key': f'feed_injury_{key}', 'scope': 'league', 'topic': 'injury',
+        'section': 'Injury Report', 'window': window_days,
+        'focus': f'{focus}. Name the player, position, team and the exact '
+                 f'designation for every item — this feeds a live injury '
+                 f'wire, so breadth across many programs matters. {rule}'
+                 f'{anchor}',
+        'exclude': ('transfers, suspensions and other non-medical roster '
+                    'news; long-settled injuries with no new development'
+                    + suppress),
+    } for key, focus in INJURY_ANGLES]
+
 
 def _news_jobs(window_days: int, recent_headlines: list[str],
                last_run_at: str | None = None) -> list[dict]:
@@ -412,8 +451,11 @@ def _item_key(feed: str, finding: dict) -> str:
     while a re-report of the same designation is not.
     """
     if feed == 'injuries':
+        # The designation is part of the identity: Questionable -> Out is the
+        # update the wire exists to carry, while the same status re-reported
+        # is not.
         basis = '|'.join(_norm(finding.get(k))
-                         for k in ('team', 'player', 'headline'))
+                         for k in ('team', 'player', 'headline', 'status'))
     else:
         basis = _norm(finding.get('headline'))
     return hashlib.sha1(basis.encode('utf-8')).hexdigest()
@@ -493,8 +535,13 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
                 cur.execute(
                     f'SELECT id FROM {ITEMS_TABLE} WHERE feed=%s AND item_key=%s',
                     (feed, key))
-                if cur.fetchone() or _url_seen(cur, feed,
-                                               f.get('source_url') or ''):
+                if cur.fetchone():
+                    continue
+                # The one-article-once gate is a NEWS rule: an injury page is
+                # the standing source for a player and legitimately reports
+                # his next status change from the same URL.
+                if feed != 'injuries' and _url_seen(cur, feed,
+                                                    f.get('source_url') or ''):
                     continue
                 cur.execute(
                     f'INSERT INTO {ITEMS_TABLE} (feed, headline, detail, team, '
@@ -604,20 +651,42 @@ def _refresh_injury_store() -> tuple[int, int]:
     return len(teams), inserted
 
 
-def _pull_injuries(state: dict) -> dict:
-    """Refresh from ESPN, then read the service's injury database.
+def _known_statuses() -> dict:
+    """The status the wire last carried per (team, player) — the baseline a
+    change is measured against."""
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT team, player, status FROM {ITEMS_TABLE} '
+                f"WHERE feed='injuries' AND player IS NOT NULL ORDER BY id ASC")
+            rows = cur.fetchall() or []
+    finally:
+        conn.close()
+    return {(_norm(r[0]), _norm(r[1])): (r[2] or '') for r in rows}
 
-    The rotowire table is filled by ESPN's structured injury listing, every
-    matchup/team report's research, and the scheduled sweeps. The pull first
-    refreshes it from ESPN (free, structured), then materializes rows whose
-    designation is genuinely recent — dated by when ESPN first listed it or
-    when the article ran, never by when we happened to fetch.
+
+def _pull_injuries(state: dict) -> dict:
+    """Two sources, one wire: ESPN's structured designations and live research.
+
+    ESPN's college-football injury listing is authoritative when it has data
+    but is frequently empty (it carried nothing for any major program in
+    mid-August 2026), so it cannot be the only source. The pull refreshes the
+    injury database from ESPN, materializes designations that are genuinely
+    new — first listed recently, or a STATUS CHANGE against what the wire
+    already carries — and then searches for the injury news that broke since
+    the last pull, verified against each article page's own date exactly like
+    the news wire.
     """
     import injuries as injuries_mod
     window_days = FEEDS['injuries']['window_days']
-    teams_checked, store_inserted = _refresh_injury_store()
+    teams_checked, _ = _refresh_injury_store()
+    known = _known_statuses()
+    today_iso = datetime.utcnow().date().isoformat()
 
-    cutoff = (datetime.utcnow().date() - timedelta(days=window_days)).isoformat()
+    # --- source 1: the injury database (ESPN + report research + sweeps) ----
+    store_window = max(window_days, config.INJURY_WINDOW_DAYS)
+    cutoff = (datetime.utcnow().date() - timedelta(days=store_window)).isoformat()
     conn = injuries_mod._connect()
     try:
         rows = conn.execute(
@@ -628,19 +697,61 @@ def _pull_injuries(state: dict) -> dict:
             f"ORDER BY news_date DESC, id DESC LIMIT 400", (cutoff,)).fetchall()
     finally:
         conn.close()
-    findings = [{
-        'headline': r[2], 'detail': r[3], 'team': r[0], 'player': r[1],
-        'position': r[4], 'status': r[5], 'impact': r[6],
-        'source_name': r[7], 'source_url': r[8],
-        'published': _designation_date(r[3], r[9]),
-        'confidence': r[10],
-    } for r in rows]
-    counts = _store_items('injuries', findings, window_days)
-    status = (f"OK — ESPN refreshed across {teams_checked} team(s), "
-              f"{len(findings)} rows in the {window_days}-day window, "
-              f"{counts['inserted']} new designations, "
-              f"{counts['stale']} standing ones held back")
-    return {'found': len(findings), 'counts': counts, 'status': status}
+    store_findings = []
+    for r in rows:
+        team, player, status = r[0], r[1], (r[5] or '')
+        seen = known.get((_norm(team), _norm(player)))
+        # A designation the wire has never carried enters on its first-listed
+        # date; one it HAS carried only re-enters when the status changed —
+        # and a change is today's news whenever the injury first happened.
+        published = (today_iso if seen is not None and _norm(seen) != _norm(status)
+                     else _designation_date(r[3], r[9]))
+        store_findings.append({
+            'headline': r[2], 'detail': r[3], 'team': team, 'player': player,
+            'position': r[4], 'status': status, 'impact': r[6],
+            'source_name': r[7], 'source_url': r[8], 'published': published,
+            'confidence': r[10],
+        })
+    store_counts = _store_items('injuries', store_findings, store_window)
+
+    # --- source 2: live research, page-verified like the news wire ----------
+    research_counts = {'inserted': 0, 'stale': 0, 'undated': 0}
+    found_research = 0
+    api_key = db.resolve_openrouter_key()
+    if api_key:
+        settings = config.default_settings()
+        if state.get('research_model'):
+            settings['research_model'] = state['research_model']
+        if state.get('search_engine'):
+            settings['search_engine'] = state['search_engine']
+        recent = [r['headline'] for r in items('injuries', limit=25)]
+        jobs = _injury_jobs(window_days, recent,
+                            last_run_at=state.get('last_run_at'))
+        ctx = {'home_full': 'college football across the FBS', 'away_full': '',
+               'home_short': 'FBS', 'away_short': '',
+               'year': cfbd_season_year(), 'kickoff': None,
+               'now_utc': datetime.utcnow()}
+        try:
+            raw = research.run_research(api_key, ctx, settings, jobs=jobs)
+        except Exception as e:
+            logging.warning(f'Injury research failed (ESPN data still used): {e}')
+            raw = {}
+        research_findings = []
+        for job in jobs:
+            research_findings.extend((raw.get(job['key']) or {}).get('findings')
+                                     or [])
+        found_research = len(research_findings)
+        research_counts = _store_items('injuries', research_findings,
+                                       window_days, verify_pages=True)
+
+    counts = {k: store_counts[k] + research_counts[k]
+              for k in ('inserted', 'stale', 'undated')}
+    status = (f"OK — ESPN refreshed across {teams_checked} team(s); "
+              f"{len(store_findings)} database row(s) + {found_research} "
+              f"researched item(s); {counts['inserted']} new, "
+              f"{counts['stale']} not current, {counts['undated']} unverifiable")
+    return {'found': len(store_findings) + found_research, 'counts': counts,
+            'status': status}
 
 
 def run_pull(feed: str) -> dict:
