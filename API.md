@@ -407,6 +407,28 @@ the studio as offline — the rest of the service is unaffected.
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
+**First check where the service actually gets its environment.** Adding a variable to
+`/etc/afplna.env` only works if the unit loads that file:
+
+```bash
+systemctl cat afplna | grep -E 'Environment'
+```
+
+- An `EnvironmentFile=/etc/afplna.env` line — add the token to that file.
+- Only `Environment=NAME=value` lines — the env file is **not** read by the service
+  (`envfile.py` still uses it for CLI tools, which is what makes this easy to miss).
+  Either add a drop-in that loads it, which is the tidier fix:
+
+  ```bash
+  sudo systemctl edit afplna     # then add the two lines below, save
+  ```
+  ```ini
+  [Service]
+  EnvironmentFile=-/etc/afplna.env
+  ```
+
+  or set the variable inline in the unit alongside the others.
+
 ```bash
 # /etc/afplna.env
 VOICE_WORKER_TOKEN='the-token-you-just-generated'
@@ -414,6 +436,15 @@ VOICE_WORKER_TOKEN='the-token-you-just-generated'
 VOICE_JOB_LEASE_SECONDS=900      # how long a studio may go quiet mid-render
 VOICE_JOB_MAX_UPLOAD_MB=200      # largest episode a studio may post back
 ```
+
+Confirm the **running process** has it — the file being right proves nothing:
+
+```bash
+curl -sS "https://HOST/health?api_key=$SERVICE_API_KEY" | jq .checks.voice_studio
+```
+
+`{"enabled": true, ...}` means the token reached the process. `false` comes with a hint
+naming the most common cause.
 
 ```bash
 cd /opt/afplna && git pull

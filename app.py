@@ -439,6 +439,51 @@ def health():
         "path": config.WATERMARKS_DIR,
     }
 
+    # --- Voice studio ----------------------------------------------------
+    # Whether the external VibeVoice queue is switched on, and whether a workstation
+    # has checked in. Deliberately visible here: "is the token actually in the running
+    # process" was previously only answerable by reading /proc over SSH, which is a
+    # ridiculous way to ask a yes/no question about a deployment.
+    voice = {"enabled": bool(config.VOICE_WORKER_TOKEN), "ok": True}
+    if not voice["enabled"]:
+        voice["hint"] = (
+            "VOICE_WORKER_TOKEN is not set in this process. Putting it in "
+            "/etc/afplna.env is only enough if the unit actually loads that file — "
+            "check 'systemctl cat afplna' for an EnvironmentFile= line."
+        )
+    else:
+        try:
+            import voice_jobs
+            studios = []
+            conn = db.get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f'SELECT worker_id, account_id, busy, last_seen '
+                        f'FROM {voice_jobs.WORKERS_TABLE} ORDER BY last_seen DESC LIMIT 5')
+                    for worker_id, account_id, busy, last_seen in (cur.fetchall() or []):
+                        age = (datetime.now() - last_seen).total_seconds() if last_seen else None
+                        studios.append({
+                            "worker_id": worker_id,
+                            "account_id": account_id,
+                            "busy": bool(busy),
+                            "seconds_ago": int(age) if age is not None else None,
+                            "online": age is not None and age <= voice_jobs.WORKER_ONLINE_SECONDS,
+                        })
+                    cur.execute(
+                        f'SELECT state, COUNT(*) FROM {voice_jobs.TABLE} GROUP BY state')
+                    voice["jobs"] = {state: n for state, n in (cur.fetchall() or [])}
+            finally:
+                conn.close()
+            voice["studios"] = studios
+            voice["studios_online"] = sum(1 for s in studios if s["online"])
+        except Exception as e:
+            # A queue that cannot be read is worth reporting, but it must not fail the
+            # whole health check — reports do not depend on it.
+            voice["ok"] = False
+            voice["error"] = str(e)[:300]
+    out["checks"]["voice_studio"] = voice
+
     import charts as charts_mod
     out["checks"]["charts"] = {
         "ok": charts_mod.CHARTS_AVAILABLE,
