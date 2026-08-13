@@ -29,7 +29,7 @@ STATE_TABLE = 'feed_state'
 META_TABLE = 'feed_meta'
 # Bump when the pull/dedup semantics change enough that old rows would
 # mislead: the migration clears both feeds once so the wire restarts clean.
-WIRE_LOGIC_VERSION = '2'
+WIRE_LOGIC_VERSION = '3'
 MAX_ITEMS_PER_FEED = 500          # the accessible history; older rows are trimmed
 MIN_INTERVAL_MIN = 30
 MAX_INTERVAL_MIN = 24 * 60
@@ -92,17 +92,18 @@ class FeedError(ValueError):
 # research and the scheduled sweeps), which is already dated and deduplicated.
 FEEDS = {
     'news': {'title': 'Breaking News', 'interval_minutes': 180,
-             'window_days': 2},
+             'window_days': 1},
     'injuries': {'title': 'Injury Report', 'interval_minutes': 360,
                  'window_days': 3},
 }
 
-_DATE_RULE = ("STRICT FRESHNESS RULE: only report items whose article "
-              "publication date you can verify is within the last {days} "
-              "days. EVERY finding must carry that date in 'published' "
-              "(ISO format like 2026-08-13 preferred). An item you cannot "
-              "date is an item you must omit — old stories presented as new "
-              "poison a live wire.")
+_DATE_RULE = ("STRICT FRESHNESS RULE: this wire carries TODAY's news. Only "
+              "report items published within the last {days} day(s), and put "
+              "the article's publication date in 'published' (ISO format like "
+              "2026-08-13). Know that the service independently verifies each "
+              "article page's real publication date and silently discards "
+              "anything older — reporting an old story wastes the whole slot, "
+              "so spend your effort on what actually broke today.")
 
 NEWS_ANGLES = [
     ('coaching', 'coaching and staff changes across FBS college football: '
@@ -118,21 +119,78 @@ NEWS_ANGLES = [
 ]
 
 
-def _news_jobs(window_days: int, recent_headlines: list[str]) -> list[dict]:
+def _news_jobs(window_days: int, recent_headlines: list[str],
+               last_run_at: str | None = None) -> list[dict]:
     suppress = ''
     if recent_headlines:
         listed = '; '.join(h[:70] for h in recent_headlines[:15])
         suppress = (f". Also exclude stories already on our wire unless there "
                     f"is a genuinely NEW development: {listed}")
+    anchor = ''
+    if last_run_at:
+        anchor = (f' Our previous pull ran at {last_run_at} UTC — the target '
+                  f'is what broke SINCE then.')
     rule = _DATE_RULE.format(days=window_days)
     return [{
         'key': f'feed_news_{key}', 'scope': 'league', 'topic': 'news',
         'section': 'Breaking News', 'window': window_days,
         'focus': f'{focus}. Report every distinct verified item, newest '
                  f'first — this feeds a live news wire, so breadth matters. '
-                 f'{rule}',
+                 f'{rule}{anchor}',
         'exclude': 'game recaps and box-score summaries' + suppress,
     } for key, focus in NEWS_ANGLES]
+
+
+# ---------------------------------------------------------------------------
+# Page-level date verification
+# ---------------------------------------------------------------------------
+# The model's self-reported dates proved unreliable — it will stamp an old
+# article "today" under pressure to deliver. So the wire checks the article
+# page itself: standard publication metadata that news CMSes emit. No metadata
+# found means no verification, and unverified means not on the wire.
+_PUB_PATTERNS = [
+    r'property=["\']article:published_time["\'][^>]*content=["\']([^"\']+)',
+    r'content=["\']([^"\']+)["\'][^>]*property=["\']article:published_time',
+    r'"datePublished"\s*:\s*"([^"]+)"',
+    r'itemprop=["\']datePublished["\'][^>]*content=["\']([^"\']+)',
+    r'name=["\'](?:publish-date|publication_date|date)["\'][^>]*content=["\']([^"\']+)',
+    r'<time[^>]+datetime=["\']([^"\']+)',
+]
+_PAGE_FETCH_CAP = 300 * 1024
+
+
+def _page_published(url: str):
+    """The article page's own publication date, or None. Never raises."""
+    import re
+    import requests
+    import injuries as injuries_mod
+    try:
+        resp = requests.get(
+            url, timeout=6, stream=True,
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; CFBReportsWire/1.0)'})
+        if resp.status_code >= 400:
+            return None
+        raw = b''
+        for chunk in resp.iter_content(chunk_size=32 * 1024):
+            raw += chunk
+            if len(raw) >= _PAGE_FETCH_CAP:
+                break
+        resp.close()
+        html = raw.decode('utf-8', 'replace')
+    except Exception:
+        return None
+    for pattern in _PUB_PATTERNS:
+        m = re.search(pattern, html, re.IGNORECASE)
+        if not m:
+            continue
+        value = m.group(1).strip()
+        try:
+            return datetime.fromisoformat(value[:10]).date()
+        except ValueError:
+            parsed = injuries_mod.parse_date_text(value)
+            if parsed:
+                return parsed
+    return None
 
 _schema_ready = False
 _state_lock = threading.Lock()
@@ -390,17 +448,21 @@ def _trim(feed: str) -> None:
 # ---------------------------------------------------------------------------
 # Pulling
 # ---------------------------------------------------------------------------
-def _store_items(feed: str, findings: list[dict], window_days: int) -> dict:
+def _store_items(feed: str, findings: list[dict], window_days: int,
+                 verify_pages: bool = False) -> dict:
     """The verification gate and the write: date-check, dedup, insert.
 
-    An item enters the wire only when its publication date parses AND falls
-    inside the feed's window — the model is told to date everything, so an
-    undatable item is treated as unverified, not as fresh.
+    With verify_pages the claimed date is not trusted at all: the article page
+    itself must carry a publication date (standard CMS metadata), and that
+    date must fall inside the window. No URL, no metadata, or an old page —
+    not on the wire. Store-sourced feeds skip the fetch; their dates are
+    already structural.
     """
     import injuries as injuries_mod
     now = datetime.utcnow()
     today = now.date()
     inserted = stale = undated = 0
+    checked_urls: dict[str, object] = {}
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -408,10 +470,22 @@ def _store_items(feed: str, findings: list[dict], window_days: int) -> dict:
                 headline = (f.get('headline') or '').strip()[:300]
                 if not headline:
                     continue
-                day = injuries_mod.parse_date_text(f.get('published') or '')
-                if day is None:
-                    undated += 1
-                    continue
+                if verify_pages:
+                    url = (f.get('source_url') or '').strip()
+                    if not url:
+                        undated += 1
+                        continue
+                    if url not in checked_urls:
+                        checked_urls[url] = _page_published(url)
+                    day = checked_urls[url]
+                    if day is None:
+                        undated += 1
+                        continue
+                else:
+                    day = injuries_mod.parse_date_text(f.get('published') or '')
+                    if day is None:
+                        undated += 1
+                        continue
                 if (today - day).days > window_days or day > today:
                     stale += 1
                     continue
@@ -460,7 +534,7 @@ def _pull_news(state: dict) -> dict:
 
     window_days = FEEDS['news']['window_days']
     recent = [r['headline'] for r in items('news', limit=25)]
-    jobs = _news_jobs(window_days, recent)
+    jobs = _news_jobs(window_days, recent, last_run_at=state.get('last_run_at'))
     ctx = {'home_full': 'college football across the FBS', 'away_full': '',
            'home_short': 'FBS', 'away_short': '',
            'year': cfbd_season_year(), 'kickoff': None,
@@ -472,27 +546,77 @@ def _pull_news(state: dict) -> dict:
         findings.extend(bucket.get('findings') or [])
         if bucket.get('error'):
             errors.append(bucket['error'][:80])
-    counts = _store_items('news', findings, window_days)
+    counts = _store_items('news', findings, window_days, verify_pages=True)
     if errors and not findings:
         status = f"Research error: {'; '.join(errors)[:180]}"
     else:
         status = (f"OK — {len(findings)} found across {len(jobs)} searches, "
-                  f"{counts['inserted']} new, {counts['stale']} stale dropped, "
-                  f"{counts['undated']} undated dropped")
+                  f"{counts['inserted']} new, {counts['stale']} page-dated old "
+                  f"and dropped, {counts['undated']} unverifiable and dropped")
     return {'found': len(findings), 'counts': counts, 'status': status}
 
 
+_FIRST_LISTED_RE = None
+
+
+def _designation_date(detail: str, news_date: str):
+    """The date a designation actually became news.
+
+    ESPN stamps every fetch 'today', which would keep months-old standing
+    designations permanently fresh. The real signal is the 'First listed
+    YYYY-MM-DD' marker the ESPN collector embeds in the detail — a designation
+    is NEW when ESPN first listed it recently, not when we last looked.
+    """
+    global _FIRST_LISTED_RE
+    if _FIRST_LISTED_RE is None:
+        import re
+        _FIRST_LISTED_RE = re.compile(r'First listed (\d{4}-\d{2}-\d{2})')
+    m = _FIRST_LISTED_RE.search(detail or '')
+    return m.group(1) if m else news_date
+
+
+def _refresh_injury_store() -> tuple[int, int]:
+    """Pull ESPN's current designations into the injury database, free.
+
+    Slate teams (upcoming ranked games) when the season provides them, the
+    full FBS list otherwise — the feed must not starve in weeks when no
+    report run or sweep happens to have filled the store.
+    """
+    import injuries as injuries_mod
+    from concurrent.futures import ThreadPoolExecutor
+    try:
+        teams = injuries_mod.slate_teams()
+    except Exception:
+        teams = []
+    if not teams:
+        try:
+            teams = injuries_mod.fbs_teams()
+        except Exception as e:
+            logging.warning(f'FBS team list unavailable for ESPN refresh: {e}')
+            return 0, 0
+    teams = teams[:60]
+    inserted = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for out in pool.map(
+                lambda t: injuries_mod._collect_espn(t['short'], t['full']),
+                teams):
+            inserted += out.get('inserted', 0)
+    return len(teams), inserted
+
+
 def _pull_injuries(state: dict) -> dict:
-    """No search at all: read the service's injury database.
+    """Refresh from ESPN, then read the service's injury database.
 
     The rotowire table is filled by ESPN's structured injury listing, every
-    matchup/team report's research, and the scheduled sweeps — dated,
-    per-player, already deduplicated at the source. The feed materializes its
-    recent, confident rows; 'low' confidence means the date was assumed, and
-    assumed freshness has no place on a wire.
+    matchup/team report's research, and the scheduled sweeps. The pull first
+    refreshes it from ESPN (free, structured), then materializes rows whose
+    designation is genuinely recent — dated by when ESPN first listed it or
+    when the article ran, never by when we happened to fetch.
     """
     import injuries as injuries_mod
     window_days = FEEDS['injuries']['window_days']
+    teams_checked, store_inserted = _refresh_injury_store()
+
     cutoff = (datetime.utcnow().date() - timedelta(days=window_days)).isoformat()
     conn = injuries_mod._connect()
     try:
@@ -501,18 +625,21 @@ def _pull_injuries(state: dict) -> dict:
             f"status, analysis_text, source_name, source_url, news_date, "
             f"confidence FROM {injuries_mod.TABLE} "
             f"WHERE news_date >= ? AND confidence != 'low' "
-            f"ORDER BY news_date DESC, id DESC LIMIT 300", (cutoff,)).fetchall()
+            f"ORDER BY news_date DESC, id DESC LIMIT 400", (cutoff,)).fetchall()
     finally:
         conn.close()
     findings = [{
         'headline': r[2], 'detail': r[3], 'team': r[0], 'player': r[1],
         'position': r[4], 'status': r[5], 'impact': r[6],
-        'source_name': r[7], 'source_url': r[8], 'published': r[9],
+        'source_name': r[7], 'source_url': r[8],
+        'published': _designation_date(r[3], r[9]),
         'confidence': r[10],
     } for r in rows]
     counts = _store_items('injuries', findings, window_days)
-    status = (f"OK — {len(findings)} dated rows in the injury database's "
-              f"{window_days}-day window, {counts['inserted']} new")
+    status = (f"OK — ESPN refreshed across {teams_checked} team(s), "
+              f"{len(findings)} rows in the {window_days}-day window, "
+              f"{counts['inserted']} new designations, "
+              f"{counts['stale']} standing ones held back")
     return {'found': len(findings), 'counts': counts, 'status': status}
 
 
