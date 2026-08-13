@@ -17,7 +17,7 @@ import hashlib
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 import db
@@ -26,6 +26,10 @@ import research
 
 ITEMS_TABLE = 'feed_items'
 STATE_TABLE = 'feed_state'
+META_TABLE = 'feed_meta'
+# Bump when the pull/dedup semantics change enough that old rows would
+# mislead: the migration clears both feeds once so the wire restarts clean.
+WIRE_LOGIC_VERSION = '2'
 MAX_ITEMS_PER_FEED = 500          # the accessible history; older rows are trimmed
 MIN_INTERVAL_MIN = 30
 MAX_INTERVAL_MIN = 24 * 60
@@ -67,47 +71,68 @@ CREATE TABLE IF NOT EXISTS {STATE_TABLE} (
 """
 
 
+_META_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS {META_TABLE} (
+    k VARCHAR(40) PRIMARY KEY,
+    v VARCHAR(120) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 class FeedError(ValueError):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
         self.status = status
 
 
-# What each feed asks the research model for. The window stays short — pulls
-# repeat, so each one only needs what is new since roughly the last one.
+# The news feed searches from several angles per pull — one broad ask returns a
+# couple of headline items and stops, which is how the wire went thin. The
+# injury feed does not search at all: it reads the service's injury database
+# (the rotowire table, filled by ESPN's structured listing plus every report's
+# research and the scheduled sweeps), which is already dated and deduplicated.
 FEEDS = {
-    'news': {
-        'title': 'Breaking News',
-        'interval_minutes': 180,
-        'job': {
-            'key': 'feed_news', 'scope': 'league', 'topic': 'news',
-            'section': 'Breaking News', 'window': 2,
-            'focus': ('the latest breaking college football news across the '
-                      'FBS: coaching hires and firings, transfers, '
-                      'suspensions, eligibility rulings, commitments flipping, '
-                      'and program developments. Report every distinct '
-                      'verified item from the last two days, newest first — '
-                      'this feeds a live news wire, so breadth matters'),
-            'exclude': 'game recaps and box-score summaries',
-        },
-    },
-    'injuries': {
-        'title': 'Injury Report',
-        'interval_minutes': 360,
-        'job': {
-            'key': 'feed_injuries', 'scope': 'league', 'topic': 'injury',
-            'section': 'Injury Report', 'window': 3,
-            'focus': ('new injury news across FBS college football: fresh '
-                      'injuries, surgeries, availability designations, '
-                      'game-time decisions, players ruled out or returning. '
-                      'Name the player, position, team and status for every '
-                      'item. Report every distinct verified item from the '
-                      'last three days — this feeds a live injury wire, so '
-                      'breadth across many teams matters'),
-            'exclude': 'non-medical roster news and old season-ending recaps',
-        },
-    },
+    'news': {'title': 'Breaking News', 'interval_minutes': 180,
+             'window_days': 2},
+    'injuries': {'title': 'Injury Report', 'interval_minutes': 360,
+                 'window_days': 3},
 }
+
+_DATE_RULE = ("STRICT FRESHNESS RULE: only report items whose article "
+              "publication date you can verify is within the last {days} "
+              "days. EVERY finding must carry that date in 'published' "
+              "(ISO format like 2026-08-13 preferred). An item you cannot "
+              "date is an item you must omit — old stories presented as new "
+              "poison a live wire.")
+
+NEWS_ANGLES = [
+    ('coaching', 'coaching and staff changes across FBS college football: '
+                 'hires, firings, resignations, interim appointments, '
+                 'coordinator and position-coach moves'),
+    ('portal', 'transfer portal entries, transfer commitments, eligibility '
+               'and NCAA rulings, and waiver decisions across FBS college '
+               'football'),
+    ('program', 'suspensions, disciplinary actions, off-field developments '
+                'and major program news across FBS college football: '
+                'facilities, NIL, scheduling, realignment, quarterback '
+                'battles resolved'),
+]
+
+
+def _news_jobs(window_days: int, recent_headlines: list[str]) -> list[dict]:
+    suppress = ''
+    if recent_headlines:
+        listed = '; '.join(h[:70] for h in recent_headlines[:15])
+        suppress = (f". Also exclude stories already on our wire unless there "
+                    f"is a genuinely NEW development: {listed}")
+    rule = _DATE_RULE.format(days=window_days)
+    return [{
+        'key': f'feed_news_{key}', 'scope': 'league', 'topic': 'news',
+        'section': 'Breaking News', 'window': window_days,
+        'focus': f'{focus}. Report every distinct verified item, newest '
+                 f'first — this feeds a live news wire, so breadth matters. '
+                 f'{rule}',
+        'exclude': 'game recaps and box-score summaries' + suppress,
+    } for key, focus in NEWS_ANGLES]
 
 _schema_ready = False
 _state_lock = threading.Lock()
@@ -122,12 +147,68 @@ def ensure_schema() -> None:
         with conn.cursor() as cur:
             cur.execute(_ITEMS_SCHEMA)
             cur.execute(_STATE_SCHEMA)
+            cur.execute(_META_SCHEMA)
         conn.commit()
     finally:
         conn.close()
     _schema_ready = True
     for feed, spec in FEEDS.items():
         _ensure_state_row(feed, spec)
+    _migrate()
+
+
+def _get_meta(key: str) -> str | None:
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT v FROM {META_TABLE} WHERE k=%s', (key,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def _set_meta(key: str, value: str) -> None:
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DELETE FROM {META_TABLE} WHERE k=%s', (key,))
+            cur.execute(f'INSERT INTO {META_TABLE} (k, v) VALUES (%s, %s)',
+                        (key, value))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _migrate() -> None:
+    if _get_meta('wire_logic') == WIRE_LOGIC_VERSION:
+        return
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DELETE FROM {ITEMS_TABLE}')
+        conn.commit()
+    finally:
+        conn.close()
+    _set_meta('wire_logic', WIRE_LOGIC_VERSION)
+    logging.info('Wire logic version changed — both feeds cleared for a clean start')
+
+
+def clear(feed: str) -> dict:
+    """Empty one feed's items on demand (the console's Clear button)."""
+    ensure_schema()
+    if feed not in FEEDS:
+        raise FeedError(f"Unknown feed '{feed}'. Feeds: {', '.join(FEEDS)}")
+    conn = db.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DELETE FROM {ITEMS_TABLE} WHERE feed=%s', (feed,))
+            removed = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    _set_status(feed, f'Cleared — {removed} item(s) removed', 0)
+    return {'feed': feed, 'removed': removed}
 
 
 def _ensure_state_row(feed: str, spec: dict) -> None:
@@ -258,11 +339,36 @@ def items(feed: str, limit: int = 25, before_id: int | None = None) -> list[dict
     return rows
 
 
-def _item_key(finding: dict) -> str:
-    """Dedup identity: the story, not the wording around it."""
-    basis = ((finding.get('headline') or '').strip().lower() + '|' +
-             (finding.get('source_url') or '').strip().lower())
+def _norm(text: str) -> str:
+    import re
+    return ' '.join(re.sub(r'[^a-z0-9 ]+', ' ', (text or '').lower()).split())
+
+
+def _item_key(feed: str, finding: dict) -> str:
+    """Dedup identity: the STORY, not its wording or its URL.
+
+    The first version hashed headline+URL, so the same story re-reported with
+    different phrasing or from a different outlet re-entered the wire every
+    pull. News now keys on the normalized headline alone; injuries key on
+    team+player+headline, so a genuine status change (a new headline) is news
+    while a re-report of the same designation is not.
+    """
+    if feed == 'injuries':
+        basis = '|'.join(_norm(finding.get(k))
+                         for k in ('team', 'player', 'headline'))
+    else:
+        basis = _norm(finding.get('headline'))
     return hashlib.sha1(basis.encode('utf-8')).hexdigest()
+
+
+def _url_seen(cur, feed: str, url: str) -> bool:
+    """A second dedup gate: the exact article can only enter the wire once,
+    however differently the model words its headline this pull."""
+    if not url:
+        return False
+    cur.execute(f'SELECT id FROM {ITEMS_TABLE} WHERE feed=%s AND source_url=%s '
+                f'LIMIT 1', (feed, url.strip()))
+    return cur.fetchone() is not None
 
 
 def _trim(feed: str) -> None:
@@ -284,44 +390,37 @@ def _trim(feed: str) -> None:
 # ---------------------------------------------------------------------------
 # Pulling
 # ---------------------------------------------------------------------------
-def run_pull(feed: str) -> dict:
-    """One research pull for one feed: search, dedup, store, trim."""
-    ensure_schema()
-    if feed not in FEEDS:
-        raise FeedError(f"Unknown feed '{feed}'. Feeds: {', '.join(FEEDS)}")
-    state = get_settings().get(feed) or {}
-    api_key = db.resolve_openrouter_key()
-    if not api_key:
-        _set_status(feed, 'No OpenRouter API key configured', 0)
-        raise FeedError('No OpenRouter API key is configured.', 500)
+def _store_items(feed: str, findings: list[dict], window_days: int) -> dict:
+    """The verification gate and the write: date-check, dedup, insert.
 
-    settings = config.default_settings()
-    if state.get('research_model'):
-        settings['research_model'] = state['research_model']
-    if state.get('search_engine'):
-        settings['search_engine'] = state['search_engine']
-
-    ctx = {'home_full': 'college football across the FBS', 'away_full': '',
-           'home_short': 'FBS', 'away_short': '',
-           'year': cfbd_season_year(), 'kickoff': None,
-           'now_utc': datetime.utcnow()}
-    bucket = research._run_one(api_key, FEEDS[feed]['job'], ctx, settings)
-
+    An item enters the wire only when its publication date parses AND falls
+    inside the feed's window — the model is told to date everything, so an
+    undatable item is treated as unverified, not as fresh.
+    """
+    import injuries as injuries_mod
     now = datetime.utcnow()
-    found = bucket.get('findings') or []
-    inserted = 0
+    today = now.date()
+    inserted = stale = undated = 0
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
-            for f in found:
+            for f in findings:
                 headline = (f.get('headline') or '').strip()[:300]
                 if not headline:
                     continue
-                key = _item_key(f)
+                day = injuries_mod.parse_date_text(f.get('published') or '')
+                if day is None:
+                    undated += 1
+                    continue
+                if (today - day).days > window_days or day > today:
+                    stale += 1
+                    continue
+                key = _item_key(feed, f)
                 cur.execute(
                     f'SELECT id FROM {ITEMS_TABLE} WHERE feed=%s AND item_key=%s',
                     (feed, key))
-                if cur.fetchone():
+                if cur.fetchone() or _url_seen(cur, feed,
+                                               f.get('source_url') or ''):
                     continue
                 cur.execute(
                     f'INSERT INTO {ITEMS_TABLE} (feed, headline, detail, team, '
@@ -336,7 +435,7 @@ def run_pull(feed: str) -> dict:
                      (f.get('impact') or '').strip()[:300] or None,
                      (f.get('source_name') or '').strip()[:120] or None,
                      (f.get('source_url') or '').strip()[:500] or None,
-                     (f.get('published') or '').strip()[:60] or None,
+                     day.isoformat(),
                      (f.get('confidence') or '').strip()[:12] or None,
                      key, now))
                 inserted += 1
@@ -344,15 +443,91 @@ def run_pull(feed: str) -> dict:
     finally:
         conn.close()
     _trim(feed)
+    return {'inserted': inserted, 'stale': stale, 'undated': undated}
 
-    if bucket.get('error'):
-        status = f"Research error: {bucket['error'][:180]}"
+
+def _pull_news(state: dict) -> dict:
+    """Three concurrent search angles, suppression of what is already here."""
+    api_key = db.resolve_openrouter_key()
+    if not api_key:
+        _set_status('news', 'No OpenRouter API key configured', 0)
+        raise FeedError('No OpenRouter API key is configured.', 500)
+    settings = config.default_settings()
+    if state.get('research_model'):
+        settings['research_model'] = state['research_model']
+    if state.get('search_engine'):
+        settings['search_engine'] = state['search_engine']
+
+    window_days = FEEDS['news']['window_days']
+    recent = [r['headline'] for r in items('news', limit=25)]
+    jobs = _news_jobs(window_days, recent)
+    ctx = {'home_full': 'college football across the FBS', 'away_full': '',
+           'home_short': 'FBS', 'away_short': '',
+           'year': cfbd_season_year(), 'kickoff': None,
+           'now_utc': datetime.utcnow()}
+    raw = research.run_research(api_key, ctx, settings, jobs=jobs)
+    findings, errors = [], []
+    for job in jobs:
+        bucket = raw.get(job['key']) or {}
+        findings.extend(bucket.get('findings') or [])
+        if bucket.get('error'):
+            errors.append(bucket['error'][:80])
+    counts = _store_items('news', findings, window_days)
+    if errors and not findings:
+        status = f"Research error: {'; '.join(errors)[:180]}"
     else:
-        status = f'OK — {len(found)} found, {inserted} new'
-    _set_status(feed, status, inserted)
-    logging.info(f"Feed pull '{feed}': {status}")
-    return {'feed': feed, 'found': len(found), 'new_items': inserted,
-            'status': status}
+        status = (f"OK — {len(findings)} found across {len(jobs)} searches, "
+                  f"{counts['inserted']} new, {counts['stale']} stale dropped, "
+                  f"{counts['undated']} undated dropped")
+    return {'found': len(findings), 'counts': counts, 'status': status}
+
+
+def _pull_injuries(state: dict) -> dict:
+    """No search at all: read the service's injury database.
+
+    The rotowire table is filled by ESPN's structured injury listing, every
+    matchup/team report's research, and the scheduled sweeps — dated,
+    per-player, already deduplicated at the source. The feed materializes its
+    recent, confident rows; 'low' confidence means the date was assumed, and
+    assumed freshness has no place on a wire.
+    """
+    import injuries as injuries_mod
+    window_days = FEEDS['injuries']['window_days']
+    cutoff = (datetime.utcnow().date() - timedelta(days=window_days)).isoformat()
+    conn = injuries_mod._connect()
+    try:
+        rows = conn.execute(
+            f"SELECT team_name, player_name, headline, news_text, position, "
+            f"status, analysis_text, source_name, source_url, news_date, "
+            f"confidence FROM {injuries_mod.TABLE} "
+            f"WHERE news_date >= ? AND confidence != 'low' "
+            f"ORDER BY news_date DESC, id DESC LIMIT 300", (cutoff,)).fetchall()
+    finally:
+        conn.close()
+    findings = [{
+        'headline': r[2], 'detail': r[3], 'team': r[0], 'player': r[1],
+        'position': r[4], 'status': r[5], 'impact': r[6],
+        'source_name': r[7], 'source_url': r[8], 'published': r[9],
+        'confidence': r[10],
+    } for r in rows]
+    counts = _store_items('injuries', findings, window_days)
+    status = (f"OK — {len(findings)} dated rows in the injury database's "
+              f"{window_days}-day window, {counts['inserted']} new")
+    return {'found': len(findings), 'counts': counts, 'status': status}
+
+
+def run_pull(feed: str) -> dict:
+    """One pull for one feed: gather, verify, dedup, store, trim."""
+    ensure_schema()
+    if feed not in FEEDS:
+        raise FeedError(f"Unknown feed '{feed}'. Feeds: {', '.join(FEEDS)}")
+    state = get_settings().get(feed) or {}
+    out = _pull_news(state) if feed == 'news' else _pull_injuries(state)
+    inserted = out['counts']['inserted']
+    _set_status(feed, out['status'], inserted)
+    logging.info(f"Feed pull '{feed}': {out['status']}")
+    return {'feed': feed, 'found': out['found'], 'new_items': inserted,
+            'status': out['status']}
 
 
 def cfbd_season_year() -> int:
