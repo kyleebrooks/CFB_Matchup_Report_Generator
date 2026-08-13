@@ -652,6 +652,18 @@ def feed_items(feed):
     return jsonify({'feed': feed, 'items': rows, 'count': len(rows)}), 200
 
 
+@bp.route('/feeds/<feed>/clear', methods=['POST'])
+@require_account
+def clear_feed(feed):
+    """Empty one feed's stored items — a fresh start for the wire."""
+    import feeds
+    try:
+        out = feeds.clear(feed)
+    except feeds.FeedError as e:
+        return _error(str(e), e.status)
+    return jsonify(out), 200
+
+
 @bp.route('/feeds/<feed>/pull', methods=['POST'])
 @require_account
 def pull_feed(feed):
