@@ -97,13 +97,17 @@ FEEDS = {
                  'window_days': 3},
 }
 
-_DATE_RULE = ("STRICT FRESHNESS RULE: this wire carries TODAY's news. Only "
-              "report items published within the last {days} day(s), and put "
-              "the article's publication date in 'published' (ISO format like "
-              "2026-08-13). Know that the service independently verifies each "
-              "article page's real publication date and silently discards "
-              "anything older — reporting an old story wastes the whole slot, "
-              "so spend your effort on what actually broke today.")
+_DATE_RULE = (
+    "STRICT FRESHNESS RULE: this wire carries TODAY's news. Only report items "
+    "published within the last {days} day(s), and put the article's "
+    "publication date in 'published' (ISO format like 2026-08-13). "
+    "SOURCE URL RULE: 'source_url' must be the SPECIFIC dated story you read — "
+    "a single article with a byline and a publication date. Never cite a "
+    "roundup, index, hub, tag, team page or live-blog listing (anything like "
+    "/injuries/, /news.php, a homepage, or a 'latest updates' page): the "
+    "service verifies each URL's own publication date and DISCARDS anything it "
+    "cannot date, so an index link throws the item away. If a roundup is where "
+    "you found an item, follow it to the underlying article and cite that.")
 
 NEWS_ANGLES = [
     ('coaching', 'coaching and staff changes across FBS college football: '
@@ -505,6 +509,9 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
     today = now.date()
     inserted = stale = undated = 0
     checked_urls: dict[str, object] = {}
+    # Why items were turned away, with examples — an empty wire should be
+    # explainable from the logs alone, not by re-deriving it each time.
+    rejects: list[str] = []
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -516,20 +523,26 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
                     url = (f.get('source_url') or '').strip()
                     if not url:
                         undated += 1
+                        rejects.append(f'no source url: {headline[:60]}')
                         continue
                     if url not in checked_urls:
                         checked_urls[url] = _page_published(url)
                     day = checked_urls[url]
                     if day is None:
                         undated += 1
+                        rejects.append(f'page carries no publication date '
+                                       f'(index/hub page?): {url[:90]}')
                         continue
                 else:
                     day = injuries_mod.parse_date_text(f.get('published') or '')
                     if day is None:
                         undated += 1
+                        rejects.append(f'undatable: {headline[:60]}')
                         continue
                 if (today - day).days > window_days or day > today:
                     stale += 1
+                    rejects.append(f'published {day}, outside the '
+                                   f'{window_days}-day window: {headline[:60]}')
                     continue
                 key = _item_key(feed, f)
                 cur.execute(
@@ -564,6 +577,9 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
     finally:
         conn.close()
     _trim(feed)
+    if rejects:
+        logging.info(f"Feed '{feed}' turned away {len(rejects)} item(s); "
+                     f"first few: " + ' | '.join(rejects[:5]))
     return {'inserted': inserted, 'stale': stale, 'undated': undated}
 
 
