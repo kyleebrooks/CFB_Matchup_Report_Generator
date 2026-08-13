@@ -9,11 +9,82 @@ into the same `message.annotations[].url_citation` shape.
 import json
 import logging
 import re
+import threading
 import time
 
 import requests
 
 import config
+
+
+# ---------------------------------------------------------------------------
+# The model catalog
+# ---------------------------------------------------------------------------
+# OpenRouter marks a model that can browse on its own by accepting the
+# web_search_options parameter — the Perplexity Sonar family, OpenAI's 4o line
+# and a few others. That is the ONLY class for which engine="native" is valid.
+# Every other model still searches fine through OpenRouter's own plugin (Exa),
+# which is why the console frames this as a capability, not a requirement.
+NATIVE_SEARCH_PARAM = 'web_search_options'
+_MODELS_TTL = 6 * 3600
+_MODELS_CACHE: dict = {'at': 0.0, 'rows': []}
+_MODELS_LOCK = threading.Lock()
+
+
+def text_models(force: bool = False) -> list[dict]:
+    """Every text-generating model on OpenRouter, annotated and sorted.
+
+    Cached in-process for six hours: the catalogue moves on the order of days,
+    and this is read every time an operator opens the console.
+    """
+    with _MODELS_LOCK:
+        if (not force and _MODELS_CACHE['rows']
+                and time.time() - _MODELS_CACHE['at'] < _MODELS_TTL):
+            return _MODELS_CACHE['rows']
+
+    url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/models"
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json().get('data') or []
+    except Exception as e:
+        logging.warning(f'OpenRouter model catalogue unavailable: {e}')
+        with _MODELS_LOCK:
+            return _MODELS_CACHE['rows']       # stale beats empty
+
+    rows = []
+    for m in data:
+        arch = m.get('architecture') or {}
+        if 'text' not in (arch.get('input_modalities') or ['text']):
+            continue
+        if 'text' not in (arch.get('output_modalities') or ['text']):
+            continue                            # image/speech-only models
+        model_id = (m.get('id') or '').strip()
+        if not model_id:
+            continue
+        params = m.get('supported_parameters') or []
+        pricing = m.get('pricing') or {}
+        try:
+            prompt_cost = float(pricing.get('prompt') or 0) * 1_000_000
+        except (TypeError, ValueError):
+            prompt_cost = 0.0
+        rows.append({
+            'id': model_id,
+            'name': (m.get('name') or model_id).strip(),
+            'native_search': NATIVE_SEARCH_PARAM in params,
+            'context': m.get('context_length'),
+            'context_length': m.get('context_length'),
+            'prompt_price': pricing.get('prompt'),
+            'completion_price': pricing.get('completion'),
+            'prompt_cost_per_million': round(prompt_cost, 4),
+        })
+    # Native-search models first — they are the ones the wire benefits from —
+    # then alphabetically so a long list stays scannable.
+    rows.sort(key=lambda r: (not r['native_search'], r['name'].lower()))
+
+    with _MODELS_LOCK:
+        _MODELS_CACHE.update(at=time.time(), rows=rows)
+    return rows
 
 
 class OpenRouterError(RuntimeError):

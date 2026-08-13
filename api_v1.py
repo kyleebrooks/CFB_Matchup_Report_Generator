@@ -996,7 +996,9 @@ def openrouter_models():
         models = podcast_script.text_models()
     except podcast_script.ScriptError as e:
         return _error(str(e), e.status)
-    return jsonify({'models': models, 'count': len(models)}), 200
+    return jsonify({'models': models, 'count': len(models),
+                    'native_search_count': sum(1 for m in models
+                                               if m.get('native_search'))}), 200
 
 
 @bp.route('/account/content/<key>', methods=['GET'])
