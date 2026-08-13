@@ -92,16 +92,25 @@ ROUNDUP_SECTIONS = [
                          "remembered — streaks, rivalries, hot seats, award races — "
                          "from the researched findings and the data."),
     ("The Board: Lines and Projections", "One markdown table: every upcoming game "
-                                         "with kickoff (local date and time), TV, "
+                                         "with kickoff (date and time), TV, "
                                          "forecast, the market line and total, the "
-                                         "model margin, and the CFBReports projection "
-                                         "where the data carries one. Keep rows "
-                                         "terse."),
+                                         "'Ratings consensus' column "
+                                         "(model_margin_home — computed fresh for "
+                                         "this report from SP+/FPI/Elo), and the "
+                                         "'CFBReports projection' column — the "
+                                         "margin and projected score from our "
+                                         "previously published matchup report on "
+                                         "that game. The two are independent "
+                                         "numbers; say so in the section's opening "
+                                         "line. Where cfbreports_projection has "
+                                         "available=false, print exactly 'Not yet "
+                                         "run' in that cell — never leave it "
+                                         "blank."),
     ("Where We Differ From the Market", "The games with the widest gaps between the "
-                                        "model or CFBReports projection and the "
-                                        "market line — what the disagreement is "
-                                        "about, and which side of it the numbers "
-                                        "support."),
+                                        "ratings consensus or CFBReports projection "
+                                        "and the market line — what the "
+                                        "disagreement is about, and which side of "
+                                        "it the numbers support."),
     ("Game-by-Game Capsules", "For every upcoming game, a tight capsule: time, TV, "
                               "forecast, the line, the projection, and the two or "
                               "three sentences that frame it."),
@@ -116,36 +125,65 @@ SYSTEM_PROMPT = (
     "estimate or recall one. Plain, confident, readable prose."
 )
 
-# Research jobs per kind. The wrap looks back; the roundup looks ahead.
-ROUNDUP_JOBS = [
-    {"key": "conf_news", "scope": "conference", "topic": "news",
-     "section": "Breaking News", "window": 7,
-     "focus": ("breaking news, coaching changes, transfers, suspensions, "
-               "disciplinary rulings and program developments across {home_full} "
-               "football programs this week"),
-     "exclude": "recruiting commitments for future seasons"},
-    {"key": "conf_injuries", "scope": "conference", "topic": "injury",
-     "section": "Injury Report", "window": 7,
-     "focus": ("current injuries, availability designations, game-time decisions "
-               "and return timelines for players on {home_full} teams with games "
-               "this week"),
-     "exclude": "non-medical roster news"},
-    {"key": "conf_stories", "scope": "conference", "topic": "news",
-     "section": "Stories to Watch", "window": 7,
-     "focus": ("the biggest storylines around {home_full} football this week: "
-               "winning and losing streaks, rivalry stakes, coaches under "
-               "pressure, award races and milestone watches"),
-     "exclude": ""},
-]
+# Research jobs are built per report from the teams actually playing: a single
+# "search the conference" ask returns two or three headline items and stops,
+# which is how a sixteen-team league ends up with one news story and an empty
+# injury report. Naming the teams — in small batches, one call per batch —
+# forces the search to visit every program's beat coverage.
+_RESEARCH_BATCH = 4
 
-WRAP_JOBS = [
-    {"key": "conf_week_stories", "scope": "conference", "topic": "news",
-     "section": "Top Stories of the Week", "window": 7,
-     "focus": ("the stories that defined this past week of {home_full} football: "
-               "the fallout from the weekend's results, notable performances, "
-               "coaching news and anything that changed a program's trajectory"),
-     "exclude": "games outside this conference"},
-]
+_THOROUGH = ("Work through the listed teams ONE BY ONE — run a separate search "
+             "for each team by name. Finding an item for one team never ends "
+             "the job for the others. Report EVERY verified item; an empty "
+             "report for a team with a game this week almost always means the "
+             "search was not run, not that there is no news.")
+
+
+def _research_jobs(kind: str, teams: list[str]) -> list[dict]:
+    chunks = [teams[i:i + _RESEARCH_BATCH]
+              for i in range(0, len(teams), _RESEARCH_BATCH)] or [teams]
+    jobs: list[dict] = []
+    if kind == 'wrap':
+        for n, chunk in enumerate(chunks, 1):
+            names = ', '.join(chunk)
+            jobs.append({
+                "key": f"conf_week_stories_{n}", "scope": "conference",
+                "topic": "news", "section": "Top Stories of the Week",
+                "window": 7,
+                "focus": (f"the stories that defined this past week for each of "
+                          f"these {{home_full}} programs: {names}. Fallout from "
+                          f"the weekend's results, standout performances, "
+                          f"coaching news, anything that changed a program's "
+                          f"trajectory. {_THOROUGH}"),
+                "exclude": "games outside this conference"})
+        return jobs
+    for n, chunk in enumerate(chunks, 1):
+        names = ', '.join(chunk)
+        jobs.append({
+            "key": f"conf_news_{n}", "scope": "conference", "topic": "news",
+            "section": "Breaking News", "window": 7,
+            "focus": (f"breaking news for each of these {{home_full}} programs: "
+                      f"{names}. Coaching changes, transfers, suspensions, "
+                      f"disciplinary rulings, depth-chart shakeups and program "
+                      f"developments. {_THOROUGH}"),
+            "exclude": "recruiting commitments for future seasons"})
+        jobs.append({
+            "key": f"conf_injuries_{n}", "scope": "conference", "topic": "injury",
+            "section": "Injury Report", "window": 7,
+            "focus": (f"current injuries, availability designations, game-time "
+                      f"decisions and return timelines for players on each of "
+                      f"these {{home_full}} teams: {names}. {_THOROUGH}"),
+            "exclude": "non-medical roster news"})
+    jobs.append({
+        "key": "conf_stories", "scope": "conference", "topic": "news",
+        "section": "Stories to Watch", "window": 7,
+        "focus": ("the biggest storylines around {home_full} football this week "
+                  f"across these teams: {', '.join(teams)}. Winning and losing "
+                  "streaks, rivalry stakes, coaches under pressure, award races, "
+                  "milestone watches and the matchups with the most on the line. "
+                  + _THOROUGH),
+        "exclude": ""})
+    return jobs
 
 
 # ---------------------------------------------------------------------------
@@ -264,20 +302,22 @@ def _stored_projections(season, games) -> dict:
     """Latest stored CFBReports projection per game, keyed by game_id.
 
     The tracking table records one row per matchup report run; the newest row
-    before now is the projection of record for that game.
+    before now is the projection of record for that game. Rows match on game
+    id when the report stored one, else on the home/away pair, compared
+    case-insensitively so 'Ole Miss' and 'OLE MISS' meet.
     """
     try:
         rows = predictions.history(season=season)
     except Exception as e:
         logging.warning(f'Prediction history unavailable (non-fatal): {e}')
         return {}
-    by_pair = {}
-    for g in games:
-        by_pair[(g['home'], g['away'])] = g['game_id']
+    by_pair = {((g['home'] or '').lower(), (g['away'] or '').lower()): g['game_id']
+               for g in games}
     out: dict[int, dict] = {}
     for row in rows:
-        gid = row.get('game_id') or by_pair.get((row.get('home_short'),
-                                                 row.get('away_short')))
+        gid = row.get('game_id') or by_pair.get(
+            ((row.get('home_short') or '').lower(),
+             (row.get('away_short') or '').lower()))
         if gid is None or gid not in {g['game_id'] for g in games}:
             continue
         held = out.get(gid)
@@ -285,6 +325,7 @@ def _stored_projections(season, games) -> dict:
                 (predictions._parse_dt(held.get('_created')) or datetime.min):
             continue
         out[gid] = {
+            'available': True,
             'margin_home': row.get('consensus_margin'),
             'projected_home': row.get('projected_home'),
             'projected_away': row.get('projected_away'),
@@ -297,6 +338,13 @@ def _stored_projections(season, games) -> dict:
     for v in out.values():
         v.pop('_created', None)
     return out
+
+
+# A game the tracking table has never seen gets an explicit marker, so the
+# board prints "Not yet run" instead of a blank the reader cannot interpret.
+_NO_PROJECTION = {'available': False,
+                  'note': 'No CFBReports matchup report has been run for this '
+                          'game yet.'}
 
 
 def _ats_result(final_margin, market_margin) -> str | None:
@@ -388,6 +436,7 @@ def build_conference_data(api_key, conference, year=None, week=None, *,
         return {'season': y, 'week': w, 'season_type': st,
                 'conference': canonical, 'games': [], 'standings': [],
                 'player_leaders': {}, 'ledger': None, 'top25': base['top25'],
+                'teams_this_week': [], 'team_logos': {},
                 'known_conferences': known, 'errors': errors,
                 'auth_failures': base['auth_failures']}
 
@@ -397,7 +446,7 @@ def build_conference_data(api_key, conference, year=None, week=None, *,
     for g in games:
         g['tv'] = media.get(g['game_id']) or g.get('tv')
         g['forecast'] = weather.get(g['game_id'])
-        g['cfbreports_projection'] = projections.get(g['game_id'])
+        g['cfbreports_projection'] = projections.get(g['game_id'], _NO_PROJECTION)
         if completed:
             g['against_the_spread'] = _ats_result(g.get('margin'),
                                                   g.get('market_margin_home'))
@@ -412,12 +461,28 @@ def build_conference_data(api_key, conference, year=None, week=None, *,
     leaders = (_player_leaders(api_key, y, w, st, canonical, errors)
                if completed else {})
 
+    # The teams in this week's games, home teams first — this drives the
+    # research batches — plus each team's logo for the standings strip.
+    teams_this_week = sorted({t for g in games for t in (g['home'], g['away'])
+                              if t})
+    logos: dict[str, str] = {}
+    try:
+        wanted = {s['team'] for s in standings} | set(teams_this_week)
+        for row in cfbd.all_teams(api_key, y, errors) or []:
+            school = row.get('school')
+            if school in wanted and (row.get('logos') or []):
+                logos[school] = row['logos'][0]
+    except Exception as e:
+        logging.warning(f'Team logos unavailable (non-fatal): {e}')
+
     return {
         'season': y, 'week': w, 'season_type': st,
         'conference': canonical, 'games': games,
         'standings': standings, 'player_leaders': leaders,
         'ledger': _ledger(games) if completed else None,
         'top25': base['top25'],
+        'teams_this_week': teams_this_week,
+        'team_logos': logos,
         'known_conferences': known,
         'errors': errors,
         'auth_failures': base['auth_failures'],
@@ -476,7 +541,8 @@ def _generate(kind: str, *, conference: str, year=None, week=None, settings=None
         'year': data['season'], 'kickoff': None,
         'now_utc': datetime.now(timezone.utc),
     }
-    jobs = WRAP_JOBS if completed else ROUNDUP_JOBS
+    jobs = _research_jobs('wrap' if completed else 'roundup',
+                          data['teams_this_week'])
     findings: dict[str, list] = {}
     try:
         raw = research.run_research(openrouter_api_key, ctx, settings, jobs=jobs)
@@ -485,19 +551,23 @@ def _generate(kind: str, *, conference: str, year=None, week=None, settings=None
         raw = {}
     for job in jobs:
         bucket = raw.get(job['key']) or {}
-        items = []
+        items = findings.setdefault(job['section'], [])
         for f in bucket.get('findings', []):
             idx = registry.add(f.get('source_url', ''), f.get('headline', ''),
                                f.get('source_name', ''))
-            item = {k: f.get(k) for k in ('headline', 'detail', 'summary',
+            item = {k: f.get(k) for k in ('headline', 'detail', 'team', 'player',
+                                          'position', 'status', 'impact',
                                           'source_name', 'published')
                     if f.get(k)}
             item['citation'] = f"[{idx}]" if idx else ""
             items.append(item)
-        findings[job['section']] = items
+        # Pages the search engine surfaced beyond what the model attributed:
+        # registered so the SOURCES list reflects everything that was read.
+        for cit in bucket.get('citations') or []:
+            registry.add(cit.get('url', ''), cit.get('title', ''), '')
 
     step("charts")
-    chart_kind = 'wrap' if completed else 'preview'
+    chart_kind = 'wrap' if completed else 'roundup'
     extras = {}
     if completed:
         errs: list[dict] = []
@@ -506,7 +576,7 @@ def _generate(kind: str, *, conference: str, year=None, week=None, settings=None
                                        data['season_type'], errs)
         extras['finals_detail'] = [f for f in finals if f['game_id'] in conf_ids]
     try:
-        chart_set = charts_mod.build_weekly_charts(chart_kind, data, extras)
+        chart_set = charts_mod.build_conference_charts(chart_kind, data, extras)
     except charts_mod.ChartsUnavailable as e:
         raise PipelineError("Charting library missing on the server", str(e), 500)
 
@@ -545,6 +615,11 @@ FORMAT RULES:
 - EVERY number comes from the DATA below — never invent, estimate or recall one.
 - News, injuries and stories come ONLY from researched_findings, cited with each
   item's marker. If a findings list is empty, say so in one honest line.
+- News, injury and story items are formatted so a reader can scan by school:
+  every item starts on its own line as "**Team** — headline: detail [n]". Group
+  several items for the same team under one bold team lead-in. The Injury
+  Report uses a markdown table with columns Team | Player (Pos) | Status |
+  Impact wherever the findings carry player detail.
 - Kickoff times: each game's start is UTC — present times with the date and note
   the tv networks from the game's tv field where present.
 
