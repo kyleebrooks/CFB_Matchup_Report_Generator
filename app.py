@@ -26,6 +26,11 @@ app = Flask(__name__)
 # other tenants' entitlements stay untouched. Never fatal at boot.
 accounts.ensure_type_entitlements(['conference_wrap', 'conference_roundup'])
 
+# The live-feed scheduler: breaking news and injury pulls on their configured
+# intervals. Worker-safe — the database claim decides who fires.
+import feeds
+feeds.start()
+
 # --- ONE CORS LAYER ONLY ---
 ALLOWED_ORIGINS = {
     "http://afplnapicks.com",

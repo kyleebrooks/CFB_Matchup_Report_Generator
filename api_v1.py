@@ -589,6 +589,63 @@ def create_podcast():
                     'deduplicated': bool(job.get('deduplicated'))}), status
 
 
+@bp.route('/feeds', methods=['GET'])
+@require_account
+def feed_settings():
+    """Both feeds' scheduler settings and last-run state."""
+    import feeds
+    return jsonify({'feeds': feeds.get_settings()}), 200
+
+
+@bp.route('/feeds/<feed>/settings', methods=['PUT'])
+@require_account
+def update_feed_settings(feed):
+    """Console-editable scheduler settings: on/off, interval, model, engine."""
+    import feeds
+    data = _body()
+    try:
+        row = feeds.update_settings(feed, data)
+    except feeds.FeedError as e:
+        return _error(str(e), e.status)
+    return jsonify(row), 200
+
+
+@bp.route('/feeds/<feed>/items', methods=['GET'])
+@require_account
+def feed_items(feed):
+    import feeds
+    try:
+        rows = feeds.items(feed,
+                           limit=request.args.get('limit', 25),
+                           before_id=request.args.get('before'))
+    except feeds.FeedError as e:
+        return _error(str(e), e.status)
+    except (TypeError, ValueError):
+        return _error("'limit' and 'before' must be integers.", 400)
+    return jsonify({'feed': feed, 'items': rows, 'count': len(rows)}), 200
+
+
+@bp.route('/feeds/<feed>/pull', methods=['POST'])
+@require_account
+def pull_feed(feed):
+    """Kick a pull now, off-schedule. Runs in the background — research takes
+    the better part of a minute; poll GET /v1/feeds for the outcome."""
+    import feeds
+    if feed not in feeds.FEEDS:
+        return _error(f"Unknown feed '{feed}'. Feeds: {', '.join(feeds.FEEDS)}", 400)
+
+    def run():
+        try:
+            feeds.run_pull(feed)
+        except Exception:
+            import logging
+            logging.exception(f"Manual feed pull '{feed}' failed")
+
+    import threading
+    threading.Thread(target=run, daemon=True, name=f'feed-pull-{feed}').start()
+    return jsonify({'feed': feed, 'started': True}), 202
+
+
 @bp.route('/podcasts/upload', methods=['POST'])
 @require_account
 def upload_podcast():
