@@ -244,33 +244,13 @@ def generate(*, account_id: int, instructions: str, report_filenames: list[str],
 def text_models() -> list[dict]:
     """OpenRouter models that take text and return text, cheapest metadata only.
 
-    The console shows this in the script builder's model dropdown. Speech and image-only
-    models are filtered out — they cannot write a script.
+    One cached catalogue serves every picker in the console — the script
+    builder here and the wire's research-model selector — so each entry also
+    carries whether the model can browse the web on its own.
     """
-    import requests
+    import openrouter
 
-    url = f"{config.OPENROUTER_BASE_URL.rstrip('/')}/models"
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        raise ScriptError(f'Could not read the OpenRouter model list: {e}', 502)
-
-    out = []
-    for m in data.get('data') or []:
-        arch = m.get('architecture') or {}
-        if 'text' not in (arch.get('input_modalities') or ['text']):
-            continue
-        if 'text' not in (arch.get('output_modalities') or ['text']):
-            continue
-        pricing = m.get('pricing') or {}
-        out.append({
-            'id': m.get('id'),
-            'name': m.get('name') or m.get('id'),
-            'context': m.get('context_length'),
-            'prompt_price': pricing.get('prompt'),
-            'completion_price': pricing.get('completion'),
-        })
-    out.sort(key=lambda m: (m['name'] or '').lower())
-    return out
+    rows = openrouter.text_models()
+    if not rows:
+        raise ScriptError('Could not read the OpenRouter model list.', 502)
+    return rows

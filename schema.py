@@ -247,6 +247,96 @@ SPEC: dict[str, dict] = {
         },
         'indexes': {},
     },
+    'feed_items': {
+        'owner': 'service',
+        'purpose': "The Wire's stored items: breaking news and injury updates",
+        'create': """
+            CREATE TABLE IF NOT EXISTS feed_items (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                feed        VARCHAR(16)  NOT NULL,
+                headline    VARCHAR(300) NOT NULL,
+                detail      TEXT,
+                team        VARCHAR(80)  DEFAULT NULL,
+                player      VARCHAR(80)  DEFAULT NULL,
+                position    VARCHAR(12)  DEFAULT NULL,
+                status      VARCHAR(60)  DEFAULT NULL,
+                impact      VARCHAR(300) DEFAULT NULL,
+                source_name VARCHAR(120) DEFAULT NULL,
+                source_url  VARCHAR(500) DEFAULT NULL,
+                published   VARCHAR(60)  DEFAULT NULL,
+                confidence  VARCHAR(12)  DEFAULT NULL,
+                item_key    VARCHAR(40)  NOT NULL,
+                created_at  DATETIME     NOT NULL,
+                KEY idx_feed_id (feed, id),
+                UNIQUE KEY uniq_feed_item (feed, item_key)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'id':          'INT AUTO_INCREMENT PRIMARY KEY',
+            'feed':        'VARCHAR(16) NOT NULL',
+            'headline':    'VARCHAR(300) NOT NULL',
+            'detail':      'TEXT',
+            'team':        'VARCHAR(80) DEFAULT NULL',
+            'player':      'VARCHAR(80) DEFAULT NULL',
+            'position':    'VARCHAR(12) DEFAULT NULL',
+            'status':      'VARCHAR(60) DEFAULT NULL',
+            'impact':      'VARCHAR(300) DEFAULT NULL',
+            'source_name': 'VARCHAR(120) DEFAULT NULL',
+            'source_url':  'VARCHAR(500) DEFAULT NULL',
+            'published':   'VARCHAR(60) DEFAULT NULL',
+            'confidence':  'VARCHAR(12) DEFAULT NULL',
+            'item_key':    'VARCHAR(40) NOT NULL',
+            'created_at':  'DATETIME NOT NULL',
+        },
+        'indexes': {
+            'idx_feed_id':     'ADD KEY idx_feed_id (feed, id)',
+            'uniq_feed_item':  'ADD UNIQUE KEY uniq_feed_item (feed, item_key)',
+        },
+    },
+    'feed_state': {
+        'owner': 'service',
+        'purpose': "Each wire feed's scheduler settings and last-run state",
+        'create': """
+            CREATE TABLE IF NOT EXISTS feed_state (
+                feed             VARCHAR(16)  PRIMARY KEY,
+                enabled          TINYINT      NOT NULL DEFAULT 1,
+                interval_minutes INT          NOT NULL DEFAULT 180,
+                research_model   VARCHAR(120) NOT NULL DEFAULT '',
+                search_engine    VARCHAR(12)  NOT NULL DEFAULT '',
+                last_run_at      DATETIME     DEFAULT NULL,
+                last_status      VARCHAR(250) NOT NULL DEFAULT '',
+                last_new_items   INT          NOT NULL DEFAULT 0,
+                updated_at       DATETIME     DEFAULT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'feed':             'VARCHAR(16) PRIMARY KEY',
+            'enabled':          'TINYINT NOT NULL DEFAULT 1',
+            'interval_minutes': 'INT NOT NULL DEFAULT 180',
+            'research_model':   "VARCHAR(120) NOT NULL DEFAULT ''",
+            'search_engine':    "VARCHAR(12) NOT NULL DEFAULT ''",
+            'last_run_at':      'DATETIME DEFAULT NULL',
+            'last_status':      "VARCHAR(250) NOT NULL DEFAULT ''",
+            'last_new_items':   'INT NOT NULL DEFAULT 0',
+            'updated_at':       'DATETIME DEFAULT NULL',
+        },
+        'indexes': {},
+    },
+    'feed_meta': {
+        'owner': 'service',
+        'purpose': "The wire's logic-version stamp, used to clear stale items once",
+        'create': """
+            CREATE TABLE IF NOT EXISTS feed_meta (
+                k VARCHAR(40) PRIMARY KEY,
+                v VARCHAR(120) NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        """,
+        'columns': {
+            'k': 'VARCHAR(40) PRIMARY KEY',
+            'v': 'VARCHAR(120) NOT NULL',
+        },
+        'indexes': {},
+    },
     'podcasts': {
         'owner': 'service',
         'purpose': 'Podcast episodes synthesized from pasted scripts, one row per episode',
