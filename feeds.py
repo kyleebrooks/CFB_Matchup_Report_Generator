@@ -606,20 +606,21 @@ def _pull_news(state: dict) -> dict:
 _FIRST_LISTED_RE = None
 
 
-def _designation_date(detail: str, news_date: str):
-    """The date a designation actually became news.
+def _first_listed(detail: str):
+    """When ESPN first listed this designation, or None if it does not say.
 
     ESPN stamps every fetch 'today', which would keep months-old standing
     designations permanently fresh. The real signal is the 'First listed
-    YYYY-MM-DD' marker the ESPN collector embeds in the detail — a designation
-    is NEW when ESPN first listed it recently, not when we last looked.
+    YYYY-MM-DD' marker the collector embeds — a designation is NEW when ESPN
+    first listed it recently, not when we last looked. No marker means we
+    cannot tell, and on a breaking wire that means it does not run.
     """
     global _FIRST_LISTED_RE
     if _FIRST_LISTED_RE is None:
         import re
         _FIRST_LISTED_RE = re.compile(r'First listed (\d{4}-\d{2}-\d{2})')
     m = _FIRST_LISTED_RE.search(detail or '')
-    return m.group(1) if m else news_date
+    return m.group(1) if m else None
 
 
 def _refresh_injury_store() -> tuple[int, int]:
@@ -685,34 +686,55 @@ def _pull_injuries(state: dict) -> dict:
     today_iso = datetime.utcnow().date().isoformat()
 
     # --- source 1: the injury database (ESPN + report research + sweeps) ----
-    store_window = max(window_days, config.INJURY_WINDOW_DAYS)
-    cutoff = (datetime.utcnow().date() - timedelta(days=store_window)).isoformat()
+    # The window is the wire's own — the database keeps a fortnight for the
+    # reports, but a fortnight-old designation is not breaking news.
+    cutoff = (datetime.utcnow().date() - timedelta(days=window_days)).isoformat()
     conn = injuries_mod._connect()
     try:
         rows = conn.execute(
             f"SELECT team_name, player_name, headline, news_text, position, "
             f"status, analysis_text, source_name, source_url, news_date, "
-            f"confidence FROM {injuries_mod.TABLE} "
+            f"confidence, provider FROM {injuries_mod.TABLE} "
             f"WHERE news_date >= ? AND confidence != 'low' "
             f"ORDER BY news_date DESC, id DESC LIMIT 400", (cutoff,)).fetchall()
     finally:
         conn.close()
-    store_findings = []
+
+    # Provenance decides how a row earns its date. ESPN's designations are
+    # structured, so their own first-listed marker is trustworthy. Everything
+    # else in this table came from a research call whose date the model
+    # asserted — the same unreliable claim that put January stories on the
+    # news wire — so those rows must clear the article page like any other.
+    espn_findings, article_findings = [], []
     for r in rows:
         team, player, status = r[0], r[1], (r[5] or '')
         seen = known.get((_norm(team), _norm(player)))
-        # A designation the wire has never carried enters on its first-listed
-        # date; one it HAS carried only re-enters when the status changed —
-        # and a change is today's news whenever the injury first happened.
-        published = (today_iso if seen is not None and _norm(seen) != _norm(status)
-                     else _designation_date(r[3], r[9]))
-        store_findings.append({
+        changed = seen is not None and _norm(seen) != _norm(status)
+        item = {
             'headline': r[2], 'detail': r[3], 'team': team, 'player': player,
             'position': r[4], 'status': status, 'impact': r[6],
-            'source_name': r[7], 'source_url': r[8], 'published': published,
-            'confidence': r[10],
-        })
-    store_counts = _store_items('injuries', store_findings, store_window)
+            'source_name': r[7], 'source_url': r[8], 'confidence': r[10],
+        }
+        from_espn = ((r[11] or '').strip().lower() == injuries_mod.PROVIDER_ESPN
+                     or (r[7] or '').strip().upper() == 'ESPN')
+        if from_espn:
+            first = _first_listed(r[3])
+            if changed:
+                item['published'] = today_iso     # the change is today's news
+            elif first:
+                item['published'] = first
+            else:
+                continue          # undatable standing designation: not new
+            espn_findings.append(item)
+        else:
+            item['published'] = r[9]
+            article_findings.append(item)
+
+    store_counts = _store_items('injuries', espn_findings, window_days)
+    article_counts = _store_items('injuries', article_findings, window_days,
+                                  verify_pages=True)
+    for k in store_counts:
+        store_counts[k] += article_counts[k]
 
     # --- source 2: live research, page-verified like the news wire ----------
     research_counts = {'inserted': 0, 'stale': 0, 'undated': 0}
@@ -746,11 +768,13 @@ def _pull_injuries(state: dict) -> dict:
 
     counts = {k: store_counts[k] + research_counts[k]
               for k in ('inserted', 'stale', 'undated')}
+    from_db = len(espn_findings) + len(article_findings)
     status = (f"OK — ESPN refreshed across {teams_checked} team(s); "
-              f"{len(store_findings)} database row(s) + {found_research} "
-              f"researched item(s); {counts['inserted']} new, "
-              f"{counts['stale']} not current, {counts['undated']} unverifiable")
-    return {'found': len(store_findings) + found_research, 'counts': counts,
+              f"{len(espn_findings)} ESPN + {len(article_findings)} stored "
+              f"article row(s) + {found_research} researched item(s); "
+              f"{counts['inserted']} new, {counts['stale']} not current, "
+              f"{counts['undated']} unverifiable")
+    return {'found': from_db + found_research, 'counts': counts,
             'status': status}
 
 
