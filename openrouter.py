@@ -79,6 +79,8 @@ def text_models(force: bool = False) -> list[dict]:
             'reasoning': 'reasoning' in params,
             'context': m.get('context_length'),
             'context_length': m.get('context_length'),
+            'max_completion_tokens': (m.get('top_provider') or {}).get(
+                'max_completion_tokens'),
             'prompt_price': pricing.get('prompt'),
             'completion_price': pricing.get('completion'),
             'prompt_cost_per_million': round(prompt_cost, 4),
@@ -151,6 +153,42 @@ def web_search_plugin(
     return [plugin]
 
 
+
+def fit_max_tokens(model: str, requested: int | None, messages: list | None = None):
+    """Trim an output budget to what the model can actually accept.
+
+    A generous max_tokens is harmless on a million-token model and fatal on a
+    128k one: OpenRouter rejects the whole request when input + output exceeds
+    the context window, before any work happens. Callers should not have to
+    know each model's ceiling, so the clamp lives here, next to the catalogue
+    that knows it. Returns the request unchanged when the model is unknown.
+    """
+    if not requested:
+        return requested
+    row = None
+    for candidate in text_models():
+        if candidate['id'] == model:
+            row = candidate
+            break
+    if not row:
+        return requested
+    allowed = requested
+    ceiling = row.get('max_completion_tokens')
+    if ceiling:
+        allowed = min(allowed, int(ceiling))
+    context = row.get('context_length')
+    if context:
+        # Roughly four characters per token, then a wide margin: overshooting
+        # the estimate costs a rejected request, undershooting costs nothing.
+        chars = sum(len(str(m.get('content') or '')) for m in (messages or []))
+        room = int(context) - (chars // 3) - 1024
+        allowed = min(allowed, max(room, 256))
+    if allowed < requested:
+        logging.info(f"max_tokens trimmed {requested} -> {allowed} to fit "
+                     f"{model} (context {context}, cap {ceiling})")
+    return allowed
+
+
 def chat(
     api_key: str,
     model: str,
@@ -179,7 +217,7 @@ def chat(
     if effort:
         body["reasoning"] = {"effort": effort}
     if max_tokens:
-        body["max_tokens"] = max_tokens
+        body["max_tokens"] = fit_max_tokens(model, max_tokens, messages)
 
     dropped_schema = False
     dropped_reasoning = False
