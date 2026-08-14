@@ -15,9 +15,10 @@ API.
 
 import hashlib
 import logging
+import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import config
 import db
@@ -107,7 +108,11 @@ _DATE_RULE = (
     "/injuries/, /news.php, a homepage, or a 'latest updates' page): the "
     "service verifies each URL's own publication date and DISCARDS anything it "
     "cannot date, so an index link throws the item away. If a roundup is where "
-    "you found an item, follow it to the underlying article and cite that.")
+    "you found an item, follow it to the underlying article and cite that. "
+    "REPORT EVERYTHING THAT QUALIFIES: this is a wire, not a top story. Every "
+    "distinct item that is inside the window and has its own article is worth "
+    "listing, however small, and a search result you did not use is a story "
+    "the wire does not get. Do not stop at the biggest one or two.")
 
 NEWS_ANGLES = [
     ('coaching', 'coaching and staff changes across FBS college football: '
@@ -182,6 +187,12 @@ def _resolved_settings(state: dict) -> dict:
         settings['research_model'] = state['research_model']
     if state.get('search_engine'):
         settings['search_engine'] = state['search_engine']
+    # A report's five results per section are the wrong size for a wire; raise
+    # the floor, but never lower a service-wide value that was set higher on
+    # purpose.
+    settings['search_max_results'] = max(
+        int(settings.get('search_max_results') or 0),
+        config.FEED_SEARCH_MAX_RESULTS)
     return settings
 
 
@@ -220,9 +231,40 @@ _PUB_PATTERNS = [
     r'"datePublished"\s*:\s*"([^"]+)"',
     r'itemprop=["\']datePublished["\'][^>]*content=["\']([^"\']+)',
     r'name=["\'](?:publish-date|publication_date|date)["\'][^>]*content=["\']([^"\']+)',
+    # Sports desks are not uniform about this. Parse.ly is near-universal at
+    # the big outlets, and the rest are what the remaining CMSes emit.
+    r'name=["\']parsely-pub-date["\'][^>]*content=["\']([^"\']+)',
+    r'content=["\']([^"\']+)["\'][^>]*name=["\']parsely-pub-date',
+    r'name=["\'](?:pubdate|pub_date|article:published_time|sailthru\.date)["\'][^>]*content=["\']([^"\']+)',
+    r'"(?:dateCreated|publishedAt|publish_date|published_date|firstPublished)"\s*:\s*"([^"]+)"',
     r'<time[^>]+datetime=["\']([^"\']+)',
 ]
-_PAGE_FETCH_CAP = 300 * 1024
+# A megabyte, because the pages this reads are ad-heavy and the JSON-LD block
+# carrying the date is often nowhere near the top. The old 300KB stopped short
+# of it and the article was then thrown away as undatable.
+_PAGE_FETCH_CAP = 1024 * 1024
+# Newsrooms put the date in the path far more consistently than in metadata.
+_URL_DATE_RE = re.compile(r'/(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?:[/-]|$)')
+# Browsers get served the article; unfamiliar agents get a challenge page with
+# no metadata in it, which is indistinguishable from an undated page here.
+_PAGE_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                   'AppleWebKit/537.36 (KHTML, like Gecko) '
+                   'Chrome/126.0.0.0 Safari/537.36'),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
+
+
+def _url_date(url: str):
+    """The date in the article's own path, or None. /2026/08/13/ and friends."""
+    m = _URL_DATE_RE.search(url or '')
+    if not m:
+        return None
+    try:
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
 
 
 def _page_published(url: str):
@@ -231,9 +273,7 @@ def _page_published(url: str):
     import requests
     import injuries as injuries_mod
     try:
-        resp = requests.get(
-            url, timeout=6, stream=True,
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; CFBReportsWire/1.0)'})
+        resp = requests.get(url, timeout=8, stream=True, headers=_PAGE_HEADERS)
         if resp.status_code >= 400:
             return None
         raw = b''
@@ -518,20 +558,26 @@ def _trim(feed: str) -> None:
 # Pulling
 # ---------------------------------------------------------------------------
 def _store_items(feed: str, findings: list[dict], window_days: int,
-                 verify_pages: bool = False) -> dict:
+                 verify_pages: bool = False,
+                 engine_dates: dict | None = None) -> dict:
     """The verification gate and the write: date-check, dedup, insert.
 
-    With verify_pages the claimed date is not trusted at all: the article page
-    itself must carry a publication date (standard CMS metadata), and that
-    date must fall inside the window. No URL, no metadata, or an old page —
-    not on the wire. Store-sourced feeds skip the fetch; their dates are
-    already structural.
+    With verify_pages the model's claimed date is not trusted at all. The date
+    has to come from somewhere the model does not control, in descending order
+    of authority: the article's own CMS metadata, the date in its URL path,
+    then the date the search engine recorded for that result. Any of the three
+    is evidence; none of them means not on the wire. Store-sourced feeds skip
+    the fetch, their dates already being structural.
     """
     import injuries as injuries_mod
     now = datetime.utcnow()
     today = now.date()
     inserted = stale = undated = 0
+    engine_dates = engine_dates or {}
     checked_urls: dict[str, object] = {}
+    # Which evidence actually carried the wire, so the split between "nothing
+    # happened" and "nothing could be dated" stays visible in the logs.
+    dated_by = {'page': 0, 'url': 0, 'engine': 0}
     # Why items were turned away, with examples — an empty wire should be
     # explainable from the logs alone, not by re-deriving it each time.
     rejects: list[str] = []
@@ -549,13 +595,30 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
                         rejects.append(f'no source url: {headline[:60]}')
                         continue
                     if url not in checked_urls:
-                        checked_urls[url] = _page_published(url)
-                    day = checked_urls[url]
+                        # Cheapest first, and only as far as needed: a dated
+                        # path is free and no less trustworthy than the
+                        # metadata behind an eight-second fetch, and with
+                        # dozens of links a pull those fetches are the
+                        # difference between a pull and a wait.
+                        probes = (
+                            ('url', lambda: _url_date(url)),
+                            ('page', lambda: _page_published(url)),
+                            ('engine', lambda: injuries_mod.parse_date_text(
+                                engine_dates.get(url) or '')),
+                        )
+                        checked_urls[url] = (None, '')
+                        for how, probe in probes:
+                            found = probe()
+                            if found:
+                                checked_urls[url] = (found, how)
+                                break
+                    day, how = checked_urls[url]
                     if day is None:
                         undated += 1
-                        rejects.append(f'page carries no publication date '
-                                       f'(index/hub page?): {url[:90]}')
+                        rejects.append(f'no date on the page, in the url, or '
+                                       f'from the search engine: {url[:90]}')
                         continue
+                    dated_by[how] += 1
                 else:
                     day = injuries_mod.parse_date_text(f.get('published') or '')
                     if day is None:
@@ -603,6 +666,9 @@ def _store_items(feed: str, findings: list[dict], window_days: int,
     if rejects:
         logging.info(f"Feed '{feed}' turned away {len(rejects)} item(s); "
                      f"first few: " + ' | '.join(rejects[:5]))
+    if verify_pages and any(dated_by.values()):
+        logging.info(f"Feed '{feed}' dated {sum(dated_by.values())} item(s): "
+                     + ', '.join(f'{n} by {src}' for src, n in dated_by.items() if n))
     return {'inserted': inserted, 'stale': stale, 'undated': undated}
 
 
@@ -623,12 +689,17 @@ def _pull_news(state: dict) -> dict:
            'now_utc': datetime.utcnow()}
     raw = research.run_research(api_key, ctx, settings, jobs=jobs)
     findings, errors = [], []
+    engine_dates: dict[str, str] = {}
     for job in jobs:
         bucket = raw.get(job['key']) or {}
         findings.extend(bucket.get('findings') or [])
+        for cite in bucket.get('citations') or []:
+            if cite.get('url') and cite.get('published'):
+                engine_dates.setdefault(cite['url'], cite['published'])
         if bucket.get('error'):
             errors.append(bucket['error'][:80])
-    counts = _store_items('news', findings, window_days, verify_pages=True)
+    counts = _store_items('news', findings, window_days, verify_pages=True,
+                          engine_dates=engine_dates)
     model = settings.get('research_model', '?')
     if errors:
         # Even a partial failure is named: a search that errored is not the
@@ -796,12 +867,17 @@ def _pull_injuries(state: dict) -> dict:
             logging.warning(f'Injury research failed (ESPN data still used): {e}')
             raw = {}
         research_findings = []
+        engine_dates: dict[str, str] = {}
         for job in jobs:
-            research_findings.extend((raw.get(job['key']) or {}).get('findings')
-                                     or [])
+            bucket = raw.get(job['key']) or {}
+            research_findings.extend(bucket.get('findings') or [])
+            for cite in bucket.get('citations') or []:
+                if cite.get('url') and cite.get('published'):
+                    engine_dates.setdefault(cite['url'], cite['published'])
         found_research = len(research_findings)
         research_counts = _store_items('injuries', research_findings,
-                                       window_days, verify_pages=True)
+                                       window_days, verify_pages=True,
+                                       engine_dates=engine_dates)
 
     counts = {k: store_counts[k] + research_counts[k]
               for k in ('inserted', 'stale', 'undated')}
