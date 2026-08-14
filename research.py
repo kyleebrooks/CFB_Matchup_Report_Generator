@@ -337,6 +337,46 @@ def seed_registry() -> SourceRegistry:
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
+
+def _structure_prose(api_key: str, text: str, citations: list, settings: dict) -> list:
+    """Convert a prose research answer into findings, using a JSON-capable model.
+
+    The strongest search models (Perplexity's Sonar family) cannot be
+    constrained to JSON — they answer in prose with citations. Rather than lose
+    that research, a second, cheap, search-free call restates it in the schema.
+    The citation list from the first call rides along so the structured output
+    can carry real source URLs rather than invented ones.
+    """
+    urls = [c.get("url") for c in (citations or []) if c.get("url")]
+    url_block = "\n".join(f"- {u}" for u in urls[:25]) or "(none reported)"
+    prompt = (
+        "Restate the research notes below as JSON matching the required schema. "
+        "Use ONLY facts present in the notes — invent nothing, and drop anything "
+        "you cannot attribute. Every finding needs its own source_url chosen from "
+        "the URL list; if a note has no matching URL, omit that finding. Keep the "
+        "publication date each note gives.\n\n"
+        f"URLS THE SEARCH RETURNED:\n{url_block}\n\nRESEARCH NOTES:\n{text[:12000]}"
+    )
+    model = config.OPENROUTER_STRUCTURING_MODEL
+    try:
+        resp = openrouter.chat(
+            api_key, model,
+            [{"role": "system", "content": "You convert research notes into strict JSON."},
+             {"role": "user", "content": prompt}],
+            response_format=RESEARCH_SCHEMA,
+            max_tokens=settings.get("research_max_tokens"),
+            timeout=config.RESEARCH_TIMEOUT,
+        )
+    except Exception as e:
+        logging.warning(f"Structuring pass via {model} failed: {e}")
+        return []
+    parsed = openrouter.parse_json_lenient(openrouter.extract_text(resp)) or {}
+    out = parsed.get("findings")
+    logging.info(f"Structuring pass via {model} recovered "
+                 f"{len(out) if isinstance(out, list) else 0} finding(s) from prose")
+    return out if isinstance(out, list) else []
+
+
 def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -> dict:
     """Execute a single research call. Never raises — a failure degrades to no_data."""
     settings = settings or config.default_settings()
@@ -391,6 +431,14 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
     findings = parsed.get("findings")
     if not isinstance(findings, list):
         findings = []
+    if not findings and not caps["structured_output"] and (text or "").strip():
+        # A model that cannot be constrained to JSON answered in prose. Losing
+        # its research to a formatting mismatch is the worst possible outcome,
+        # so restate it through a model that can hold the schema.
+        logging.info(f"{model} returned prose ({len(text)} chars); "
+                     f"first 200: {text[:200]!r}")
+        findings = _structure_prose(api_key, text,
+                                    openrouter.extract_citations(resp), settings)
 
     clean: list[dict] = []
     for f in findings:

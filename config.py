@@ -58,6 +58,14 @@ OPENROUTER_BASE_URL = os.getenv('OPENROUTER_BASE_URL', 'https://openrouter.ai/ap
 
 # Stage 1: parallel live-web research calls.
 OPENROUTER_RESEARCH_MODEL = os.getenv('OPENROUTER_RESEARCH_MODEL', 'deepseek/deepseek-v4-flash')
+
+# Some strong search models (the Perplexity Sonar family) cannot be constrained
+# to JSON at all — they answer in prose. When one of those is chosen for
+# research, its prose is converted into our findings schema by this model,
+# which must support structured output. Cheap: the input is one answer, and no
+# web search is involved.
+OPENROUTER_STRUCTURING_MODEL = os.getenv(
+    'OPENROUTER_STRUCTURING_MODEL', 'deepseek/deepseek-v4-flash')
 # Stage 2: one synthesis call that writes the finished report.
 OPENROUTER_REPORT_MODEL = os.getenv('OPENROUTER_REPORT_MODEL', 'moonshotai/kimi-k3')
 # The premium tier swaps only the synthesis model. Defaulting to the standard report
