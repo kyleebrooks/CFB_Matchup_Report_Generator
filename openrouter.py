@@ -178,15 +178,53 @@ def fit_max_tokens(model: str, requested: int | None, messages: list | None = No
         allowed = min(allowed, int(ceiling))
     context = row.get('context_length')
     if context:
-        # Roughly four characters per token, then a wide margin: overshooting
-        # the estimate costs a rejected request, undershooting costs nothing.
+        # There is no local tokenizer here, and the message text is not the
+        # whole input: the search plugin's instructions and the results it
+        # injects land on the input side too, which is how a 4KB prompt bills
+        # as 3900 input tokens. A tuned characters-per-token ratio would be
+        # false precision against that, so assume a dense two characters per
+        # token and keep an eighth of the window free on top. Anything this
+        # still gets wrong, the upstream's own numbers correct on retry.
         chars = sum(len(str(m.get('content') or '')) for m in (messages or []))
-        room = int(context) - (chars // 3) - 1024
+        room = int(context) - (chars // 2) - max(2048, int(context) // 8)
         allowed = min(allowed, max(room, 256))
     if allowed < requested:
         logging.info(f"max_tokens trimmed {requested} -> {allowed} to fit "
                      f"{model} (context {context}, cap {ceiling})")
     return allowed
+
+
+_CONTEXT_LIMIT_RE = re.compile(
+    r"maximum context length is (\d+) tokens.*?\(\s*(\d+) of text input", re.S
+)
+
+
+def refit_from_context_error(detail: str, current: int | None) -> int | None:
+    """Recompute max_tokens from an over-context rejection's own numbers.
+
+    OpenRouter's 400 states the window and how much of the request was input:
+    "maximum context length is 127072 tokens. However, you requested about
+    128529 tokens (3908 of text input, 124621 in the output)". Those figures
+    beat any estimate we could make locally, so a rejection on size is worth
+    one more attempt rather than a lost research call. Returns None when the
+    message is not that error, or the numbers do not explain it. The budget
+    it returns is always strictly smaller than the one that was rejected.
+    """
+    match = _CONTEXT_LIMIT_RE.search(detail or "")
+    if not match:
+        return None
+    window, prompt_tokens = int(match.group(1)), int(match.group(2))
+    # Nine tenths of what is left, because the input side can grow between
+    # attempts as the plugin pulls different search results.
+    room = int((window - prompt_tokens) * 0.9)
+    if room < 256:
+        return None
+    if current and room >= current:
+        # The stated figures leave room for the budget that was just refused,
+        # so the size is not what upstream is actually objecting to. Retrying
+        # the same request would spend an attempt to learn nothing.
+        return None
+    return room
 
 
 def chat(
@@ -221,15 +259,23 @@ def chat(
 
     dropped_schema = False
     dropped_reasoning = False
+    refitted = False
     last_err: Exception | None = None
 
-    for attempt in range(retries + 1):
+    # Shedding a rejected parameter is not a transient failure, so it gets its
+    # own small budget rather than eating the backoff retries: a model that
+    # turns down both a schema and a reasoning effort used to arrive at the
+    # first real timeout with no attempts left.
+    attempt = 0
+    ladder = 0
+    while attempt <= retries and ladder <= 3:
         try:
             resp = requests.post(url, json=body, headers=_headers(api_key), timeout=timeout)
         except requests.RequestException as e:
             last_err = e
             logging.warning(f"OpenRouter {model} transport error (attempt {attempt + 1}): {e}")
             time.sleep(2 ** attempt)
+            attempt += 1
             continue
 
         if resp.status_code == 200:
@@ -254,8 +300,25 @@ def chat(
                 )
                 last_err = OpenRouterError("provider finish_reason=error", 200)
                 time.sleep(wait)
+                attempt += 1
                 continue
             return data
+
+        # A rejection on size names its own fix, so take the upstream's
+        # numbers over the estimate that got us here. This runs ahead of the
+        # parameter drops below: an over-context request is not the schema's
+        # fault, and shedding one would only lose the schema and fail again.
+        if resp.status_code == 400 and not refitted:
+            fitted = refit_from_context_error(resp.text, body.get("max_tokens"))
+            if fitted:
+                logging.warning(
+                    f"OpenRouter {model} over context; refitting max_tokens "
+                    f"{body.get('max_tokens')} -> {fitted} from the upstream's own count"
+                )
+                body["max_tokens"] = fitted
+                refitted = True
+                ladder += 1
+                continue
 
         # A model that rejects one unsupported parameter usually rejects the
         # next as well, so the retry ladder sheds them one at a time rather
@@ -266,6 +329,7 @@ def chat(
                             f"({resp.status_code}); retrying without it")
             body.pop("reasoning", None)
             dropped_reasoning = True
+            ladder += 1
             continue
         if resp.status_code in (400, 404, 422) and response_format and not dropped_schema:
             logging.warning(
@@ -274,6 +338,7 @@ def chat(
             )
             body.pop("response_format", None)
             dropped_schema = True
+            ladder += 1
             continue
 
         if resp.status_code in (408, 409, 429, 500, 502, 503, 504) and attempt < retries:
@@ -281,6 +346,7 @@ def chat(
             logging.warning(f"OpenRouter {model} HTTP {resp.status_code}; retrying in {wait}s")
             time.sleep(wait)
             last_err = OpenRouterError(f"HTTP {resp.status_code}", resp.status_code, resp.text[:800])
+            attempt += 1
             continue
 
         raise OpenRouterError(
