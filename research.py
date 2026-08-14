@@ -416,12 +416,21 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
             timeout=config.RESEARCH_TIMEOUT,
         )
     except Exception as e:
-        logging.warning(f"Research call '{job['key']}' failed: {e}")
+        # Carry the upstream's own words. "OpenRouter request failed" alone
+        # cannot be acted on; the status and body say whether the model is
+        # unavailable to this account, the parameters were refused, or the
+        # provider is simply down.
+        status = getattr(e, "status", None)
+        body = (getattr(e, "body", "") or "")[:400]
+        logging.warning(
+            f"Research call '{job['key']}' failed on {model}: {e}"
+            + (f" | HTTP {status}" if status else "")
+            + (f" | upstream: {body}" if body else ""))
         return {
             "findings": [],
             "no_data": True,
             "notes": f"Live web research unavailable for this section ({e.__class__.__name__}).",
-            "error": str(e)[:300],
+            "error": (f"HTTP {status}: " if status else "") + (body or str(e))[:300],
             "citations": [],
             "usage": {},
         }
