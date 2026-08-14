@@ -443,7 +443,12 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
     findings = parsed.get("findings")
     if not isinstance(findings, list):
         findings = []
-    if not findings and not caps["structured_output"] and (text or "").strip():
+    # Answering in the schema and answering with findings are different
+    # things. A well-formed {"no_data": true, "findings": []} is a complete
+    # answer meaning the model looked and found nothing; restating that
+    # through a second model costs a call and recovers what is not there.
+    held_the_schema = isinstance(parsed.get("findings"), list) or "no_data" in parsed
+    if not findings and not held_the_schema and not caps["structured_output"] and (text or "").strip():
         # A model that cannot be constrained to JSON answered in prose. Losing
         # its research to a formatting mismatch is the worst possible outcome,
         # so restate it through a model that can hold the schema.
@@ -488,6 +493,15 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
         # Model answered but not in JSON — keep the prose so the section is not silently empty.
         result["raw_text"] = text[:4000]
         result["notes"] = result["notes"] or "Model returned unstructured text; preserved verbatim."
+    if not clean:
+        # An empty section is either "nothing happened" or "the search did not
+        # reach anything usable", and only the model's own note tells them
+        # apart. It is the first thing wanted when a feed comes up dry, so it
+        # goes in the log rather than only into the returned bucket.
+        logging.info(
+            f"Research call '{job['key']}' on {model} found nothing"
+            + (f"; it says: {result['notes'][:300]}" if result["notes"] else "")
+            + f" (search returned {len(result['citations'])} citation(s))")
     return result
 
 
