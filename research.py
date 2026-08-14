@@ -341,23 +341,37 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
     """Execute a single research call. Never raises — a failure degrades to no_data."""
     settings = settings or config.default_settings()
     prompt = job.get("prompt") or _build_prompt(job, ctx)
+    model = settings["research_model"]
+    # Only send what this model accepts. A rejected parameter fails the whole
+    # call, and a research call that fails is a section that silently comes
+    # back empty — which is exactly what a Perplexity Sonar model did: it takes
+    # neither response_format nor, on the base models, reasoning.
+    caps = openrouter.capabilities(model)
+    # A model that browses natively needs no plugin; attaching one would buy a
+    # second, redundant search on top of the one it runs itself.
+    plugins = None if caps["native_search"] else openrouter.web_search_plugin(
+        settings,
+        search_prompt=(
+            "Live web results retrieved just now. Prefer the most recently published "
+            "items and read the full page content before citing it:"
+        ),
+    )
+    if not caps["structured_output"]:
+        # The prompt already demands a bare JSON object and parse_json_lenient
+        # copes with prose around it, so the schema is a bonus, not a crutch.
+        logging.info(f"Research model {model} takes no response_format; "
+                     f"relying on the prompt's JSON contract")
     try:
         resp = openrouter.chat(
             api_key,
-            settings["research_model"],
+            model,
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            plugins=openrouter.web_search_plugin(
-                settings,
-                search_prompt=(
-                    "Live web results retrieved just now. Prefer the most recently published "
-                    "items and read the full page content before citing it:"
-                ),
-            ),
-            response_format=RESEARCH_SCHEMA,
-            effort=settings["research_effort"],
+            plugins=plugins,
+            response_format=RESEARCH_SCHEMA if caps["structured_output"] else None,
+            effort=settings["research_effort"] if caps["reasoning"] else None,
             max_tokens=settings["research_max_tokens"],
             timeout=config.RESEARCH_TIMEOUT,
         )
