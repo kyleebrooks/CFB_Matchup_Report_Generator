@@ -387,9 +387,12 @@ def _run_one(api_key: str, job: dict, ctx: dict, settings: dict | None = None) -
     # back empty — which is exactly what a Perplexity Sonar model did: it takes
     # neither response_format nor, on the base models, reasoning.
     caps = openrouter.capabilities(model)
-    # A model that browses natively needs no plugin; attaching one would buy a
-    # second, redundant search on top of the one it runs itself.
-    plugins = None if caps["native_search"] else openrouter.web_search_plugin(
+    # Every model gets the search plugin, including the ones that browse
+    # natively. Withholding it from Sonar was a theory about redundant cost;
+    # what actually happened is that Sonar reported it "could not run
+    # independent live web searches" and returned no_data. Search results are
+    # the whole input to this job, so they are never the thing to economise on.
+    plugins = openrouter.web_search_plugin(
         settings,
         search_prompt=(
             "Live web results retrieved just now. Prefer the most recently published "
