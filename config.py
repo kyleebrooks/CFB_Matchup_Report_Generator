@@ -85,6 +85,13 @@ OPENROUTER_SEARCH_ENGINE = os.getenv('OPENROUTER_SEARCH_ENGINE', 'exa')
 # Exa bills per result ($4/1000). Five results still yield 2-4k characters of extract
 # each, which is ample per topic; accounts can raise this individually.
 OPENROUTER_SEARCH_MAX_RESULTS = int(os.getenv('OPENROUTER_SEARCH_MAX_RESULTS', '5'))
+# The wire is a different job from a report section. A report asks a narrow
+# question and five deep extracts answer it; the wire asks "what broke across
+# 130 programs today", and five links cannot answer that no matter which model
+# reads them. Exa bills per result, so this is the wire's main cost dial:
+# roughly $0.004 x this number, per search, and the news feed runs three
+# searches a pull. Set FEED_SEARCH_MAX_RESULTS to trade breadth against spend.
+FEED_SEARCH_MAX_RESULTS = int(os.getenv('FEED_SEARCH_MAX_RESULTS', '15'))
 
 # Sent as HTTP-Referer / X-Title so the calls are attributable in the OpenRouter dashboard.
 OPENROUTER_REFERER = os.getenv('OPENROUTER_REFERER', 'https://afplnapicks.com')

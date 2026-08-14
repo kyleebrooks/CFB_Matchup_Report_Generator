@@ -396,6 +396,15 @@ def extract_citations(resp: dict) -> list[dict]:
                 "url": url,
                 "title": (cite.get("title") or "").strip(),
                 "content": (cite.get("content") or "").strip(),
+                # Exa dates the results it returns. That is an independent
+                # read on freshness — worth keeping for the pages that refuse
+                # to be fetched, where the alternative is no date at all.
+                "published": next(
+                    (str(cite[k]).strip() for k in
+                     ("published_date", "publishedDate", "published_time",
+                      "publishedTime", "published", "date")
+                     if cite.get(k)),
+                    ""),
             })
     return out
 
