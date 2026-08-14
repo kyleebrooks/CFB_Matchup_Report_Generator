@@ -629,12 +629,18 @@ def _pull_news(state: dict) -> dict:
         if bucket.get('error'):
             errors.append(bucket['error'][:80])
     counts = _store_items('news', findings, window_days, verify_pages=True)
-    if errors and not findings:
-        status = f"Research error: {'; '.join(errors)[:180]}"
+    model = settings.get('research_model', '?')
+    if errors:
+        # Even a partial failure is named: a search that errored is not the
+        # same thing as a quiet news day, and the console must not imply it is.
+        status = (f"{model}: {'; '.join(errors)[:120]}"
+                  if not findings else
+                  f"OK — {len(findings)} found via {model}, {counts['inserted']} new "
+                  f"({len(errors)} of {len(jobs)} searches errored)")
     else:
-        status = (f"OK — {len(findings)} found across {len(jobs)} searches, "
-                  f"{counts['inserted']} new, {counts['stale']} page-dated old "
-                  f"and dropped, {counts['undated']} unverifiable and dropped")
+        status = (f"OK — {len(findings)} found via {model} across {len(jobs)} "
+                  f"searches, {counts['inserted']} new, {counts['stale']} "
+                  f"page-dated old, {counts['undated']} unverifiable")
     return {'found': len(findings), 'counts': counts, 'status': status}
 
 
