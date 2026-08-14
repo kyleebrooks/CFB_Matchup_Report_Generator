@@ -72,6 +72,11 @@ def text_models(force: bool = False) -> list[dict]:
             'id': model_id,
             'name': (m.get('name') or model_id).strip(),
             'native_search': NATIVE_SEARCH_PARAM in params,
+            # What the model will actually accept. Sending a parameter a model
+            # rejects fails the whole call, so callers consult these first.
+            'structured_output': ('response_format' in params
+                                  or 'structured_outputs' in params),
+            'reasoning': 'reasoning' in params,
             'context': m.get('context_length'),
             'context_length': m.get('context_length'),
             'prompt_price': pricing.get('prompt'),
@@ -85,6 +90,24 @@ def text_models(force: bool = False) -> list[dict]:
     with _MODELS_LOCK:
         _MODELS_CACHE.update(at=time.time(), rows=rows)
     return rows
+
+
+
+def capabilities(model: str) -> dict:
+    """What this model accepts, from the cached catalogue.
+
+    'known' is False when the catalogue could not be read or does not carry
+    the model; callers then fall back to sending everything, which is what the
+    service did before capabilities existed.
+    """
+    for row in text_models():
+        if row['id'] == model:
+            return {'known': True,
+                    'structured_output': row['structured_output'],
+                    'reasoning': row['reasoning'],
+                    'native_search': row['native_search']}
+    return {'known': False, 'structured_output': True,
+            'reasoning': True, 'native_search': False}
 
 
 class OpenRouterError(RuntimeError):
@@ -159,6 +182,7 @@ def chat(
         body["max_tokens"] = max_tokens
 
     dropped_schema = False
+    dropped_reasoning = False
     last_err: Exception | None = None
 
     for attempt in range(retries + 1):
@@ -195,6 +219,16 @@ def chat(
                 continue
             return data
 
+        # A model that rejects one unsupported parameter usually rejects the
+        # next as well, so the retry ladder sheds them one at a time rather
+        # than giving up after the schema.
+        if (resp.status_code in (400, 404, 422) and body.get("reasoning")
+                and dropped_schema and not dropped_reasoning):
+            logging.warning(f"OpenRouter {model} rejected reasoning "
+                            f"({resp.status_code}); retrying without it")
+            body.pop("reasoning", None)
+            dropped_reasoning = True
+            continue
         if resp.status_code in (400, 404, 422) and response_format and not dropped_schema:
             logging.warning(
                 f"OpenRouter {model} rejected response_format ({resp.status_code}); "
