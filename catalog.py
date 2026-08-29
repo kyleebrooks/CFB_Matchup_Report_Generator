@@ -43,7 +43,9 @@ def _matchup_sections() -> list[dict]:
         if source is None:
             source = SYNTHESIS if title in ('Matchup Overview',) else CFBD
             if title == 'Final Prediction':
-                source = f'{SYNTHESIS}, anchored to the statistical baseline ({COMPUTED})'
+                source = (f'{SYNTHESIS}, anchored to the statistical baseline '
+                          f'({COMPUTED}); the model\'s adjusted final call is parsed '
+                          f'back out and becomes the graded prediction of record')
         out.append({
             'title': title,
             'source': source,
@@ -95,7 +97,8 @@ def describe(report_type: str) -> dict:
             'production, schedule, betting lines (25 requests)',
             'Injury feed — local SQLite, collected on demand, filtered to the two teams',
             f'Live web research — {research_count} parallel calls, one per news section',
-            'Computed baseline — SP+/FPI/Elo blended with the market line',
+            f'Computed baseline — SP+/FPI/Elo blended with the market line '
+            f'({round(config.MARKET_BLEND_WEIGHT * 100)}% market weight)',
         ]
     elif report_type == 'team':
         sections = _team_sections()

@@ -40,9 +40,13 @@ STAGES = {
 AUDIT_SECTIONS = [
     ("Scoreboard", "The overall record: predictions made, graded, mean absolute margin "
                    "error, straight-up winner percentage, against-the-spread record, "
-                   "totals record. State it plainly."),
+                   "totals record. State it plainly. Set mean_abs_error against "
+                   "baseline_mean_abs_error — the graded numbers are the models' own "
+                   "adjusted final calls, and that pair says whether adjusting the "
+                   "statistical anchor is adding accuracy or subtracting it."),
     ("Model Comparison", "Every report model's graded record side by side, as a table: "
-                         "predictions, MAE, winner %, ATS. Say which model is earning "
+                         "predictions, MAE (vs the baseline MAE on the same games), "
+                         "winner %, ATS. Say which model is earning "
                          "its cost and which is not, and how confident the sample size "
                          "allows you to be."),
     ("The Days-Out Curve", "Does the prediction get better as kickoff approaches? Read "
@@ -96,14 +100,18 @@ def _redact(rows: list[dict]) -> list[dict]:
 
 def _slim(rows: list[dict], limit: int = 120, public: bool = False) -> list[dict]:
     keep = ('run_date', 'season', 'week', 'home_short', 'away_short', 'report_model',
-            'consensus_margin', 'market_margin', 'projected_total', 'market_total',
+            'consensus_margin', 'final_margin', 'final_total', 'final_source',
+            'ats_pick', 'market_margin', 'projected_total', 'market_total',
             'home_win_probability', 'graded', 'actual_home', 'actual_away',
-            'actual_margin', 'margin_error', 'winner_correct', 'ats_result',
-            'total_result', 'game_date')
+            'actual_margin', 'margin_error', 'baseline_margin_error',
+            'winner_correct', 'ats_result', 'total_result', 'game_date')
     if public:
         # Not even the KEY may appear in the public prompt — a null 'report_model'
-        # still tells a reader that models exist and vary.
-        keep = tuple(k for k in keep if k != 'report_model')
+        # still tells a reader that models exist and vary, and 'final_source' or the
+        # baseline error would reveal there is an anchor being adjusted.
+        keep = tuple(k for k in keep
+                     if k not in ('report_model', 'final_source',
+                                  'consensus_margin', 'baseline_margin_error'))
     return [{k: r.get(k) for k in keep} for r in rows[:limit]]
 
 
@@ -174,9 +182,15 @@ def generate(kind: str, *, year=None, settings=None, watermark=None,
     else:
         sections = REVIEW_SECTIONS
         noun = 'Prediction Review'
+
+        # Summaries carry the baseline-vs-final comparison; that is machinery, and the
+        # public review never sees machinery.
+        def _no_machinery(summary: dict) -> dict:
+            return {k: v for k, v in summary.items() if k != 'baseline_mean_abs_error'}
+
         bundle = {
-            'overall': comparison['overall'],
-            'days_out_curve': curve,
+            'overall': _no_machinery(comparison['overall']),
+            'days_out_curve': [_no_machinery(b) for b in curve],
             'graded_predictions': _slim(_redact(graded), public=True),
             'ungraded_pending': len(everything) - len(graded),
         }

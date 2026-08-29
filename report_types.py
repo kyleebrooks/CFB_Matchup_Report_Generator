@@ -237,7 +237,8 @@ REPORT_TYPES: dict[str, dict] = {
             'transfer-portal moves, the real head-to-head series, game-day weather and '
             'broadcast, against-the-spread records, practice news, media analysis, ten '
             'charts including a weather-and-venue conditions card, and a '
-            'scoreboard-style final prediction card.'
+            'scoreboard-style final prediction card carrying the model\'s own '
+            'projected score and its call against the market line.'
         ),
         'required': ['home_full', 'away_full', 'home_short', 'away_short'],
         'optional': ['year', 'kickoff'],

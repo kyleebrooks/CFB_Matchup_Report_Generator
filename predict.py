@@ -108,11 +108,16 @@ def build_baseline(
     market_margin = (market or {}).get("market_margin_home")
     market_total = (market or {}).get("market_total")
 
-    # The market line is the strongest single predictor available, so when it exists we
-    # blend it 50/50 with the ratings consensus rather than ignoring either.
+    # The market line is a strong predictor, so when it exists it is blended with the
+    # ratings consensus. MARKET_BLEND_WEIGHT sets how much of the final number the
+    # market supplies: 0 = pure ratings, 1 = just quote the line.
+    weight = config.MARKET_BLEND_WEIGHT
     if model_margin is not None and market_margin is not None:
-        consensus = round((model_margin + market_margin) / 2.0, 2)
-        consensus_basis = "50/50 blend of the ratings consensus and the market line"
+        consensus = round((1.0 - weight) * model_margin + weight * market_margin, 2)
+        consensus_basis = (
+            f"blend of the ratings consensus ({round((1.0 - weight) * 100)}%) "
+            f"and the market line ({round(weight * 100)}%)"
+        )
     elif model_margin is not None:
         consensus = model_margin
         consensus_basis = "ratings consensus (no market line available)"
@@ -125,8 +130,8 @@ def build_baseline(
 
     total, total_basis = _projected_total(home_profile, away_profile)
     if market_total:
-        total = (total + market_total) / 2.0
-        total_basis += " blended with the market total"
+        total = (1.0 - weight) * total + weight * market_total
+        total_basis += f" blended with the market total ({round(weight * 100)}% market)"
 
     projection = None
     if consensus is not None:
@@ -149,6 +154,7 @@ def build_baseline(
         "market_margin": market_margin,
         "market_total": market_total,
         "market_providers": (market or {}).get("providers") or [],
+        "market_blend_weight": weight,
         "consensus_margin": consensus,
         "consensus_basis": consensus_basis,
         "projected_total": round(total, 1),
@@ -161,7 +167,86 @@ def build_baseline(
         "method": (
             "Each rating system's margin = (home rating - away rating) + home-field advantage; "
             f"Elo converted at {config.ELO_POINTS_PER_MARGIN} Elo points per point of margin. "
-            "Win probability is the normal CDF of the consensus margin over a "
-            f"{config.MARGIN_STDDEV}-point standard deviation."
+            f"Where a market number exists it carries {round(weight * 100)}% of the blend "
+            "(MARKET_BLEND_WEIGHT). Win probability is the normal CDF of the consensus "
+            f"margin over a {config.MARGIN_STDDEV}-point standard deviation."
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The final call — the report model's adjusted score made the prediction of record
+# ---------------------------------------------------------------------------
+def spread_pick(final_margin, market_margin, home_team: str, away_team: str) -> dict | None:
+    """The against-the-spread call the final margin implies.
+
+    Both margins are home-perspective. Projecting MORE than the line backs the home
+    side at its market number (home line = -market); projecting less takes the away
+    side and the points. Landing exactly on the line is no edge at all.
+    """
+    final_margin, market_margin = _f(final_margin), _f(market_margin)
+    if final_margin is None or market_margin is None:
+        return None
+    if final_margin == market_margin:
+        return {"side": None, "team": None, "line": None,
+                "text": "no edge — the projection lands on the line"}
+    if final_margin > market_margin:
+        side, team, line = "home", home_team, round(-market_margin, 1)
+    else:
+        side, team, line = "away", away_team, round(market_margin, 1)
+    if line == 0:
+        line = 0.0  # normalize -0.0 so a pick-'em never prints as "-0"
+        text = f"{team} (pick 'em)"
+    else:
+        text = f"{team} {line:+g}"
+    return {"side": side, "team": team, "line": line, "text": text}
+
+
+def finalize_prediction(baseline: dict, model_scores: dict | None,
+                        home_team: str, away_team: str) -> dict:
+    """The prediction of record: the report model's adjusted final score when it gave
+    one, the statistical baseline otherwise — plus the market calls it implies.
+
+    This is what the Verdict card renders and what the prediction ledger grades; the
+    baseline stays alongside it so the two can be compared later.
+    """
+    baseline = baseline or {}
+    home = _f((model_scores or {}).get("home_score"))
+    away = _f((model_scores or {}).get("away_score"))
+    if home is not None and away is not None and 0 <= home <= 150 and 0 <= away <= 150:
+        source = "model"
+    else:
+        source = "baseline"
+        projection = baseline.get("projected_score") or {}
+        home, away = _f(projection.get("home_score")), _f(projection.get("away_score"))
+
+    consensus = _f(baseline.get("consensus_margin"))
+    market_margin = _f(baseline.get("market_margin"))
+    market_total = _f(baseline.get("market_total"))
+
+    if home is None or away is None:
+        return {"source": "none", "home_score": None, "away_score": None,
+                "margin": None, "total": None, "home_win_probability": None,
+                "points_off_baseline": None, "ats_pick": None, "total_pick": None}
+
+    margin = round(home - away, 1)
+    total = round(home + away, 1)
+    total_pick = None
+    if market_total:
+        if total > market_total:
+            total_pick = "over"
+        elif total < market_total:
+            total_pick = "under"
+    return {
+        "source": source,
+        "home_score": round(home, 1),
+        "away_score": round(away, 1),
+        "home_score_rounded": max(0, int(round(home))),
+        "away_score_rounded": max(0, int(round(away))),
+        "margin": margin,
+        "total": total,
+        "home_win_probability": round(win_probability(margin) * 100, 1),
+        "points_off_baseline": round(margin - consensus, 1) if consensus is not None else None,
+        "ats_pick": spread_pick(margin, market_margin, home_team, away_team),
+        "total_pick": total_pick,
     }

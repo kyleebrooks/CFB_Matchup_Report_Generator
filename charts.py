@@ -641,21 +641,37 @@ def chart_win_probability(baseline, home_l, away_l, home_c, away_c):
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
-def chart_verdict(baseline, home_l, away_l, home_c, away_c):
+def chart_verdict(baseline, home_l, away_l, home_c, away_c, final=None):
     """The reveal: a scoreboard-style card for the final prediction.
 
-    Projected score in each school's color, the win-probability split, and the
-    model's spread set against the market — the numbers the whole report builds
-    to, presented like a result rather than buried in prose."""
-    projection = (baseline or {}).get("projected_score") or {}
-    home_pts, away_pts = _f(projection.get("home_score")), _f(projection.get("away_score"))
-    prob = _f((baseline or {}).get("home_win_probability"))
+    Projected score in each school's color, the win-probability split, the model's
+    spread set against the market and the pick that comparison implies — the numbers
+    the whole report builds to, presented like a result rather than buried in prose.
+
+    `final` is the prediction of record from predict.finalize_prediction — the report
+    model's own adjusted call. Without it (the pre-synthesis render, or a report whose
+    FINAL_CALL never parsed) the card falls back to the statistical baseline."""
+    market = _f((baseline or {}).get("market_margin"))
+    market_total = _f((baseline or {}).get("market_total"))
+    if final and _f(final.get("home_score")) is not None:
+        home_pts, away_pts = _f(final["home_score"]), _f(final["away_score"])
+        prob = _f(final.get("home_win_probability"))
+        consensus = _f(final.get("margin"))
+        total = _f(final.get("total"))
+        pick = final.get("ats_pick")
+        from_model = final.get("source") == "model"
+    else:
+        projection = (baseline or {}).get("projected_score") or {}
+        home_pts, away_pts = _f(projection.get("home_score")), _f(projection.get("away_score"))
+        prob = _f((baseline or {}).get("home_win_probability"))
+        consensus = _f(baseline.get("consensus_margin"))
+        total = _f(baseline.get("projected_total"))
+        pick = predict.spread_pick(consensus, market, home_l, away_l)
+        from_model = False
     if home_pts is None or away_pts is None or prob is None:
         return None
-    consensus = _f(baseline.get("consensus_margin"))
-    market = _f(baseline.get("market_margin"))
-    total = _f(baseline.get("projected_total"))
-    market_total = _f(baseline.get("market_total"))
+    if prob > 1:  # stored as a percentage (62.3); the bar math needs the fraction
+        prob = prob / 100.0
 
     fig, ax = plt.subplots(figsize=(FIG_W, 5.4))
     ax.axis("off")
@@ -704,8 +720,18 @@ def chart_verdict(baseline, home_l, away_l, home_c, away_c):
     if market is not None and consensus is not None:
         edge = consensus - market
         chips.append(("MARKET", f"{spread_text(market)}  (edge {edge:+.1f})"))
+        pick_text = "NO EDGE"
+        if pick and pick.get("side"):
+            team = str(pick.get("team") or "")
+            team = team if len(team) <= 15 else team[:14] + "…"
+            line = pick.get("line")
+            pick_text = f"{team} (PK)" if not line else f"{team} {line:+.1f}"
+        chips.append(("THE PICK", pick_text))
     if total is not None:
-        text = f"{total:.0f}" + (f"  (market {market_total:.0f})" if market_total else "")
+        text = f"{total:.0f}"
+        if market_total:
+            lean = "OVER" if total > market_total else ("UNDER" if total < market_total else "PUSH")
+            text += f"  ({lean} {market_total:g})"
         chips.append(("PROJECTED TOTAL", text))
     width = 0.9 / len(chips)
     for i, (label, value) in enumerate(chips):
@@ -719,8 +745,16 @@ def chart_verdict(baseline, home_l, away_l, home_c, away_c):
                 fontweight="bold", color=config.CHART_TEXT)
 
     basis = (baseline or {}).get("consensus_basis") or ""
-    if basis:
-        ax.text(0.5, 0.02, f"Consensus margin: {basis}.", ha="center", va="bottom",
+    if from_model:
+        off = _f(final.get("points_off_baseline"))
+        note = "The analyst model's own call"
+        if off is not None:
+            note += f", {off:+.1f} pts off the statistical baseline"
+        note += f" — {basis}." if basis else "."
+    else:
+        note = f"Consensus margin: {basis}." if basis else ""
+    if note:
+        ax.text(0.5, 0.02, note, ha="center", va="bottom",
                 fontsize=7.5, color=config.CHART_MUTED, style="italic")
     fig.tight_layout()
     return _encode(fig)
@@ -799,24 +833,55 @@ def build_all(stats, percentiles, baseline, home_meta, away_meta, home_label, aw
         })
 
     # The ninth chart is the reveal: it renders WITH the Final Prediction section at
-    # the end of the report (placement="finale"), not in the mid-report gallery.
+    # the end of the report (placement="finale"), not in the mid-report gallery. This
+    # first render shows the statistical baseline; once the report model's FINAL_CALL
+    # is parsed, rebuild_verdict swaps in the card built from its own numbers.
     verdict_img = None
     try:
         verdict_img = chart_verdict(baseline, home_label, away_label, home_c, away_c)
     except Exception as e:
         logging.warning(f"Chart 'verdict' failed to render: {e}")
     if verdict_img:
-        out.append({
-            "key": "verdict",
-            "title": "The Verdict",
-            "caption": ("The projected final score, win probability and the model's "
-                        "spread against the market — the report's bottom line in one "
-                        "card."),
-            "img": verdict_img,
-            "available": True,
-            "placement": "finale",
-        })
+        out.append(_verdict_entry(verdict_img))
     return out
+
+
+def _verdict_entry(img) -> dict:
+    return {
+        "key": "verdict",
+        "title": "The Verdict",
+        "caption": ("The projected final score, win probability, the model's spread "
+                    "set against the market and the pick that comparison implies — "
+                    "the report's bottom line in one card."),
+        "img": img,
+        "available": True,
+        "placement": "finale",
+    }
+
+
+def rebuild_verdict(chart_set, baseline, final, home_meta, away_meta,
+                    home_label, away_label) -> None:
+    """Re-render the Verdict card from the report model's own final call.
+
+    Runs after synthesis, once FINAL_CALL is parsed, replacing (or adding) the card
+    in place so the PDF closes on the numbers that are actually filed and graded.
+    Failures leave the baseline card standing — never a missing finale."""
+    if not CHARTS_AVAILABLE or not final:
+        return
+    home_c, away_c = resolve_colors(home_meta, away_meta)
+    img = None
+    try:
+        img = chart_verdict(baseline, home_label, away_label, home_c, away_c, final=final)
+    except Exception as e:
+        logging.warning(f"Verdict rebuild from the final call failed: {e}")
+    if not img:
+        return
+    for entry in chart_set:
+        if entry.get("key") == "verdict":
+            entry["img"] = img
+            entry["caption"] = _verdict_entry(img)["caption"]
+            return
+    chart_set.append(_verdict_entry(img))
 
 
 # ---------------------------------------------------------------------------

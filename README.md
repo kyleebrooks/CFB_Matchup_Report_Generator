@@ -353,6 +353,7 @@ All of `config.py` is env-overridable. The ones worth knowing:
 | `REPORT_EFFORT` | `high` | lower this before lowering the token budget |
 | `HOME_FIELD_ADVANTAGE` | `2.4` | points added to every rating differential |
 | `MARGIN_STDDEV` | `13.5` | drives the win-probability curve |
+| `MARKET_BLEND_WEIGHT` | `0.5` | market share of the baseline blend; `0` pure ratings, `1` pure line |
 | `TOP_PLAYERS_PER_TEAM` | `18` | player-PPA pruning before the report prompt |
 | `CFBD_MAX_WORKERS` | `4` | concurrent CFBD requests; raise carefully, CFBD rate-limits |
 | `ROTOWIRE_DB_PATH` | `./rotowire.db` | local SQLite injury feed |
@@ -379,10 +380,18 @@ styled placeholder of identical size, so page layout never shifts between report
 ## Prediction
 
 `predict.py` computes a projected margin from each rating system independently, blends
-them, and — when CFBD returns a betting line for the game — blends that in 50/50. The
-report model receives this as an anchor it must state explicitly and then justify any
-adjustment away from, based on injuries, roster news and matchup edges. Reports are
-graded on how close the final prediction lands to the real score.
+them, and — when CFBD returns a betting line for the game — blends that in at
+`MARKET_BLEND_WEIGHT` (default 0.5; `0` ignores the market entirely, `1` just quotes
+the line). The report model receives this as an anchor it must state explicitly and
+then justify any adjustment away from, based on injuries, roster news and matchup
+edges — and its adjusted score is the prediction of record: the model closes the
+report with a machine-read `FINAL_CALL` line, which is parsed out, rendered on the
+Verdict card together with the against-the-spread call it implies (lay the points or
+take them, over or under the market total), filed in the prediction ledger, and graded
+against the real final score. The baseline's own error is graded alongside, so the
+prediction audit shows whether the adjustment beats the anchor. If a report ever
+arrives without a parseable `FINAL_CALL`, the baseline stands in as the prediction of
+record for that run.
 
 ## Timing and the async job API
 
