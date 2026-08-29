@@ -7,6 +7,8 @@ statistical baseline. Its job is to reason over that bundle and produce the pros
 
 import json
 import logging
+import math
+import re
 
 import config
 import openrouter
@@ -81,15 +83,21 @@ def _section_plan(home_full: str, away_full: str) -> list[tuple[str, str]]:
          "baseline. If the weather block is marked unavailable, say so in one sentence "
          "and move on — never invent a forecast."),
         ("Final Prediction",
-         "The reveal. Your overall verdict, a projected final score, and YOUR point spread — "
-         "weigh every input above: the ratings, the efficiency mismatches, the form trend, the "
-         "injuries, the roster and practice news, the game conditions (weather moves totals "
-         "and closes passing-game gaps — fold it in explicitly when present), and the "
-         "statistical baseline. Write it with "
-         "conviction: name the winner in the first sentence, then justify it. The Verdict "
-         "scoreboard card renders directly below this section with the projected score, win "
-         "probability and model-vs-market spread — let your numbers agree with it exactly, and "
-         "do not repeat it as a table."),
+         "The reveal, in three beats, written with conviction — name the winner in the "
+         "first sentence. FIRST, your own game: the projected final score and margin "
+         "after every adjustment you have argued for above. This is YOUR number, not the "
+         "baseline's and not the market's. SECOND, the market: quote the actual line and "
+         "total from betting_market and make the against-the-spread call in plain "
+         "handicapper's terms — if the book has the favorite at -7.5 and you project them "
+         "to win by 4, the play is the underdog plus the points; if you project them by "
+         "11, lay it. Name the side and the number (e.g. 'take Purdue +7.5'), call the "
+         "total over or under the same way, and where no line exists say so rather than "
+         "inventing one. THIRD, the case: the two or three decisive reasons, drawn from "
+         "everything above — ratings, mismatches, form, injuries, roster news, "
+         "conditions (weather moves totals and closes passing-game gaps — fold it in "
+         "explicitly when present). The Verdict scoreboard card is generated from your "
+         "FINAL_CALL line and renders directly below this section — do not repeat it as "
+         "a table."),
     ]
 
 
@@ -172,19 +180,62 @@ Do not attempt to draw, describe or reproduce them, and never reference a chart 
 
 =========================== PREDICTION ===========================
 The "statistical_baseline" block below is a deterministic projection computed from the
-ratings — and, where available, the market line — before you saw any of the news. Treat it as
-your anchor, not as gospel:
+ratings — and, where available, the market line (consensus_basis names the exact blend) —
+before you saw any of the news. Treat it as your anchor, not as gospel:
 - State the baseline consensus margin explicitly in the Final Prediction section.
 - Then adjust it for what the ratings cannot see: injuries to high-PPA players, roster and
   practice developments, matchup-specific edges, and form trend.
 - Justify the size of your adjustment. Moving several points off the baseline requires a
-  concrete, cited reason. Absent one, stay close to it.
-- Close with your projected final score for both teams and your point spread, stated plainly.
-  This is YOUR number and it is graded against the real result — be accurate, not diplomatic.
+  concrete, cited reason. Absent one, stay close to it. But when the evidence is there,
+  move: an anchor you never adjust adds nothing.
+- YOUR adjusted score is the prediction of record. It — not the baseline — is what the
+  Verdict card renders, what is filed in the prediction ledger, and what is graded
+  against the real final score and the market line. Be accurate, not diplomatic.
+- After the last sentence of the Final Prediction section, end the report with exactly
+  one line in this form — plain text on its own line, no bold, no code fence:
+
+FINAL_CALL: {{"home_score": <home team's points>, "away_score": <away team's points>}}
+
+  Whole numbers, home team first. This line is machine-read and stripped before the PDF
+  renders; the scoreboard card, the recorded prediction and the against-the-spread call
+  are all derived from it, so it must equal the score you stated in prose.
 
 =========================== DATA ===========================
 {json.dumps(bundle, ensure_ascii=False, default=str)}
 """
+
+
+# Any line carrying the FINAL_CALL marker and an inline JSON object. Tolerant of the
+# decoration models add despite instructions (bold, blockquote, a stray fence): the
+# whole line is consumed on cleanup so no marker ever reaches the PDF.
+_FINAL_CALL_RE = re.compile(r"^.*FINAL[ _-]?CALL.*?(\{[^{}\n]*\}).*$", re.M | re.I)
+# A fence pair left empty once the FINAL_CALL line inside it is removed.
+_EMPTY_FENCE_RE = re.compile(r"^```[A-Za-z]*\s*\n\s*```\s*$", re.M)
+
+
+def extract_final_call(text: str) -> tuple[dict | None, str]:
+    """Pull the model's FINAL_CALL score out of the report and strip the marker.
+
+    Returns (scores, cleaned_text): scores is {"home_score", "away_score"} as floats,
+    or None when no line parsed — the caller falls back to the statistical baseline.
+    The last parseable line wins, matching how models correct themselves.
+    """
+    matches = list(_FINAL_CALL_RE.finditer(text or ""))
+    scores = None
+    for m in reversed(matches):
+        try:
+            data = json.loads(m.group(1))
+            home, away = float(data["home_score"]), float(data["away_score"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(home) and math.isfinite(away):
+            scores = {"home_score": home, "away_score": away}
+            break
+    if not matches:
+        return None, text
+    cleaned = _FINAL_CALL_RE.sub("", text)
+    cleaned = _EMPTY_FENCE_RE.sub("", cleaned).rstrip()
+    return scores, cleaned
 
 
 def generate(api_key: str, ctx: dict, bundle: dict, charts: list[dict], registry,

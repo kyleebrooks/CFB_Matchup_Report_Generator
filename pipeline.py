@@ -287,6 +287,18 @@ def generate(
 
     usage = result["usage"]
 
+    # The model's own adjusted score is the prediction of record. Parse its FINAL_CALL
+    # line out of the prose (stripping the marker from the PDF), fall back to the
+    # statistical baseline when it never arrived, and rebuild the Verdict card so the
+    # report closes on the numbers that are actually filed and graded.
+    scores, cleaned_text = report_mod.extract_final_call(result["text"])
+    if scores is None:
+        logging.warning("Report model emitted no parseable FINAL_CALL; the statistical "
+                        "baseline stands as the prediction of record.")
+    final = predict.finalize_prediction(baseline, scores, home_short, away_short)
+    charts_mod.rebuild_verdict(chart_set, baseline, final, home_meta, away_meta,
+                               home_short, away_short)
+
     # --- Stage 5: render -----------------------------------------------------
     step("pdf")
     research_usage = [(r.get("usage") or {}) for r in research_raw.values() if isinstance(r, dict)]
@@ -317,7 +329,7 @@ def generate(
         home_logo=home_meta.get("logo", ""),
         away_logo=away_meta.get("logo", ""),
         report_created=f"{db.format_friendly_date(today)} {today.strftime('%I:%M %p')}",
-        report_markdown=result["text"],
+        report_markdown=cleaned_text,
         charts=chart_set,
         registry=registry,
         meta_lines=meta_lines,
@@ -358,13 +370,15 @@ def generate(
                         report_dir=out_dir, game_date=game_date_iso)
 
     # File the prediction for the permanent record — run date, the full baseline,
-    # the market at this moment, and which report model wrote it — so it can be
-    # graded against the final score and audited later. Never fatal.
+    # the model's own final call, the market at this moment, and which report model
+    # wrote it — so it can be graded against the final score and audited later.
+    # Never fatal.
     try:
         import predictions
         predictions.record(
             account_id=account_id,
             baseline=baseline,
+            final=final,
             report_model=result["model"],
             report_filename=filename,
             home_full=home_full, away_full=away_full,
@@ -388,9 +402,22 @@ def generate(
         "seconds": elapsed,
         "sources": len(registry),
         "sections_with_research": sections_with_data,
-        "projected_score": baseline.get("projected_score"),
+        # The prediction of record — the model's adjusted call (or the baseline when
+        # no FINAL_CALL parsed). baseline_margin keeps the unadjusted anchor visible.
+        "projected_score": {
+            "home_score": final.get("home_score"),
+            "away_score": final.get("away_score"),
+            "home_score_rounded": final.get("home_score_rounded"),
+            "away_score_rounded": final.get("away_score_rounded"),
+        } if final.get("home_score") is not None else baseline.get("projected_score"),
+        "final_margin": final.get("margin"),
+        "final_source": final.get("source"),
+        "ats_pick": (final.get("ats_pick") or {}).get("text"),
+        "total_pick": final.get("total_pick"),
         "baseline_margin": baseline.get("consensus_margin"),
-        "home_win_probability": baseline.get("home_win_probability"),
+        "home_win_probability": final.get("home_win_probability")
+                                 if final.get("home_win_probability") is not None
+                                 else baseline.get("home_win_probability"),
     }
 
 

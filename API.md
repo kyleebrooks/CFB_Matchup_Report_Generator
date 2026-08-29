@@ -249,7 +249,7 @@ Sections, in order: **Overall Outlook · Schedule and Game-by-Game Breakdown · 
 Six parallel live-web research calls (schedule, practice, roster, injuries, media, coaches) feed the news sections; every number comes from CollegeFootballData. Four charts: season results by margin, efficiency percentile radar, PPA form trend, top player impact.
 
 ### `matchup` — Head-to-Head Matchup Report
-Twenty sections and eight charts, with a projected final score anchored to a deterministic SP+/FPI/Elo baseline blended with the market line. Eight parallel research calls.
+Twenty sections and eight charts, with a projected final score anchored to a deterministic SP+/FPI/Elo baseline blended with the market line (weight set by `MARKET_BLEND_WEIGHT`). The report model's own adjusted score is the graded prediction of record, and the Verdict card carries its against-the-spread call. Eight parallel research calls.
 
 ### Planned
 `conference` (conference-wide) and `injury` (league-wide sweep) are reserved names. Entitlements can be granted ahead of the build; requesting one before it ships returns `400`.

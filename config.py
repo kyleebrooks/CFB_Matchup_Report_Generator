@@ -154,6 +154,10 @@ HOME_FIELD_ADVANTAGE = float(os.getenv('HOME_FIELD_ADVANTAGE', '2.4'))
 MARGIN_STDDEV = float(os.getenv('MARGIN_STDDEV', '13.5'))
 # Elo points per point of scoring margin (standard CFB conversion).
 ELO_POINTS_PER_MARGIN = float(os.getenv('ELO_POINTS_PER_MARGIN', '25.0'))
+# Weight the market line carries in the baseline blend, for the margin and the total
+# alike: 0.0 ignores the market entirely (pure SP+/FPI/Elo consensus), 1.0 just quotes
+# the line, 0.5 splits the difference. Only applies when CFBD returns a line at all.
+MARKET_BLEND_WEIGHT = min(1.0, max(0.0, float(os.getenv('MARKET_BLEND_WEIGHT', '0.5'))))
 
 # ---------------------------------------------------------------------------
 # Multi-tenant API (CFBReports.com and other consumers)

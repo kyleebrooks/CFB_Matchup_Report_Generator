@@ -1,10 +1,12 @@
 """Every matchup report's prediction, kept forever and graded against reality.
 
 Each successful matchup report files one row here: when it ran, the game it was about,
-the full statistical baseline it predicted (margin, total, projected score, win
-probability, the market line at that moment), and WHICH REPORT MODEL wrote it. Once
-the game finishes, the row is graded: actual score, margin error, winner right or
-wrong, against-the-spread and total results.
+the full statistical baseline (margin, total, projected score, win probability, the
+market line at that moment), the FINAL CALL — the report model's own adjusted score,
+the prediction of record — and WHICH REPORT MODEL wrote it. Once the game finishes,
+the row is graded against the final call: actual score, margin error, winner right or
+wrong, against-the-spread and total results; the baseline's error is graded alongside
+so the audit can show whether the model's adjustment beats its anchor.
 
 Two report types read this table — an internal audit that compares models and shows
 how predictions move as game day approaches, and a public review that shows the
@@ -45,12 +47,20 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
     projected_home DOUBLE NULL,
     projected_away DOUBLE NULL,
     home_win_probability DOUBLE NULL,
+    final_home DOUBLE NULL,
+    final_away DOUBLE NULL,
+    final_margin DOUBLE NULL,
+    final_total DOUBLE NULL,
+    final_win_probability DOUBLE NULL,
+    final_source VARCHAR(12) NULL,
+    ats_pick VARCHAR(160) NULL,
     baseline_json MEDIUMTEXT NULL,
     graded TINYINT(1) NOT NULL DEFAULT 0,
     actual_home INT NULL,
     actual_away INT NULL,
     actual_margin INT NULL,
     margin_error DOUBLE NULL,
+    baseline_margin_error DOUBLE NULL,
     winner_correct TINYINT(1) NULL,
     ats_result VARCHAR(10) NULL,
     total_result VARCHAR(10) NULL,
@@ -65,28 +75,62 @@ COLUMNS = [
     'game_date', 'home_short', 'away_short', 'home_full', 'away_full',
     'report_model', 'report_filename', 'consensus_margin', 'ratings_margin',
     'market_margin', 'market_total', 'projected_total', 'projected_home',
-    'projected_away', 'home_win_probability', 'baseline_json', 'graded',
+    'projected_away', 'home_win_probability', 'final_home', 'final_away',
+    'final_margin', 'final_total', 'final_win_probability', 'final_source',
+    'ats_pick', 'baseline_json', 'graded',
     'actual_home', 'actual_away', 'actual_margin', 'margin_error',
-    'winner_correct', 'ats_result', 'total_result', 'graded_at',
+    'baseline_margin_error', 'winner_correct', 'ats_result', 'total_result',
+    'graded_at',
 ]
+
+# Columns added after the table first shipped. ensure_schema adds any that are
+# missing, so an existing deployment upgrades in place the first time it records.
+_UPGRADE_COLUMNS = {
+    'final_home':            'DOUBLE NULL',
+    'final_away':            'DOUBLE NULL',
+    'final_margin':          'DOUBLE NULL',
+    'final_total':           'DOUBLE NULL',
+    'final_win_probability': 'DOUBLE NULL',
+    'final_source':          'VARCHAR(12) NULL',
+    'ats_pick':              'VARCHAR(160) NULL',
+    'baseline_margin_error': 'DOUBLE NULL',
+}
+
+_schema_ready = False
 
 
 def ensure_schema() -> None:
+    global _schema_ready
+    if _schema_ready:
+        return
     conn = db.get_db_connection()
     try:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA)
+            cur.execute(f"SHOW COLUMNS FROM {TABLE}")
+            have = {row[0] for row in cur.fetchall() or []}
+            for name, ddl in _UPGRADE_COLUMNS.items():
+                if name not in have:
+                    cur.execute(f"ALTER TABLE {TABLE} ADD COLUMN {name} {ddl}")
     finally:
         conn.close()
+    _schema_ready = True
 
 
 def record(*, account_id, baseline: dict, report_model: str, report_filename: str,
            home_full: str, away_full: str, season, week=None, game_id=None,
-           game_date=None, now: datetime | None = None) -> None:
-    """File one prediction row. Never raises — reports outrank bookkeeping."""
+           game_date=None, final: dict | None = None,
+           now: datetime | None = None) -> None:
+    """File one prediction row. Never raises — reports outrank bookkeeping.
+
+    `final` is the prediction of record from predict.finalize_prediction — the report
+    model's own adjusted call, or the baseline restated when no FINAL_CALL parsed.
+    Grading runs against it; the baseline columns keep the anchor for comparison.
+    """
     try:
         now = now or datetime.utcnow()
         projection = (baseline or {}).get('projected_score') or {}
+        final = final or {}
         ensure_schema()
         conn = db.get_db_connection()
         try:
@@ -97,9 +141,11 @@ def record(*, account_id, baseline: dict, report_model: str, report_filename: st
                     f"away_full, report_model, report_filename, consensus_margin, "
                     f"ratings_margin, market_margin, market_total, projected_total, "
                     f"projected_home, projected_away, home_win_probability, "
+                    f"final_home, final_away, final_margin, final_total, "
+                    f"final_win_probability, final_source, ats_pick, "
                     f"baseline_json, graded) "
                     f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
-                    f"%s,%s,%s,%s,%s,0)",
+                    f"%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0)",
                     (account_id, now, now.strftime('%Y-%m-%d'), season, week,
                      game_id, game_date,
                      baseline.get('home_team'), baseline.get('away_team'),
@@ -110,13 +156,19 @@ def record(*, account_id, baseline: dict, report_model: str, report_filename: st
                      baseline.get('projected_total'),
                      projection.get('home_score'), projection.get('away_score'),
                      baseline.get('home_win_probability'),
-                     json.dumps(baseline, default=str)),
+                     final.get('home_score'), final.get('away_score'),
+                     final.get('margin'), final.get('total'),
+                     final.get('home_win_probability'), final.get('source'),
+                     (final.get('ats_pick') or {}).get('text'),
+                     json.dumps({**baseline, 'final_call': final}, default=str)),
                 )
         finally:
             conn.close()
         logging.info(f"Prediction recorded: {baseline.get('home_team')} vs "
-                     f"{baseline.get('away_team')} margin "
-                     f"{baseline.get('consensus_margin')} ({report_model})")
+                     f"{baseline.get('away_team')} final margin "
+                     f"{final.get('margin') if final else None} "
+                     f"(baseline {baseline.get('consensus_margin')}, "
+                     f"source {final.get('source') or 'baseline'}, {report_model})")
     except Exception as e:
         logging.warning(f"Prediction record failed (non-fatal): {e}")
 
@@ -176,7 +228,13 @@ def history(season=None, graded_only=False, limit=2000) -> list[dict]:
 # Grading
 # ---------------------------------------------------------------------------
 def _grade_row(row: dict, game: dict) -> dict | None:
-    """The grades for one finished game, or None if it cannot be graded."""
+    """The grades for one finished game, or None if it cannot be graded.
+
+    The prediction of record is the final call (the report model's adjusted number);
+    rows filed before final calls existed fall back to the baseline consensus, which
+    is exactly what they were graded on originally. The baseline error rides along on
+    every row so the audit can show whether the adjustment earns its keep.
+    """
     home_pts, away_pts = game.get('homePoints'), game.get('awayPoints')
     if home_pts is None or away_pts is None:
         return None
@@ -185,33 +243,40 @@ def _grade_row(row: dict, game: dict) -> dict | None:
               'actual_margin': actual_margin}
 
     consensus = row.get('consensus_margin')
-    if consensus is not None:
-        grades['margin_error'] = round(abs(float(consensus) - actual_margin), 2)
-        picked_home = float(consensus) > 0
+    predicted = row.get('final_margin')
+    if predicted is None:
+        predicted = consensus
+    if predicted is not None:
+        grades['margin_error'] = round(abs(float(predicted) - actual_margin), 2)
+        picked_home = float(predicted) > 0
         won_home = actual_margin > 0
         grades['winner_correct'] = 1 if (actual_margin != 0
                                          and picked_home == won_home) else 0
+    if consensus is not None:
+        grades['baseline_margin_error'] = round(abs(float(consensus) - actual_margin), 2)
 
     market = row.get('market_margin')
-    if consensus is not None and market is not None:
-        # The model's side of the spread: home when it projects MORE than the line.
-        if float(consensus) == float(market) or actual_margin == float(market):
+    if predicted is not None and market is not None:
+        # The pick's side of the spread: home when the projection beats the line.
+        if float(predicted) == float(market) or actual_margin == float(market):
             grades['ats_result'] = 'push'
         else:
-            picked_home_ats = float(consensus) > float(market)
+            picked_home_ats = float(predicted) > float(market)
             home_covered = actual_margin > float(market)
             grades['ats_result'] = 'win' if picked_home_ats == home_covered else 'loss'
     else:
         grades['ats_result'] = 'na'
 
-    projected_total = row.get('projected_total')
+    predicted_total = row.get('final_total')
+    if predicted_total is None:
+        predicted_total = row.get('projected_total')
     market_total = row.get('market_total')
     actual_total = int(home_pts) + int(away_pts)
-    if projected_total is not None and market_total is not None:
-        if float(projected_total) == float(market_total) or actual_total == float(market_total):
+    if predicted_total is not None and market_total is not None:
+        if float(predicted_total) == float(market_total) or actual_total == float(market_total):
             grades['total_result'] = 'push'
         else:
-            picked_over = float(projected_total) > float(market_total)
+            picked_over = float(predicted_total) > float(market_total)
             went_over = actual_total > float(market_total)
             grades['total_result'] = 'win' if picked_over == went_over else 'loss'
     else:
@@ -260,11 +325,13 @@ def grade_pending(cfbd_api_key: str, limit: int = 200) -> dict:
             with conn.cursor() as cur:
                 cur.execute(
                     f"UPDATE {TABLE} SET graded=1, actual_home=%s, actual_away=%s, "
-                    f"actual_margin=%s, margin_error=%s, winner_correct=%s, "
+                    f"actual_margin=%s, margin_error=%s, baseline_margin_error=%s, "
+                    f"winner_correct=%s, "
                     f"ats_result=%s, total_result=%s, graded_at=%s, game_id=%s, "
                     f"game_date=%s WHERE id=%s",
                     (grades['actual_home'], grades['actual_away'],
                      grades['actual_margin'], grades.get('margin_error'),
+                     grades.get('baseline_margin_error'),
                      grades.get('winner_correct'), grades.get('ats_result'),
                      grades.get('total_result'), datetime.utcnow(),
                      game.get('id') or row.get('game_id'),
@@ -287,6 +354,19 @@ def _pct(part: int, whole: int):
     return round(part / whole * 100, 1) if whole else None
 
 
+def _baseline_error(row: dict):
+    """The baseline's own margin error for a graded row.
+
+    Rows graded before final calls existed have no baseline_margin_error, but their
+    margin_error WAS the baseline's — that is all that was graded back then.
+    """
+    if row.get('baseline_margin_error') is not None:
+        return float(row['baseline_margin_error'])
+    if row.get('final_margin') is None and row.get('margin_error') is not None:
+        return float(row['margin_error'])
+    return None
+
+
 def _summarise(rows: list[dict]) -> dict:
     graded = [r for r in rows if r.get('graded')]
     winners = [r for r in graded if r.get('winner_correct') is not None]
@@ -294,10 +374,15 @@ def _summarise(rows: list[dict]) -> dict:
     totals = [r for r in graded if r.get('total_result') in ('win', 'loss')]
     errors = [float(r['margin_error']) for r in graded
               if r.get('margin_error') is not None]
+    base_errors = [e for e in (_baseline_error(r) for r in graded) if e is not None]
     return {
         'predictions': len(rows),
         'graded': len(graded),
         'mean_abs_error': round(sum(errors) / len(errors), 2) if errors else None,
+        # The unadjusted anchor's error over the same games — the adjustment earns its
+        # keep only while mean_abs_error stays at or below this.
+        'baseline_mean_abs_error': (round(sum(base_errors) / len(base_errors), 2)
+                                    if base_errors else None),
         'winner_pct': _pct(sum(r['winner_correct'] for r in winners), len(winners)),
         'ats_record': f"{sum(1 for r in ats if r['ats_result'] == 'win')}-"
                       f"{sum(1 for r in ats if r['ats_result'] == 'loss')}",
@@ -360,6 +445,8 @@ def per_game_trajectories(season=None, limit: int = 12) -> list[dict]:
             'actual_margin': latest.get('actual_margin'),
             'runs': [{'run_date': r['run_date'],
                       'consensus_margin': r.get('consensus_margin'),
+                      'final_margin': r.get('final_margin'),
+                      'ats_pick': r.get('ats_pick'),
                       'market_margin': r.get('market_margin'),
                       'projected_total': r.get('projected_total'),
                       'home_win_probability': r.get('home_win_probability'),
