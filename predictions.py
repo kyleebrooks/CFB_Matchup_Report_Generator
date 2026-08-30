@@ -129,6 +129,9 @@ def record(*, account_id, baseline: dict, report_model: str, report_filename: st
     """
     try:
         now = now or datetime.utcnow()
+        # CFBD sends kickoff as an ISO string with a trailing Z, which strict-mode
+        # MySQL rejects as a DATETIME literal — and a rejected INSERT loses the row.
+        game_date = _parse_dt(game_date)
         projection = (baseline or {}).get('projected_score') or {}
         final = final or {}
         ensure_schema()
