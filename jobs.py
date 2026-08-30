@@ -1,9 +1,14 @@
 """In-process job manager for asynchronous report generation.
 
-State lives in memory, which is correct for this deployment: the systemd unit runs
-Gunicorn with --workers 1 --threads 8, so every request hits the same process. If the
-worker count is ever raised above 1, this needs to move to Redis or the database, and
-the Rotowire scheduler would double-fire too.
+Live state stays in memory — the systemd unit runs Gunicorn with --workers 1
+--threads 8, so every request hits the same process; raising the worker count
+above 1 still requires moving the RUNNING state out of process. What no longer
+dies with the process is the queue itself: submissions carrying a `persist` spec
+are mirrored to the report_jobs table (see job_store), and resume_pending(),
+called at boot, reloads whatever was queued or running when the last process
+stopped and resubmits it under the same job id. A deploy or crash costs at most
+the progress of the builds that were mid-flight — they start over, they are not
+lost — and finished jobs stay pollable across restarts through the same table.
 
 Jobs are addressable two ways: by job_id (the multi-tenant /v1 API) and by a
 deduplication key (the legacy AFPLNA flow, keyed by matchup so a double-click on
@@ -68,10 +73,20 @@ class JobManager:
                 self._jobs.pop(job["key"], None)
 
     def _set(self, job_id: str, **fields):
+        mirror = False
         with self._lock:
             job = self._by_id.get(job_id)
             if job:
                 job.update(fields)
+                mirror = bool(job.get("persisted"))
+        # The durable copy is written outside the lock: a slow database write must
+        # not stall every other job's progress updates.
+        if mirror:
+            try:
+                import job_store
+                job_store.update_fields(job_id, fields)
+            except Exception as e:
+                logging.debug(f"Job mirror update failed (non-fatal): {e}")
 
     # -- public API -------------------------------------------------------
     def submit(
@@ -81,11 +96,19 @@ class JobManager:
         runner=None,
         key: str | None = None,
         meta: dict | None = None,
+        persist: dict | None = None,
+        resume_job_id: str | None = None,
     ) -> dict:
         """Queue a build. Returns the job snapshot.
 
         When `key` is supplied and a job for that key is already in flight, the existing
         job is returned instead of starting a duplicate.
+
+        `persist` files the job in the durable queue so a restart resubmits it:
+        {'kind': 'legacy'|'report'|'podcast', 'raw_params': <JSON-safe request>,
+        'usage_row_id': <usage row or None>}. `resume_job_id` is the resume path
+        itself — the row already exists, so the job re-enters under its old id and
+        only mirrors updates.
         """
         if key is None and "home_short" in params and "away_short" in params:
             key = job_key(params["home_short"], params["away_short"])
@@ -101,7 +124,7 @@ class JobManager:
                 return snapshot
 
             job = {
-                "job_id": uuid.uuid4().hex[:12],
+                "job_id": resume_job_id or uuid.uuid4().hex[:12],
                 "key": key,
                 "state": "queued",
                 "stage": "queued",
@@ -116,11 +139,27 @@ class JobManager:
                 "result": None,
                 "error": None,
                 "detail": None,
+                "persisted": bool(resume_job_id),
             }
             job.update(meta or {})
             self._by_id[job["job_id"]] = job
             if key:
                 self._jobs[key] = job
+
+        # File the durable row before the worker can touch the job, so every state
+        # change from here on lands in both places. Fail-soft: with the store down
+        # the job still runs, it just will not survive a restart.
+        if persist and not resume_job_id:
+            try:
+                import job_store
+                stored = job_store.save_new(job, **persist)
+            except Exception as e:
+                logging.warning(f"Job persistence failed (non-fatal): {e}")
+                stored = False
+            with self._lock:
+                job["persisted"] = stored
+
+        with self._lock:
             snapshot = dict(job)
 
         self._pool.submit(self._run, job["job_id"], params, runner or _default_runner)
@@ -168,16 +207,42 @@ class JobManager:
     def get(self, home_short: str, away_short: str) -> dict | None:
         with self._lock:
             job = self._jobs.get(job_key(home_short, away_short))
-            return dict(job) if job else None
+            if job:
+                return dict(job)
+        # Not in this process's lifetime — the durable queue may still know it.
+        try:
+            import job_store
+            return job_store.latest_for_key(job_key(home_short, away_short))
+        except Exception:
+            return None
 
     def get_by_id(self, job_id: str) -> dict | None:
         with self._lock:
             job = self._by_id.get(job_id)
-            return dict(job) if job else None
+            if job:
+                return dict(job)
+        # A poll that outlived a restart: answer from the durable queue, so the
+        # client sees the job's real fate instead of "not found".
+        try:
+            import job_store
+            return job_store.load(job_id)
+        except Exception:
+            return None
 
     def for_account(self, account_id: int) -> list[dict]:
         with self._lock:
-            return [dict(j) for j in self._by_id.values() if j.get("account_id") == account_id]
+            mine = [dict(j) for j in self._by_id.values()
+                    if j.get("account_id") == account_id]
+        seen = {j["job_id"] for j in mine}
+        # Jobs from before the last restart live only in the durable queue; the
+        # in-memory copy wins for anything currently alive.
+        try:
+            import job_store
+            mine.extend(j for j in job_store.for_account(account_id)
+                        if j["job_id"] not in seen)
+        except Exception:
+            pass
+        return mine
 
     def snapshot_all(self) -> list[dict]:
         with self._lock:
@@ -185,6 +250,12 @@ class JobManager:
 
 
 manager = JobManager()
+
+
+def resume_pending() -> dict:
+    """Reload jobs interrupted by the last shutdown. Called once at boot."""
+    import job_store
+    return job_store.resume_pending(manager)
 
 
 def public_view(job: dict) -> dict:

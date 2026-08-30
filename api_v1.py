@@ -168,6 +168,9 @@ def create_report():
         params = spec['validate'](data)
     except report_types.ValidationError as e:
         return _error(str(e), 400, required_params=spec['required'])
+    # The validated request, before settings/paths are layered on: what the durable
+    # queue stores, and what a resume re-validates and re-decorates from scratch.
+    raw_params = dict(params)
 
     tier = (str(data.get('tier') or 'standard')).strip().lower()
     if tier not in ('standard', 'premium'):
@@ -219,6 +222,8 @@ def create_report():
             'tier': tier,
             'subject': subject,
         },
+        persist={'kind': 'report', 'raw_params': raw_params,
+                 'usage_row_id': usage_row},
     )
     usage.attach_job(usage_row, job['job_id'])
     if job.get('deduplicated'):
@@ -287,7 +292,8 @@ def report_download(job_id):
 @bp.route('/reports', methods=['GET'])
 @require_account
 def list_reports():
-    """Jobs this account has run during the current service lifetime."""
+    """This account's jobs: everything live now, plus recent ones from the durable
+    queue — so the list, like the jobs themselves, survives a service restart."""
     mine = jobs.manager.for_account(request.account['id'])
     mine.sort(key=lambda j: j['created_at'], reverse=True)
     return jsonify({'reports': [jobs.public_view(j) for j in mine], 'count': len(mine)}), 200
@@ -613,6 +619,8 @@ def create_podcast():
         key=f"acct{account['id']}:podcast:{digest}",
         meta={'account_id': account['id'], 'report_type': 'podcast',
               'subject': title or 'podcast episode'},
+        persist={'kind': 'podcast', 'raw_params': params,
+                 'usage_row_id': usage_row},
     )
     status = 200 if job.get('deduplicated') else 202
     return jsonify({'job_id': job['job_id'], 'state': job['state'],

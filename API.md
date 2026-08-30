@@ -117,7 +117,8 @@ On failure, `error` carries the summary and `detail` the actionable specifics.
 Returns the PDF (`application/pdf`). `409` if not finished, `410` if the file has been swept.
 
 ### `GET /v1/reports`
-Jobs your account has run during the current service lifetime (in-memory; cleared on restart).
+Jobs your account has run: everything live now plus recent history from the durable
+queue (jobs survive restarts; finished rows stay listed for about a week).
 
 ---
 

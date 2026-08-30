@@ -266,6 +266,7 @@ def _submit(account: dict, report_type: str, raw_params: dict) -> dict:
 
     spec = report_types.get(report_type)
     params = spec['validate'](raw_params)
+    raw_validated = dict(params)     # what the durable queue stores for a resume
     params['settings'] = accounts.effective_settings(account)
     params['watermark'] = accounts.watermark_path(account)
     params['report_dir'] = reports_store.account_dir(account['id'])
@@ -287,7 +288,9 @@ def _submit(account: dict, report_type: str, raw_params: dict) -> dict:
         params, runner=tracked,
         key=f"acct{account['id']}:{spec['dedup_key'](params)}",
         meta={'account_id': account['id'], 'report_type': report_type,
-              'subject': subject, 'scheduled': True})
+              'subject': subject, 'scheduled': True},
+        persist={'kind': 'report', 'raw_params': raw_validated,
+                 'usage_row_id': usage_row})
     usage.attach_job(usage_row, job['job_id'])
     if job.get('deduplicated'):
         usage.mark_complete(usage_row, 'duplicate')

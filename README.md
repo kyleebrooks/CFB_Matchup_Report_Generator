@@ -410,9 +410,10 @@ GET  /report-status?home_team=…  -> {"state":"running","percent":58,
                                  -> {"state":"error","error":…,"detail":…}
 ```
 
-`state` is `queued`, `running`, `done`, `error`, or `none` (nothing queued this process
-lifetime). `report_exists` always reflects what is on disk, so the UI can offer a
-download even after a restart cleared the job table.
+`state` is `queued`, `running`, `done`, `error`, or `none` (nothing known for this
+matchup). Jobs are mirrored to a durable queue: a restart resumes interrupted builds
+under the same ids, and finished jobs stay queryable for about a week.
+`report_exists` always reflects what is on disk.
 
 Notes:
 - Posting twice for the same matchup while a build is in flight returns the **existing**

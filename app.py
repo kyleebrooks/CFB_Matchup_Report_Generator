@@ -101,6 +101,17 @@ if (os.environ.get("SCHEDULES_ENABLED", "1") not in ("0", "false", "no")
     import schedules
     schedules.start()
 
+# Reload whatever the last process left queued or running, under the same job ids,
+# so builds — and the consoles polling them — survive a deploy or crash. Gated the
+# same way as the scheduler: the admin console's in-process health probe must
+# never restart report builds. JOBS_RESUME_ENABLED=0 turns it off.
+if (os.environ.get("JOBS_RESUME_ENABLED", "1") not in ("0", "false", "no")
+        and os.environ.get("SKIP_SCHEDULER") != "1"):
+    try:
+        jobs.resume_pending()
+    except Exception:
+        logging.exception("Job-queue resume failed; starting with an empty queue")
+
 
 # ---------------------------
 # Helpers
@@ -214,7 +225,9 @@ def generate_report():
             return jsonify({"error": e.message, "detail": e.detail}), e.status
         return jsonify({"message": "Report generated successfully", **result}), 200
 
-    job = jobs.manager.submit(params)
+    job = jobs.manager.submit(
+        params, persist={'kind': 'legacy', 'raw_params': params,
+                         'usage_row_id': None})
     view = jobs.public_view(job)
     view["message"] = "Report generation started. Poll /report-status for progress."
     return jsonify(view), 202
