@@ -810,6 +810,57 @@ def _week_around(weeks: list[dict], now) -> int | None:
     return len(weeks) - 1
 
 
+_SEASON_TYPE_ORDER = {"regular": 0, "postseason": 1}
+
+
+def ap_top25(api_key: str, year: int, errors: list | None = None,
+             week: int | None = None, season_type: str | None = None) -> dict:
+    """{school: rank} from the season's AP Top 25 poll in effect for `week`.
+
+    That week's own poll when one exists, else the latest earlier one — a future
+    week has no poll yet, and in August only the preseason poll (filed under week
+    1) is out. Empty when the season has no AP poll at all.
+    """
+    rows = _get(api_key, "/rankings", {"year": year}, "AP Top 25", errors) or []
+    target = ((_SEASON_TYPE_ORDER.get(season_type, 0), week)
+              if week is not None else None)
+    best_key, best_poll = None, None
+    for entry in rows:
+        ap = next((p for p in entry.get("polls") or []
+                   if "AP" in (p.get("poll") or "")), None)
+        if not ap:
+            continue
+        key = (_SEASON_TYPE_ORDER.get(entry.get("seasonType"), 0),
+               entry.get("week") or 0)
+        if target is not None and key > target:
+            continue
+        if best_key is None or key >= best_key:
+            best_key, best_poll = key, ap
+    return {r.get("school"): r.get("rank")
+            for r in (best_poll or {}).get("ranks") or [] if r.get("school")}
+
+
+def apply_rankings(rows: list[dict], ranks: dict, *, newest_first=False) -> None:
+    """Stamp AP ranks onto game rows and float ranked games to the top, in place.
+
+    Within each week, games with a Top 25 side lead, ordered by their best-ranked
+    team (#1 first); the sort is stable, so unranked games keep the kickoff order
+    they already had. `newest_first` keeps a finals list's newest-week-first shape.
+    """
+    for r in rows:
+        r["home_rank"] = ranks.get(r["home"])
+        r["away_rank"] = ranks.get(r["away"])
+
+    def key(r):
+        wk = (_SEASON_TYPE_ORDER.get(r.get("season_type"), 0), r.get("week") or 0)
+        if newest_first:
+            wk = (-wk[0], -wk[1])
+        best = min((x for x in (r["home_rank"], r["away_rank"]) if x), default=None)
+        return (wk, 0 if best else 1, best or 0)
+
+    rows.sort(key=key)
+
+
 def schedule_windows(api_key: str, now=None) -> dict:
     """The default picker feed: upcoming games and recent finals around today.
 
@@ -844,6 +895,13 @@ def schedule_windows(api_key: str, now=None) -> dict:
                     upcoming.append(row)
         upcoming.sort(key=lambda r: (r["start"] or "", r["home"]))
         recent.sort(key=lambda r: (r["start"] or "", r["home"]), reverse=True)
+        # The picker leads with the games that matter: within each week, anything
+        # with an AP Top 25 side floats up, ordered #1 through #25.
+        ranks = ap_top25(api_key, year, errors,
+                         week=weeks[current]["week"],
+                         season_type=weeks[current]["season_type"])
+        apply_rankings(upcoming, ranks)
+        apply_rankings(recent, ranks, newest_first=True)
 
     return {
         "season": year,
@@ -887,6 +945,9 @@ def week_games(api_key: str, year: int, week: int | None = None,
     upcoming = [r for r in rows if not r["completed"]]
     recent = sorted((r for r in rows if r["completed"]),
                     key=lambda r: (r["start"] or "", r["home"]), reverse=True)
+    ranks = ap_top25(api_key, year, errors, week=week, season_type=season_type)
+    apply_rankings(upcoming, ranks)
+    apply_rankings(recent, ranks, newest_first=True)
 
     current = _week_around(weeks, now) if year == season_year(now) else None
     return {
