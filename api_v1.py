@@ -424,6 +424,10 @@ def list_games():
     include the season's `weeks` list and the `current` week, so a client can build
     its year/week selectors from the response alone. Cached for ten minutes per
     distinct selection.
+
+    Ordering: within each week, games with an AP Top 25 side come first, #1 through
+    #25 by the better-ranked team; unranked games follow in kickoff order. Every row
+    carries `home_rank` and `away_rank` (null when unranked) for display.
     """
     global _GAMES_CACHE
     year = request.args.get('year', type=int)
